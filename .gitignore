@@ -24,9 +24,9 @@ checkpoints/
 *.pt
 !tests/**/*.pt
 
-# data
-data/
-!data/.gitkeep
+# data (anchored: only the downloaded blob dirs under external/, NOT src/rmg/data/)
+/external/data/
+/data/
 *.zip
 *.tar
 *.tar.gz
