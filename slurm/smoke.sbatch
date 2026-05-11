@@ -17,11 +17,16 @@
 
 set -euo pipefail
 
-IMAGE="${HOME}/rmg.sqsh"
-REPO="${HOME}/rmg"          # path to this checkout on /mnt/home
-HF_CACHE="${HOME}/hf-cache" # cluster-resident HF cache
+# Auto-derive REPO from this script's location (slurm/smoke.sbatch → <repo>).
+# Override with `REPO=/path/to/repo sbatch slurm/smoke.sbatch` if needed.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+REPO="${REPO:-$(dirname "${SCRIPT_DIR}")}"
 
-mkdir -p slurm/logs
+IMAGE="${IMAGE:-${HOME}/rmg.sqsh}"
+HF_CACHE="${HF_CACHE:-${HOME}/hf-cache}"
+
+mkdir -p "${REPO}/slurm/logs"
+cd "${REPO}"
 
 enroot start \
     --rw \

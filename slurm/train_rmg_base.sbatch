@@ -21,8 +21,9 @@
 set -euo pipefail
 mkdir -p slurm/logs
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+REPO="${REPO:-$(dirname "${SCRIPT_DIR}")}"
 IMAGE="${IMAGE:-${HOME}/rmg.sqsh}"
-REPO="${REPO:-${HOME}/rmg}"
 RUN_NAME="${RUN_NAME:-rmg-base-${SLURM_JOB_ID:-$(date +%Y%m%d-%H%M%S)}}"
 RUNS_ROOT="${RUNS_ROOT:-${HOME}/rmg-runs}"
 HF_CACHE="${HF_CACHE:-${HOME}/hf-cache}"

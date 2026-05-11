@@ -21,8 +21,9 @@ set -euo pipefail
 mkdir -p slurm/logs
 
 CKPT="${CKPT:-${1:?set CKPT env var or pass as first positional arg}}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+REPO="${REPO:-$(dirname "${SCRIPT_DIR}")}"
 IMAGE="${IMAGE:-${HOME}/rmg.sqsh}"
-REPO="${REPO:-${HOME}/rmg}"
 HF_CACHE="${HF_CACHE:-${HOME}/hf-cache}"
 PRESET="${PRESET:-rmg_base}"
 MODEL_PRESET="${MODEL_PRESET:-dit_base}"
