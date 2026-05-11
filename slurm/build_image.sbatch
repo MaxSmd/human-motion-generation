@@ -48,19 +48,23 @@ enroot start --root --rw \
             git+https://github.com/nghorbani/human_body_prior.git
         # spaCy English model (eval-time text preprocessing for Guo evaluator)
         python -m spacy download en_core_web_sm
-        # Validate
+        # Validate. Use getattr fallback because some packages (roma, smplx)
+        # don't expose __version__ — and we don't want a missing attribute to
+        # kill the build right before enroot export.
         python - <<'PY'
-import torch, transformers, roma, spacy, smplx
-print('torch     ', torch.__version__, 'cuda?', torch.cuda.is_available())
+def v(mod):
+    return getattr(mod, '__version__', '?')
+
+import torch, transformers, roma, spacy, smplx, human_body_prior
+print('torch       ', v(torch), 'cuda?', torch.cuda.is_available())
 if torch.cuda.is_available():
-    print('gpu       ', torch.cuda.get_device_name(0))
-print('transformers', transformers.__version__)
-print('roma      ', roma.__version__)
-print('spacy     ', spacy.__version__)
-print('smplx     ', smplx.__version__)
-print('hbp:')
-import human_body_prior
-print('  module path', human_body_prior.__file__)
+    print('gpu         ', torch.cuda.get_device_name(0))
+assert torch.cuda.is_available(), 'CUDA not available — base image torch was downgraded'
+print('transformers', v(transformers))
+print('roma        ', v(roma))
+print('spacy       ', v(spacy))
+print('smplx       ', v(smplx))
+print('hbp         ', v(human_body_prior), 'at', human_body_prior.__file__)
 PY
     "
 
