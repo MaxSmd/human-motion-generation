@@ -19,8 +19,14 @@ set -euo pipefail
 
 # Auto-derive REPO from this script's location (slurm/smoke.sbatch → <repo>).
 # Override with `REPO=/path/to/repo sbatch slurm/smoke.sbatch` if needed.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
-REPO="${REPO:-$(dirname "${SCRIPT_DIR}")}"
+# Use SLURM_SUBMIT_DIR when run under sbatch (script is spooled, BASH_SOURCE
+# doesn't resolve to the repo). Fall back to BASH_SOURCE for direct runs.
+if [ -n "${SLURM_SUBMIT_DIR:-}" ]; then
+    REPO="${REPO:-${SLURM_SUBMIT_DIR}}"
+else
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+    REPO="${REPO:-$(dirname "${SCRIPT_DIR}")}"
+fi
 
 IMAGE="${IMAGE:-${HOME}/rmg.sqsh}"
 HF_CACHE="${HF_CACHE:-${HOME}/hf-cache}"
