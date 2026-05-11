@@ -1,0 +1,13 @@
+# RMG (full) DiT (paper Table 7 right column).
+# Effective config: 24L / 1024h / 8H / FFN×4, ~91 → 91, max_seq_len=200.
+# This is the paper's main reported model (FID 0.043 on HumanML3D).
+
+name: dit_large
+input_dim: 91
+hidden_dim: 1024
+depth: 24
+num_heads: 8
+ffn_mult: 4
+text_dim: 1024
+time_freq_dim: 256
+max_seq_len: 200

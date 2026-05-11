@@ -1,0 +1,18 @@
+# Ablation dT+R (Figure 3b): temporal-difference of translation + absolute rotations.
+#
+# *** STUB CONFIG — NOT WIRED END-TO-END ***
+#
+# Paper finding (Figure 3b): degrades steadily with guidance scale (0.14 → 0.75)
+# — strictly worse than the absolute-T form. We don't reproduce this ablation
+# end-to-end because:
+#   (a) it requires a data-side temporal-difference transform on the translation
+#       channel + an integration step at sampling time;
+#   (b) it's a documented negative result that does not affect the main thesis.
+#
+# To enable it, you would need to:
+#   1. Compute dT_t = T_{t+1} - T_t at dataset prep time (or on-the-fly);
+#   2. Define a representation class that handles the dT factor + integration;
+#   3. Adjust the prior to a velocity-friendly Gaussian.
+
+name: dt_plus_r          # NOT in the registry — `build_representation` will error
+num_joints: 22

@@ -1,0 +1,12 @@
+# Ablation T+dR (Figure 3b): absolute translation + temporal-difference of rotations.
+#
+# *** STUB CONFIG — NOT WIRED END-TO-END ***
+#
+# Paper finding (Figure 3b): least stable of the three — FID 0.44 → 1.03 across
+# the guidance sweep. As with `dt_plus_r`, this is a negative result that
+# would require data-side temporal-diff handling for rotations (computing
+# `Log_{q_t}(q_{t+1})` per joint at preprocess time and integrating at
+# sampling time). We document the variant but don't implement it end-to-end.
+
+name: t_plus_dr          # NOT in the registry — `build_representation` will error
+num_joints: 22

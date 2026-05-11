@@ -1,0 +1,5 @@
+# Default representation: T + R (translation + per-joint rotations on (S^3)^J).
+# Paper §3.1 main result. Ambient dim = 3 + 4 * 22 = 91.
+
+name: tr
+num_joints: 22

@@ -1,0 +1,12 @@
+# RMG-base DiT (paper Table 7 left column).
+# Effective config: 6L / 384h / 8H / FFN×8, ~91 → 91, max_seq_len=200.
+
+name: dit_base
+input_dim: 91
+hidden_dim: 384
+depth: 6
+num_heads: 8
+ffn_mult: 8
+text_dim: 1024
+time_freq_dim: 256
+max_seq_len: 200

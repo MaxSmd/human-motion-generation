@@ -1,0 +1,9 @@
+# Ablation T+P (Figure 3a): translation + Kendall pre-shape (no rotations).
+# Manifold: R^3 × S^J_3.
+# Ambient dim = 3 + 3 * 22 = 69.
+#
+# Paper finding: degrades monotonically with guidance scale (FID 0.20 → 0.44
+# across ω∈[2.5, 9.5]). Included for completeness.
+
+name: tp
+num_joints: 22

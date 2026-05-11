@@ -1,0 +1,47 @@
+# Top-level Hydra config for `python scripts/train.py`.
+#
+# Compose with model + data + train sub-configs:
+#   python scripts/train.py +model=dit_base +train=rmg_base
+#
+# Override any leaf value at the CLI:
+#   python scripts/train.py +model=dit_base +train=rmg_base train.max_steps=10
+#
+# Switch data layout once AMASS lands on the cluster:
+#   python scripts/train.py +data=cluster_mounted ...
+
+defaults:
+  - data: local_submodule
+  - model: dit_base
+  - train: rmg_base
+  - representation: t_plus_r
+  - _self_
+
+run_name: rmg-${model.name}-${now:%Y%m%d-%H%M%S}
+output_dir: ${oc.env:RMG_RUNS_DIR,${hydra:runtime.cwd}/runs}/${run_name}
+seed: 0
+deterministic: false
+
+# Text encoder. `random` for local smoke runs (no transformers needed), `qwen3`
+# inside the cluster container.
+text_encoder:
+  type: random          # random | qwen3
+  text_dim: 1024
+  model_name: Qwen/Qwen3-Embedding-0.6B
+  cache_dir: ${oc.env:HF_HOME,${oc.env:HOME}/.cache/huggingface}
+  max_length: 256
+
+logging:
+  use_wandb: true
+  use_tensorboard: true
+  wandb_project: rmg
+  wandb_mode: ${oc.env:WANDB_MODE,offline}
+  wandb_entity: ${oc.env:WANDB_ENTITY,null}
+
+# Hydra knobs
+hydra:
+  run:
+    dir: ${output_dir}
+  sweep:
+    dir: ${output_dir}
+  job:
+    chdir: false

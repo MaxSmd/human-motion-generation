@@ -1,0 +1,6 @@
+[submodule "external/HumanML3D"]
+	path = external/HumanML3D
+	url = https://github.com/EricGuo5513/HumanML3D.git
+[submodule "external/text-to-motion"]
+	path = external/text-to-motion
+	url = https://github.com/EricGuo5513/text-to-motion.git

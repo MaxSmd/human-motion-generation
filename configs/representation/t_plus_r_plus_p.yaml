@@ -1,0 +1,15 @@
+# Ablation T+R+P (Figure 3a): translation + rotations + pre-shape.
+# Manifold: R^3 × (S^3)^J × S^J_3.
+# Ambient dim = 3 + 4*22 + 3*22 = 157.
+#
+# Two H3D-format recovery variants (used at evaluation time):
+#   decode_via=rotation : run FK from R, ignore P  (paper's "Recovered by R"; Figure 3a top)
+#   decode_via=preshape : rescale P to skeleton size, ignore R  (paper's "Recovered by P")
+#
+# Paper finding (Figure 3a): with `decode_via=rotation` the curve nearly
+# matches T+R; with `decode_via=preshape` it degrades more steeply with
+# guidance — confirming rotations carry the load.
+
+name: trp
+num_joints: 22
+decode_via: rotation     # rotation | preshape

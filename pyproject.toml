@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rmg"
+version = "0.0.1"
+description = "Riemannian Motion Generation"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.4",
+    "numpy",
+    "roma",
+    "einops",
+    "scipy",
+    "h5py",
+    "tqdm",
+    "matplotlib",
+    "hydra-core",
+    "omegaconf",
+    "transformers",
+    "accelerate",
+    "huggingface_hub",
+    "wandb",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-xdist", "ruff", "mypy"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"

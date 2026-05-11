@@ -1,0 +1,40 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+.venv/
+.env
+.envrc
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+
+# experiment outputs
+runs/
+outputs/
+wandb/
+lightning_logs/
+checkpoints/
+*.ckpt
+*.pt
+!tests/**/*.pt
+
+# data
+data/
+!data/.gitkeep
+*.zip
+*.tar
+*.tar.gz
+*.npz
+*.h5
+*.sqsh
+
+# editor / OS
+.vscode/
+.idea/
+.DS_Store
