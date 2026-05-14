@@ -171,7 +171,11 @@ class HumanML3DDataset(Dataset):
             raw = zf.read(f"{clip_id}.pt")
         except KeyError as e:
             raise KeyError(f"clip {clip_id!r} listed in splits but not in zip") from e
-        blob = torch.load(io.BytesIO(raw), weights_only=True)
+        # weights_only=False because the blob is a dict with both tensors AND
+        # a list[str] for texts; torch>=2.6's strict weights_only mode rejects
+        # the tensor-storage persistent-ids in mixed blobs. Safe here because
+        # we produce these files ourselves in `prepare_humanml3d.py pack`.
+        blob = torch.load(io.BytesIO(raw), weights_only=False)
         translation: Tensor = blob["translation"]    # (T, 3) float
         quats: Tensor = blob["quats"]                # (T, 22, 4)
         texts: list[str] = blob["texts"]

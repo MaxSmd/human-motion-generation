@@ -104,6 +104,11 @@ def stage_raw_pose(
             print(f"[warn] missing AMASS subset {subset} at {d}", file=sys.stderr)
             continue
         for npz in d.rglob("*.npz"):
+            # `shape.npz` files ship per-subject calibration (betas, etc.) — not
+            # motion. They have no `mocap_framerate` and aren't referenced by
+            # HumanML3D's index.csv. Skip them at scan time to keep the log clean.
+            if npz.name == "shape.npz":
+                continue
             paths.append(npz)
     print(f"[stage_raw_pose] found {len(paths)} AMASS files")
 

@@ -81,7 +81,7 @@ with zipfile.ZipFile(zp) as zf:
     names = zf.namelist()
     print(f'total clips in zip: {len(names)}')
     sample_name = names[0]
-    blob = torch.load(io.BytesIO(zf.read(sample_name)), weights_only=True)
+    blob = torch.load(io.BytesIO(zf.read(sample_name)), weights_only=False)
     print(f'sample: {sample_name}')
     print(f'  translation: {blob[\\\"translation\\\"].shape}')
     print(f'  quats:       {blob[\\\"quats\\\"].shape}')
