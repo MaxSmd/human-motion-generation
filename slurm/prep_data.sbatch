@@ -32,7 +32,10 @@ fi
 
 IMAGE="${IMAGE:-${HOME}/rmg.sqsh}"
 HF_CACHE="${HF_CACHE:-${HOME}/hf-cache}"
-JOINTS_DIR="${JOINTS_DIR:-/tmp/joints-${SLURM_JOB_ID:-prep}}"
+# Persistent default: survives across job submissions, so if Stage 2 ever
+# fails we don't redo Stage 1's ~30 min GPU compute. Override with
+# JOINTS_DIR=/tmp/... if you want speed and accept losing it on job exit.
+JOINTS_DIR="${JOINTS_DIR:-${REPO}/external/data/joints_cache}"
 
 cd "${REPO}"
 

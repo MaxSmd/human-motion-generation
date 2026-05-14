@@ -166,7 +166,18 @@ def stage_raw_pose(
 
 
 def _import_upstream_skeleton(humanml3d_repo: Path):
-    """Vendor the HumanML3D Skeleton/IK at runtime (avoids re-implementing IK)."""
+    """Vendor the HumanML3D Skeleton/IK at runtime (avoids re-implementing IK).
+
+    The upstream code was written against numpy <1.20 and uses removed aliases
+    like ``np.float``. We polyfill those before import so it works on the
+    container's modern numpy without forking the submodule.
+    """
+    # Polyfill removed numpy scalar aliases.
+    for alias, target in (("float", float), ("int", int), ("bool", bool),
+                          ("object", object), ("str", str), ("long", int),
+                          ("complex", complex)):
+        if not hasattr(np, alias):
+            setattr(np, alias, target)
     sys.path.insert(0, str(humanml3d_repo))
     from common.skeleton import Skeleton
     from paramUtil import t2m_kinematic_chain, t2m_raw_offsets
