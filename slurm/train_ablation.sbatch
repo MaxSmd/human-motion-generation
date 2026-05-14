@@ -4,7 +4,7 @@
 #SBATCH --qos=students_normal
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
-#SBATCH --time=72:00:00
+#SBATCH --time=23:55:00
 #SBATCH --signal=B:USR1@120
 #SBATCH --output=slurm/logs/rmg-ablation-%j.out
 #SBATCH --error=slurm/logs/rmg-ablation-%j.err
