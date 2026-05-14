@@ -107,8 +107,16 @@ def stage_raw_pose(
             paths.append(npz)
     print(f"[stage_raw_pose] found {len(paths)} AMASS files")
 
+    n_skipped = 0
     for npz in tqdm(paths, desc="raw_pose"):
         try:
+            rel = npz.relative_to(amass_root).with_suffix(".npy")
+            save_path = out_dir / rel
+            if save_path.exists():
+                # Resume support: skip clips already processed in a prior run.
+                # Lets prep_data.sbatch reruns avoid the ~30-60 min SMPL+H FK.
+                n_skipped += 1
+                continue
             bdata = np.load(npz, allow_pickle=True)
             fps = float(bdata["mocap_framerate"])
             ds = max(int(round(fps / EX_FPS)), 1)
@@ -132,12 +140,12 @@ def stage_raw_pose(
             joints = joints[:, :22]                           # take HumanML3D's 22
             joints = joints @ TRANS_MATRIX                    # Y-up swap
 
-            rel = npz.relative_to(amass_root).with_suffix(".npy")
-            save_path = out_dir / rel
             save_path.parent.mkdir(parents=True, exist_ok=True)
             np.save(save_path, joints)
         except Exception as e:
             print(f"[stage_raw_pose] failed {npz}: {e}", file=sys.stderr)
+    if n_skipped:
+        print(f"[stage_raw_pose] skipped {n_skipped} already-processed AMASS files")
 
     # HumanAct12 pass-through: clips are (T, 24, 3) joint positions already
     # (no SMPL+H needed). Slice to 22 joints to match the AMASS-derived files.
@@ -147,15 +155,22 @@ def stage_raw_pose(
         out_ha12.mkdir(parents=True, exist_ok=True)
         ha12_files = list(ha12_root.glob("*.npy"))
         print(f"[stage_raw_pose] passing through {len(ha12_files)} HumanAct12 clips")
+        n_skipped_ha12 = 0
         for npy in tqdm(ha12_files, desc="humanact12"):
             try:
+                target = out_ha12 / npy.name
+                if target.exists():
+                    n_skipped_ha12 += 1
+                    continue
                 arr = np.load(npy)
                 if arr.ndim == 2:                      # (T, 24*3) → reshape
                     arr = arr.reshape(arr.shape[0], -1, 3)
                 arr = arr[:, :22].astype(np.float32)   # slice to 22 joints
-                np.save(out_ha12 / npy.name, arr)
+                np.save(target, arr)
             except Exception as e:
                 print(f"[stage_raw_pose] humanact12 failed {npy.name}: {e}", file=sys.stderr)
+        if n_skipped_ha12:
+            print(f"[stage_raw_pose] skipped {n_skipped_ha12} already-processed HumanAct12 files")
     else:
         print(f"[stage_raw_pose] no humanact12 at {ha12_root} — skipping pass-through")
 
@@ -168,16 +183,18 @@ def stage_raw_pose(
 def _import_upstream_skeleton(humanml3d_repo: Path):
     """Vendor the HumanML3D Skeleton/IK at runtime (avoids re-implementing IK).
 
-    The upstream code was written against numpy <1.20 and uses removed aliases
-    like ``np.float``. We polyfill those before import so it works on the
-    container's modern numpy without forking the submodule.
+    The upstream code was written against numpy <1.20 and uses ``np.float``,
+    which was removed in numpy 1.24+. Polyfill it before import. Also silence
+    upstream's repeated ``torch.cross`` deprecation warning — it fires once per
+    sample inside IK and floods the log.
     """
-    # Polyfill removed numpy scalar aliases.
-    for alias, target in (("float", float), ("int", int), ("bool", bool),
-                          ("object", object), ("str", str), ("long", int),
-                          ("complex", complex)):
-        if not hasattr(np, alias):
-            setattr(np, alias, target)
+    import warnings
+    if not hasattr(np, "float"):
+        np.float = float
+    warnings.filterwarnings(
+        "ignore",
+        message=r"Using torch\.cross without specifying the dim arg is deprecated.*",
+    )
     sys.path.insert(0, str(humanml3d_repo))
     from common.skeleton import Skeleton
     from paramUtil import t2m_kinematic_chain, t2m_raw_offsets
@@ -278,12 +295,31 @@ def stage_pack(
     output_dir.mkdir(parents=True, exist_ok=True)
     zip_out = output_dir / "humanml3d.zip"
     n_written = 0
+    n_skipped_existing = 0
 
-    print(f"[stage_pack] writing {zip_out}")
-    with zipfile.ZipFile(zip_out, "w", compression=zipfile.ZIP_STORED) as zf:
+    # Resume support: if a prior run was killed mid-pack, append rather than
+    # rewrite. A corrupted (no-central-directory) zip from a hard-killed
+    # process is detected and restarted.
+    existing_ids: set[str] = set()
+    zip_mode = "w"
+    if zip_out.exists():
+        try:
+            with zipfile.ZipFile(zip_out, "r") as zf:
+                existing_ids = {Path(n).stem for n in zf.namelist()}
+            zip_mode = "a"
+            print(f"[stage_pack] resuming: {len(existing_ids)} clips already in {zip_out.name}")
+        except zipfile.BadZipFile:
+            print(f"[stage_pack] {zip_out.name} is corrupted (probably killed mid-write); restarting")
+            zip_out.unlink()
+
+    print(f"[stage_pack] {'appending to' if zip_mode == 'a' else 'writing'} {zip_out}")
+    with zipfile.ZipFile(zip_out, zip_mode, compression=zipfile.ZIP_STORED) as zf:
         index = _read_index_csv(humanml3d_repo / "index.csv")
         for src, start, end, new_name in tqdm(index, desc="pack"):
             clip_id = Path(new_name).stem
+            if clip_id in existing_ids:
+                n_skipped_existing += 1
+                continue
             if clip_id not in all_split_ids:
                 continue  # not part of any split
             src_rel = src.replace("./pose_data/", "")
@@ -318,7 +354,9 @@ def stage_pack(
             zf.writestr(f"{clip_id}.pt", buf.getvalue())
             n_written += 1
 
-    print(f"[stage_pack] wrote {n_written} clips → {zip_out}")
+    print(f"[stage_pack] wrote {n_written} new clips → {zip_out}")
+    if n_skipped_existing:
+        print(f"[stage_pack] skipped {n_skipped_existing} already-packed clips")
 
     # Filter splits to clips actually present
     present = set()
