@@ -48,8 +48,8 @@ enroot start \
         cd ${REPO}
         pip install -e . --no-deps --quiet
         python scripts/train.py \\
-            +model=dit_large \\
-            +train=rmg_large \\
+            model=dit_large \\
+            train=rmg_large \\
             text_encoder.type=qwen3 \\
             run_name='${RUN_NAME}'
     "

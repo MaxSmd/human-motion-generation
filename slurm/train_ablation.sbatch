@@ -52,9 +52,9 @@ enroot start \
         cd ${REPO}
         pip install -e . --no-deps --quiet
         python scripts/train.py \\
-            +model=dit_base \\
-            +train=rmg_base \\
-            +representation=${REPRESENTATION} \\
+            model=dit_base \\
+            train=rmg_base \\
+            representation=${REPRESENTATION} \\
             text_encoder.type=qwen3 \\
             run_name='${RUN_NAME}'
     "
