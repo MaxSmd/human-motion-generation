@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=rmg-eval
 #SBATCH --partition=12g
-#SBATCH --nodelist=frankfurt,hamburg,kessel,leipzig
+#SBATCH --nodelist=frankfurt,hamburg,kassel,leipzig
 #SBATCH --qos=students_normal
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
