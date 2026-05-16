@@ -309,9 +309,15 @@ def main(cfg: DictConfig) -> None:
             )
 
         # ------------------------- checkpoint -------------------------
-        if step % cfg.train.ckpt_every == 0 or step == cfg.train.max_steps:
-            ckpt_path = output_dir / "checkpoints" / f"ckpt-{step:09d}.pt"
-            save_checkpoint(ckpt_path, TrainState(
+        # latest.pt updates much more often than the numbered checkpoints so
+        # that a 24h wallclock kill loses at most a few hundred steps. The
+        # numbered ckpt-*.pt files are durable history for analysis / rollback.
+        latest_every = max(1, int(cfg.train.ckpt_every) // 10)
+        save_latest = step % latest_every == 0 or step == cfg.train.max_steps
+        save_numbered = step % cfg.train.ckpt_every == 0 or step == cfg.train.max_steps
+
+        if save_latest or save_numbered:
+            state_dict_payload = TrainState(
                 step=step,
                 model=model.state_dict(),
                 ema=ema.state_dict(),
@@ -320,19 +326,17 @@ def main(cfg: DictConfig) -> None:
                 scaler=scaler.state_dict() if scaler is not None else None,
                 rng=collect_rng_state(),
                 extras={"wandb_run_id": logger.wandb_run_id},
-            ))
-            # also write a "latest" pointer for ergonomic resume
-            latest_path = output_dir / "checkpoints" / "latest.pt"
-            save_checkpoint(latest_path, TrainState(
-                step=step,
-                model=model.state_dict(),
-                ema=ema.state_dict(),
-                optimizer=opt.state_dict(),
-                scheduler=sched.state_dict(),
-                scaler=scaler.state_dict() if scaler is not None else None,
-                rng=collect_rng_state(),
-                extras={"wandb_run_id": logger.wandb_run_id},
-            ))
+            )
+            if save_numbered:
+                save_checkpoint(
+                    output_dir / "checkpoints" / f"ckpt-{step:09d}.pt",
+                    state_dict_payload,
+                )
+            if save_latest:
+                save_checkpoint(
+                    output_dir / "checkpoints" / "latest.pt",
+                    state_dict_payload,
+                )
 
         # ------------------------- periodic samples -------------------------
         if step % cfg.train.sample_every == 0:

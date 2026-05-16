@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=rmg-eval
-#SBATCH --partition=24g
+#SBATCH --partition=12g
 #SBATCH --qos=students_normal
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -47,8 +47,8 @@ enroot start \
         pip install -e . --no-deps --quiet
         python -m spacy download en_core_web_sm --quiet || true
         python scripts/evaluate.py \\
-            +model=${MODEL_PRESET} \\
-            +train=${PRESET} \\
+            model=${MODEL_PRESET} \\
+            train=${PRESET} \\
             text_encoder.type=qwen3 \\
             eval.checkpoint=${CKPT} \\
             eval.evaluator=real \\

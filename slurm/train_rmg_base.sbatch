@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=rmg-base
-#SBATCH --partition=24g
+#SBATCH --partition=12g
 #SBATCH --qos=students_normal
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1

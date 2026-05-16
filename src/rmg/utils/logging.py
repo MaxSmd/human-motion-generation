@@ -82,12 +82,15 @@ class Logger:
         flat = {k: float(v) if hasattr(v, "item") else v for k, v in metrics.items()}
         flat["step"] = step
 
-        # CSV
+        # CSV — append on resume rather than truncate.
         if self._csv_keys is None:
             self._csv_keys = list(flat.keys())
-            self._csv_fh = open(self._csv_path, "w", newline="")
+            resuming = self._csv_path.exists() and self._csv_path.stat().st_size > 0
+            mode = "a" if resuming else "w"
+            self._csv_fh = open(self._csv_path, mode, newline="")
             self._csv_writer = csv.DictWriter(self._csv_fh, fieldnames=self._csv_keys)
-            self._csv_writer.writeheader()
+            if not resuming:
+                self._csv_writer.writeheader()
         else:
             for k in flat:
                 if k not in self._csv_keys:
