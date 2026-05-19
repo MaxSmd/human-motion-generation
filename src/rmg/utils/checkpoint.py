@@ -43,11 +43,28 @@ def collect_rng_state() -> dict:
 
 
 def restore_rng_state(state: dict) -> None:
+    """Restore RNG states from a checkpoint payload.
+
+    Defensive against `torch.load(..., map_location='cuda')` moving the saved
+    CPU ByteTensors to GPU — `torch.set_rng_state` and `torch.cuda.set_rng_state_all`
+    both require the input to be a CPU ByteTensor.
+    """
     random.setstate(state["python"])
     np.random.set_state(state["numpy"])
-    torch.set_rng_state(state["torch_cpu"])
+
+    torch_cpu = state["torch_cpu"]
+    if isinstance(torch_cpu, torch.Tensor):
+        torch_cpu = torch_cpu.to(device="cpu", dtype=torch.uint8)
+    torch.set_rng_state(torch_cpu)
+
     if torch.cuda.is_available() and "torch_cuda" in state:
-        torch.cuda.set_rng_state_all(state["torch_cuda"])
+        cuda_states = state["torch_cuda"]
+        if isinstance(cuda_states, list):
+            cuda_states = [
+                t.to(device="cpu", dtype=torch.uint8) if isinstance(t, torch.Tensor) else t
+                for t in cuda_states
+            ]
+        torch.cuda.set_rng_state_all(cuda_states)
 
 
 def save_checkpoint(path: str | Path, state: TrainState) -> None:
