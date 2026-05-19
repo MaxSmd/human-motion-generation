@@ -83,13 +83,33 @@ def load_checkpoint(path: str | Path, map_location: Any = "cpu") -> TrainState:
 
 
 def find_latest_checkpoint(run_dir: str | Path) -> Path | None:
-    """Return the highest-step `.pt` under `run_dir/checkpoints/`, or None."""
+    """Return the most-recent resume target under `run_dir/checkpoints/`.
+
+    `latest.pt` is updated every ckpt_every/10 outer steps, so it is almost
+    always more advanced than the highest-step `ckpt-*.pt`. We prefer it
+    whenever its step count is >= the highest numbered checkpoint.
+    """
     cdir = Path(run_dir) / "checkpoints"
     if not cdir.exists():
         return None
     candidates = list(cdir.glob("ckpt-*.pt"))
-    if not candidates:
-        latest = cdir / "latest.pt"
-        return latest if latest.exists() else None
-    candidates.sort(key=lambda p: int(p.stem.split("-")[1]))
-    return candidates[-1]
+    latest = cdir / "latest.pt"
+
+    if latest.exists() and not candidates:
+        return latest
+
+    if candidates:
+        candidates.sort(key=lambda p: int(p.stem.split("-")[1]))
+        newest_numbered = candidates[-1]
+        newest_numbered_step = int(newest_numbered.stem.split("-")[1])
+        if latest.exists():
+            # Peek at the step in latest.pt without loading model weights.
+            try:
+                blob = torch.load(latest, map_location="cpu", weights_only=False)
+                latest_step = int(blob.get("step", -1))
+            except Exception:
+                latest_step = -1
+            return latest if latest_step >= newest_numbered_step else newest_numbered
+        return newest_numbered
+
+    return None
