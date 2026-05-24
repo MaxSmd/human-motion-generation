@@ -116,8 +116,13 @@ class TRRepresentation(Representation):
         T = flat.shape[0]
         translation = flat[:, :3]
         quats = flat[:, 3:].reshape(T, self.num_joints, 4)
-        from .humanml3d_io import tplusr_to_h3d_features_with_quats
-        return tplusr_to_h3d_features_with_quats(translation, quats, skeleton)
+        # Route through upstream's `process_file` for bit-comparable agreement
+        # with the Guo evaluator's training distribution. Our hand-written
+        # reimplementation diverges from upstream by ~110% on cont6d because
+        # upstream re-runs IK with `smooth_forward=True` *inside* the feature
+        # extractor — see src/rmg/representation/humanml3d_upstream.py.
+        from .humanml3d_upstream import tplusr_to_h3d_features_upstream
+        return tplusr_to_h3d_features_upstream(translation, quats, skeleton)
 
 
 # ---------------------------------------------------------------------------
@@ -228,8 +233,8 @@ class TRPRepresentation(Representation):
         translation = flat[:, :3]
         quats = flat[:, 3 : 3 + 4 * self.num_joints].reshape(T, self.num_joints, 4)
         if self.decode_via == "rotation":
-            from .humanml3d_io import tplusr_to_h3d_features_with_quats
-            return tplusr_to_h3d_features_with_quats(translation, quats, skeleton)
+            from .humanml3d_upstream import tplusr_to_h3d_features_upstream
+            return tplusr_to_h3d_features_upstream(translation, quats, skeleton)
         elif self.decode_via == "preshape":
             tp_repr = TPRepresentation(num_joints=self.num_joints)
             tp_flat = torch.cat([translation, flat[:, 3 + 4 * self.num_joints :]], dim=-1)

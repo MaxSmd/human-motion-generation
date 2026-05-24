@@ -37,6 +37,7 @@ if not hasattr(np, "int"):
     np.int = int  # type: ignore[attr-defined]
 
 from rmg.representation.humanml3d_io import tplusr_to_h3d_features_with_quats
+from rmg.representation.humanml3d_upstream import tplusr_to_h3d_features_upstream
 from rmg.representation.skeleton import Skeleton as RmgSkeleton, forward_kinematics
 
 
@@ -140,27 +141,35 @@ def diagnose_clip(clip_name: str, packed_zip: Path, target_offsets: torch.Tensor
     data_up, _, _, _ = process_file(positions, 0.002)
     theirs = np.asarray(data_up, dtype=np.float32)
 
-    # Ours: T+R → 263-D using our converter
+    # Ours (handwritten): T+R → 263-D using our reimplementation
     ours_t = tplusr_to_h3d_features_with_quats(translation, quats, skel).numpy().astype(np.float32)
+    # Ours (upstream-routed): T+R → FK → upstream process_file → 263-D
+    ours_up = tplusr_to_h3d_features_upstream(translation, quats, skel).numpy().astype(np.float32)
 
-    print(f"  upstream output: {theirs.shape}    ours: {ours_t.shape}")
-    if ours_t.shape != theirs.shape:
+    print(f"  upstream output: {theirs.shape}    handwritten: {ours_t.shape}    upstream-routed: {ours_up.shape}")
+    if ours_t.shape != theirs.shape or ours_up.shape != theirs.shape:
         print("  !! shape mismatch — can't continue comparison")
         return {"clip": clip_name, "error": "shape mismatch"}
 
-    # Per-block comparison.
-    print(f"\n  {'block':<18}  {'shape':>14}  {'ours|x|':>10}  {'theirs|x|':>10}"
-          f"  {'max|Δ|':>10}  {'mean|Δ|':>10}  {'rel_max':>10}")
-    print(f"  {'-' * 88}")
-    reports = []
+    # Two-way comparison: handwritten vs upstream, and upstream-routed vs upstream.
+    print(f"\n  HANDWRITTEN vs UPSTREAM:")
+    print(f"  {'block':<18}  {'shape':>14}  {'mean|Δ|':>10}  {'rel_max':>10}")
+    print(f"  {'-' * 60}")
+    reports_hw = []
     for name, a, b in H3D_BLOCKS:
         r = diff_report(name, ours_t[:, a:b], theirs[:, a:b])
-        reports.append(r)
-        print(f"  {r['name']}  {str(r['shape']):>14}  "
-              f"{r['ours_mean_abs']:>10.4f}  {r['theirs_mean_abs']:>10.4f}  "
-              f"{r['max_abs_diff']:>10.4f}  {r['mean_abs_diff']:>10.4f}  "
-              f"{r['rel_max']:>10.4f}")
-    return {"clip": clip_name, "blocks": reports}
+        reports_hw.append(r)
+        print(f"  {r['name']}  {str(r['shape']):>14}  {r['mean_abs_diff']:>10.4f}  {r['rel_max']:>10.4f}")
+
+    print(f"\n  UPSTREAM-ROUTED vs UPSTREAM (should be ~0):")
+    print(f"  {'block':<18}  {'shape':>14}  {'mean|Δ|':>10}  {'rel_max':>10}")
+    print(f"  {'-' * 60}")
+    reports_up = []
+    for name, a, b in H3D_BLOCKS:
+        r = diff_report(name, ours_up[:, a:b], theirs[:, a:b])
+        reports_up.append(r)
+        print(f"  {r['name']}  {str(r['shape']):>14}  {r['mean_abs_diff']:>10.6f}  {r['rel_max']:>10.6f}")
+    return {"clip": clip_name, "blocks": reports_hw, "blocks_up": reports_up}
 
 
 def main() -> int:
