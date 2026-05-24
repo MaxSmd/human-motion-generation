@@ -163,8 +163,22 @@ class RealGuoEvaluator:
     # ------------------------------------------------------------ public API
 
     def encode_motion(self, motion_features: Tensor, lengths: Tensor) -> Tensor:
+        # Upstream `get_motion_embeddings` sorts internally by length descending
+        # (for pack_padded_sequence) and does NOT undo the sort before
+        # returning. That scrambles the input→output correspondence, breaking
+        # any metric that pairs motion embeddings with text embeddings by
+        # index (R@k, mm_dist, paired FID). We pre-sort here and un-sort the
+        # result, so callers get embeddings in the same order as the input.
         x = self.normalize(motion_features.to(self._device).float())
-        return self._wrapper.get_motion_embeddings(x, lengths.to(self._device).long())
+        m_lens = lengths.to(self._device).long()
+        sort_idx = torch.argsort(m_lens, descending=True)
+        inv_idx = torch.empty_like(sort_idx)
+        inv_idx[sort_idx] = torch.arange(sort_idx.numel(), device=sort_idx.device)
+        sorted_emb = self._wrapper.get_motion_embeddings(x[sort_idx], m_lens[sort_idx])
+        # Upstream sorts again internally — the result is in *its* sort order
+        # over the already-sorted input, which equals the sort order over the
+        # original input. So inv_idx of the original order undoes both layers.
+        return sorted_emb[inv_idx]
 
     def encode_text_from_strings(self, texts: list[str]) -> Tensor:
         word_embs, pos_ohot, cap_lens = self._tokenize_for_text_enc(texts)

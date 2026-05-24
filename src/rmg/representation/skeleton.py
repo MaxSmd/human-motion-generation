@@ -134,13 +134,18 @@ def forward_kinematics(
 ) -> Tensor:
     """Compute world-space joint positions from per-joint local rotations.
 
+    Convention matches HumanML3D's `common/skeleton.py::forward_kinematics_np`:
+    `quats[..., j, :]` is the rotation that takes joint j's *canonical* bone
+    direction (parent → j, in `t2m_raw_offsets`) to its observed direction, so
+    j's own quaternion participates in placing j itself — not only its children
+    as in SMPL-standard FK. Stored quats from `inverse_kinematics_np` use this
+    convention; mixing them with SMPL-standard FK silently produces wrong
+    positions everywhere except the identity case (which is why `t_pose_joints`
+    looks fine).
+
     Args:
         skeleton: rest-pose offsets and parents.
-        quats: (*, J, 4) per-joint *local* unit quaternions. quats[..., 0, :]
-            is the global root orientation; quats[..., j, :] for j>0 are local
-            rotations relative to each joint's parent (SMPL convention, which
-            matches the paper's §3.1: `q_1` = global orientation, `q_{j>=2}` =
-            local joint rotations).
+        quats: (*, J, 4) per-joint unit quaternions, HumanML3D convention.
         translation: (*, 3) global root translation.
 
     Returns:
@@ -155,8 +160,6 @@ def forward_kinematics(
     parents = skeleton.parents
 
     leading = quats.shape[:-2]
-    # Per-joint global rotation as a quaternion: chain along parent path.
-    # We build this iteratively in joint order; root rotation == quats[..., 0, :].
     global_quats: list[Tensor] = [None] * NUM_JOINTS  # type: ignore[list-item]
     positions: list[Tensor] = [None] * NUM_JOINTS    # type: ignore[list-item]
     for j in range(NUM_JOINTS):
@@ -168,9 +171,8 @@ def forward_kinematics(
             p = parents[j]
             gq = quat_mul(global_quats[p], local_q)
             global_quats[j] = gq
-            # Rotate the offset by the *parent's* global rotation, add to parent's position.
             off_j = offsets[j].expand(*leading, 3)
-            positions[j] = positions[p] + quat_rotate(global_quats[p], off_j)
+            positions[j] = positions[p] + quat_rotate(gq, off_j)
     return torch.stack(positions, dim=-2)
 
 
