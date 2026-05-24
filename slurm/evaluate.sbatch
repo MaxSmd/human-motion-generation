@@ -51,8 +51,8 @@ enroot start \
             model=${MODEL_PRESET} \\
             train=${PRESET} \\
             text_encoder.type=qwen3 \\
-            eval.checkpoint=${CKPT} \\
-            eval.evaluator=real \\
-            eval.guidance_scales='[2.5,3.5,4.5,5.5,6.5,7.5,8.5,9.5]' \\
+            +eval.checkpoint=${CKPT} \\
+            +eval.evaluator=real \\
+            +eval.guidance_scales='[2.5,3.5,4.5,5.5,6.5,7.5,8.5,9.5]' \\
             run_name=eval-\$(basename ${CKPT} .pt)
     "
