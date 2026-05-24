@@ -8,17 +8,14 @@
 #SBATCH --error=slurm/logs/init-eval-%j.err
 #
 # One-shot setup for evaluation:
-#   1. Init the `external/text-to-motion` submodule (head node OOMs on clone,
-#      so we do it on a data node with low-memory git options).
-#   2. Place the Guo pretrained checkpoint at the path the evaluator expects.
+#   1. Ensure `external/text-to-motion` submodule is properly cloned (networks/,
+#      utils/, glove/ all present). Handles the case where finest.tar was
+#      placed in checkpoints/ before the submodule was initialized — git
+#      submodule update silently skips non-empty dirs, so we stash the
+#      checkpoint, wipe the dir, clone, and restore.
+#   2. Verify the Guo pretrained checkpoint is at the path the evaluator expects.
 #
-# Pre-req: the Guo checkpoint tar must already exist somewhere on the cluster.
-# Pass its absolute path via GUO_TAR (default: scans likely locations).
-#
-# Usage:
-#     sbatch slurm/init_eval_assets.sbatch
-#     # or pin the source explicitly:
-#     GUO_TAR=/mnt/home/julianmunzer/.../finest.tar sbatch slurm/init_eval_assets.sbatch
+# Runs on a data node because the head node OOMs on git submodule clones.
 
 set -euo pipefail
 mkdir -p slurm/logs
@@ -33,56 +30,74 @@ fi
 cd "${REPO}"
 echo "[init-eval] repo=${REPO}"
 
-# --- 1. submodule init (low-mem flags) ---
 SUBMOD="external/text-to-motion"
-if [ ! -f "${SUBMOD}/networks/modules.py" ]; then
-    echo "[init-eval] cloning ${SUBMOD} (shallow, single-threaded)..."
-    git -c pack.threads=1 -c pack.windowMemory=64m -c pack.deltaCacheSize=64m \
-        submodule update --init --depth 1 -- "${SUBMOD}"
-else
-    echo "[init-eval] ${SUBMOD} already initialized — skipping clone"
-fi
-
-# --- 2. Guo checkpoint placement ---
 DEST_DIR="${SUBMOD}/checkpoints/t2m/text_mot_match/model"
 DEST="${DEST_DIR}/finest.tar"
+STASH="/tmp/rmg-finest-${SLURM_JOB_ID:-$$}.tar"
 
-if [ -f "${DEST}" ]; then
-    echo "[init-eval] ${DEST} already in place — done"
-    ls -lh "${DEST}"
-    exit 0
+needs_clone=true
+if [ -f "${SUBMOD}/networks/modules.py" ] \
+   && [ -f "${SUBMOD}/networks/evaluator_wrapper.py" ] \
+   && [ -d "${SUBMOD}/glove" ]; then
+    needs_clone=false
 fi
 
-# Find the source tar. Either passed in, or scan a few likely spots.
-if [ -z "${GUO_TAR:-}" ]; then
-    echo "[init-eval] scanning for finest.tar..."
+if [ "${needs_clone}" = "true" ]; then
+    echo "[init-eval] submodule is incomplete — re-cloning"
+
+    # Stash any existing checkpoint so we don't lose the 235 MB download.
+    if [ -f "${DEST}" ]; then
+        echo "[init-eval] stashing existing finest.tar to ${STASH}"
+        cp "${DEST}" "${STASH}"
+    fi
+
+    # Wipe the submodule dir (git refuses to clone into a non-empty dir,
+    # silently — that's why the previous attempt looked like it worked).
+    if [ -d "${SUBMOD}" ]; then
+        echo "[init-eval] wiping ${SUBMOD}"
+        rm -rf "${SUBMOD}"
+    fi
+    # Also clear the .git/modules cache so the clone is fully fresh.
+    rm -rf ".git/modules/external/text-to-motion"
+
+    echo "[init-eval] cloning ${SUBMOD} (shallow, single-threaded)..."
+    git -c pack.threads=1 -c pack.windowMemory=64m -c pack.deltaCacheSize=64m \
+        submodule update --init --depth 1 --force -- "${SUBMOD}"
+
+    # Restore the checkpoint.
+    if [ -f "${STASH}" ]; then
+        echo "[init-eval] restoring finest.tar  ->  ${DEST}"
+        mkdir -p "${DEST_DIR}"
+        mv "${STASH}" "${DEST}"
+    fi
+else
+    echo "[init-eval] submodule already complete"
+fi
+
+# --- find finest.tar if still missing ---
+if [ ! -f "${DEST}" ]; then
+    echo "[init-eval] finest.tar missing — scanning for it..."
     CANDIDATES=$(find \
-        "${REPO}/external/TODO" \
         "${REPO}/external" \
         "${HOME}" \
         -maxdepth 6 -name 'finest.tar' 2>/dev/null | head -10 || true)
-    echo "[init-eval] candidates found:"
-    echo "${CANDIDATES}"
-    GUO_TAR=$(echo "${CANDIDATES}" | head -1)
+    echo "[init-eval] candidates: ${CANDIDATES}"
+    SRC=$(echo "${CANDIDATES}" | head -1)
+    if [ -z "${SRC}" ] || [ ! -f "${SRC}" ]; then
+        echo "[init-eval] ERROR: finest.tar not found anywhere."
+        echo "[init-eval] pass GUO_TAR=/abs/path/to/finest.tar"
+        exit 1
+    fi
+    mkdir -p "${DEST_DIR}"
+    cp "${SRC}" "${DEST}"
 fi
-
-if [ -z "${GUO_TAR}" ] || [ ! -f "${GUO_TAR}" ]; then
-    echo "[init-eval] ERROR: could not find finest.tar."
-    echo "[init-eval] pass it as: GUO_TAR=/abs/path/to/finest.tar sbatch slurm/init_eval_assets.sbatch"
-    exit 1
-fi
-
-echo "[init-eval] copying ${GUO_TAR}  ->  ${DEST}"
-mkdir -p "${DEST_DIR}"
-cp "${GUO_TAR}" "${DEST}"
-ls -lh "${DEST}"
 
 # --- sanity ---
 echo
-echo "[init-eval] checking submodule contents:"
-test -f "${SUBMOD}/networks/modules.py"          && echo "  OK: networks/modules.py"
-test -f "${SUBMOD}/networks/evaluator_wrapper.py" && echo "  OK: networks/evaluator_wrapper.py"
-test -d "${SUBMOD}/glove"                         && echo "  OK: glove/"
-test -f "${DEST}"                                  && echo "  OK: ${DEST}"
+echo "[init-eval] verifying:"
+test -f "${SUBMOD}/networks/modules.py"           && echo "  OK: networks/modules.py"           || { echo "  MISSING: networks/modules.py"; exit 1; }
+test -f "${SUBMOD}/networks/evaluator_wrapper.py" && echo "  OK: networks/evaluator_wrapper.py" || { echo "  MISSING: networks/evaluator_wrapper.py"; exit 1; }
+test -d "${SUBMOD}/glove"                         && echo "  OK: glove/"                         || { echo "  MISSING: glove/"; exit 1; }
+test -f "${DEST}"                                  && echo "  OK: ${DEST}"                        || { echo "  MISSING: ${DEST}"; exit 1; }
 
 echo "[init-eval] DONE — you can now resubmit slurm/evaluate.sbatch"
