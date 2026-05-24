@@ -35,21 +35,28 @@ def calculate_fid(
     """Fréchet Inception Distance between two Gaussian distributions.
 
     FID = ||μ1 - μ2||² + Tr(Σ1 + Σ2 - 2 (Σ1 Σ2)^{1/2})
+
+    Implementation note: we only need *trace* of the matrix square root, not
+    the matrix itself. For PSD Σ1, Σ2 the eigenvalues of Σ1·Σ2 are real and
+    non-negative (it's similar to the symmetric PSD Σ1^{1/2}·Σ2·Σ1^{1/2}), so
+    tr((Σ1·Σ2)^{1/2}) = Σ √λᵢ(Σ1·Σ2). This is O(n³) but bounded — `eigvals`
+    is one LAPACK call (≈50 ms for n=512), unlike `scipy.linalg.sqrtm` whose
+    iterative Schur algorithm can grind for *hours* on ill-conditioned products
+    (which is exactly what we get when the model's generated-feature
+    distribution sits outside the evaluator's training support).
     """
     diff = mu1 - mu2
-    covmean = linalg.sqrtm(sigma1 @ sigma2)
-    if isinstance(covmean, tuple):                # older SciPy returned (M, errest)
-        covmean = covmean[0]
-    if not np.isfinite(covmean).all():
-        # Numerical hack from FID reference implementation: add a small
-        # multiple of identity to both covariances and retry.
+    prod = sigma1 @ sigma2
+    # Small ridge if needed for numerical sanity; cheap insurance.
+    eigvals = np.linalg.eigvals(prod)
+    real_eigs = eigvals.real
+    if not np.isfinite(real_eigs).all() or real_eigs.min() < -eps:
+        # Retry with a tiny identity offset on both covariances.
         offset = np.eye(sigma1.shape[0]) * eps
-        covmean = linalg.sqrtm((sigma1 + offset) @ (sigma2 + offset))
-        if isinstance(covmean, tuple):
-            covmean = covmean[0]
-    if np.iscomplexobj(covmean):
-        covmean = covmean.real
-    tr_covmean = np.trace(covmean)
+        eigvals = np.linalg.eigvals((sigma1 + offset) @ (sigma2 + offset))
+        real_eigs = eigvals.real
+    sqrt_eigs = np.sqrt(np.clip(real_eigs, 0.0, None))
+    tr_covmean = float(sqrt_eigs.sum())
     return float(diff @ diff + np.trace(sigma1) + np.trace(sigma2) - 2.0 * tr_covmean)
 
 
