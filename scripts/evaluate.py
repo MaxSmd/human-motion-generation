@@ -24,6 +24,7 @@ checkpoint (yields meaningless numbers — used to validate the pipeline).
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import hydra
@@ -274,19 +275,29 @@ def main(cfg: DictConfig) -> None:
             if cfg.eval.max_clips > 0 and n_seen >= cfg.eval.max_clips:
                 break
 
+        def _tick(label: str, t0: float) -> float:
+            t1 = time.perf_counter()
+            print(f"[ω={omega}] {label}: {t1 - t0:.2f}s", flush=True)
+            return t1
+
+        t = time.perf_counter()
         real_motion_feats = np.concatenate(real_motion_feats, axis=0)
         gen_motion_feats = np.concatenate(gen_motion_feats, axis=0)
         text_feats = np.concatenate(text_feats, axis=0)
+        t = _tick(f"concat (shapes real={real_motion_feats.shape} gen={gen_motion_feats.shape} text={text_feats.shape})", t)
 
         rng = np.random.default_rng(int(cfg.eval.seed))
-
-        results = {
-            "fid": fid(real_motion_feats, gen_motion_feats),
-            "r_precision": r_precision(text_feats, gen_motion_feats, top_k=3, rng=rng).tolist(),
-            "mm_dist": mm_distance(text_feats, gen_motion_feats),
-            "diversity": diversity(gen_motion_feats, diversity_times=int(cfg.eval.diversity_times), rng=rng),
-            "diversity_real": diversity(real_motion_feats, diversity_times=int(cfg.eval.diversity_times), rng=rng),
-        }
+        results = {}
+        results["fid"] = fid(real_motion_feats, gen_motion_feats)
+        t = _tick(f"fid={results['fid']:.4f}", t)
+        results["r_precision"] = r_precision(text_feats, gen_motion_feats, top_k=3, rng=rng).tolist()
+        t = _tick(f"r_precision={results['r_precision']}", t)
+        results["mm_dist"] = mm_distance(text_feats, gen_motion_feats)
+        t = _tick(f"mm_dist={results['mm_dist']:.4f}", t)
+        results["diversity"] = diversity(gen_motion_feats, diversity_times=int(cfg.eval.diversity_times), rng=rng)
+        t = _tick(f"diversity={results['diversity']:.4f}", t)
+        results["diversity_real"] = diversity(real_motion_feats, diversity_times=int(cfg.eval.diversity_times), rng=rng)
+        t = _tick(f"diversity_real={results['diversity_real']:.4f}", t)
 
         # ---- MultiModality (re-sampled per-text generations) ----
         mm_texts = []
@@ -303,23 +314,35 @@ def main(cfg: DictConfig) -> None:
                     break
             if len(mm_texts) >= int(cfg.eval.mm_num_texts):
                 break
+        t = _tick(f"populated {len(mm_texts)} MM texts", t)
 
         K = int(cfg.eval.mm_repeats)
         mm_per_text = []
-        for text, L in zip(tqdm(mm_texts, desc=f"MM ω={omega}"), mm_lengths):
+        for mm_idx, (text, L) in enumerate(zip(mm_texts, mm_lengths)):
+            tmm = time.perf_counter()
             cond = text_encoder.encode([text] * K, device=device)
+            t_cond = time.perf_counter()
             samples = sampler.sample(
                 model, shape=(K, L), cond=cond, guidance_scale=float(omega),
             )
+            t_sample = time.perf_counter()
             feats = []
             for k in range(K):
                 feats.append(representation.to_h3d_features(samples[k, :L], skeleton))
+            t_feat = time.perf_counter()
             padded = torch.zeros(K, L - 1, 263)
             for k, f in enumerate(feats):
                 padded[k, : f.shape[0]] = f
             emb = evaluator.encode_motion(padded, torch.full((K,), L - 1, dtype=torch.long))
             mm_per_text.append(emb.cpu().numpy())
+            t_emb = time.perf_counter()
+            print(f"[ω={omega} MM {mm_idx + 1}/{len(mm_texts)}] L={L} "
+                  f"cond={t_cond - tmm:.2f}s sample={t_sample - t_cond:.2f}s "
+                  f"feat={t_feat - t_sample:.2f}s emb={t_emb - t_feat:.2f}s "
+                  f"(total {t_emb - tmm:.2f}s)", flush=True)
+        t = _tick(f"MM done ({len(mm_texts)} texts × K={K})", t)
         results["multimodality"] = multimodality(np.stack(mm_per_text, axis=0))
+        t = _tick(f"multimodality={results['multimodality']:.4f}", t)
 
         all_results[float(omega)] = results
         print(json.dumps(results, indent=2), flush=True)
