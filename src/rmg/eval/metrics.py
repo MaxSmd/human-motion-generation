@@ -60,8 +60,30 @@ def calculate_fid(
     return float(diff @ diff + np.trace(sigma1) + np.trace(sigma2) - 2.0 * tr_covmean)
 
 
+def _drop_bad_rows(name: str, x: NDArray) -> NDArray:
+    """Drop rows containing NaN/inf. Reports if any were removed.
+
+    Generated motions sometimes contain degenerate bones (zero-length →
+    NaN in upstream IK's `v / ||v||`), which propagates into the Guo
+    motion-encoder embeddings. Without this guard, downstream `eigvals` /
+    `cov` hit NaN and either crash or hang.
+    """
+    bad = ~np.isfinite(x).all(axis=-1)
+    if bad.any():
+        print(
+            f"[fid] WARN: dropping {int(bad.sum())}/{x.shape[0]} "
+            f"{name} rows with NaN/inf",
+            flush=True,
+        )
+    return x[~bad]
+
+
 def fid(real_features: NDArray, gen_features: NDArray) -> float:
     """Convenience: FID from raw (N, D) feature matrices."""
+    real_features = _drop_bad_rows("real", real_features)
+    gen_features = _drop_bad_rows("gen", gen_features)
+    if len(real_features) < 2 or len(gen_features) < 2:
+        return float("nan")
     mu_r, sig_r = calculate_activation_statistics(real_features)
     mu_g, sig_g = calculate_activation_statistics(gen_features)
     return calculate_fid(mu_r, sig_r, mu_g, sig_g)
@@ -106,6 +128,12 @@ def r_precision(
 ) -> NDArray:
     """HumanML3D R@k convention: split into random batches of `batch_size`,
     compute R@k per batch, average. Returns (top_k,)."""
+    # Drop paired rows where *either* side has NaN/inf so the pairing stays valid.
+    good = np.isfinite(text_features).all(-1) & np.isfinite(motion_features).all(-1)
+    if not good.all():
+        print(f"[r_precision] WARN: dropping {int((~good).sum())}/{good.size} bad pairs", flush=True)
+        text_features = text_features[good]
+        motion_features = motion_features[good]
     rng = rng or np.random.default_rng(0)
     N = text_features.shape[0]
     perm = rng.permutation(N)
@@ -127,6 +155,12 @@ def r_precision(
 
 
 def mm_distance(text_features: NDArray, motion_features: NDArray) -> float:
+    good = np.isfinite(text_features).all(-1) & np.isfinite(motion_features).all(-1)
+    if not good.all():
+        text_features = text_features[good]
+        motion_features = motion_features[good]
+    if len(text_features) == 0:
+        return float("nan")
     return float(np.linalg.norm(text_features - motion_features, axis=-1).mean())
 
 
@@ -141,6 +175,7 @@ def diversity(
     rng: np.random.Generator | None = None,
 ) -> float:
     """Mean pairwise L2 distance among `diversity_times` random pairs."""
+    motion_features = motion_features[np.isfinite(motion_features).all(-1)]
     rng = rng or np.random.default_rng(0)
     N = motion_features.shape[0]
     if N < 2:
