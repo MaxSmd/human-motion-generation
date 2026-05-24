@@ -50,12 +50,12 @@ def load_upstream_process_file():
     hml3d = REPO / "external" / "HumanML3D"
     sys.path.insert(0, str(hml3d))
 
-    import nbformat  # type: ignore
     from common.skeleton import Skeleton as UpSkeleton  # type: ignore
     import common.quaternion as Q  # type: ignore
     from paramUtil import t2m_raw_offsets, t2m_kinematic_chain  # type: ignore
 
-    nb = nbformat.read(str(hml3d / "motion_representation.ipynb"), as_version=4)
+    # .ipynb is just JSON — no need for nbformat.
+    nb = json.loads((hml3d / "motion_representation.ipynb").read_text())
 
     ns: dict = {
         "np": np,
@@ -78,8 +78,9 @@ def load_upstream_process_file():
             ns[k] = getattr(Q, k)
 
     # Cells 1 and 2 define uniform_skeleton + process_file.
-    exec(nb.cells[1].source, ns)
-    exec(nb.cells[2].source, ns)
+    code_cells = [c for c in nb["cells"] if c["cell_type"] == "code"]
+    exec("".join(code_cells[1]["source"]), ns)  # uniform_skeleton
+    exec("".join(code_cells[2]["source"]), ns)  # process_file
     return ns
 
 
