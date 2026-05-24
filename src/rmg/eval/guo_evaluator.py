@@ -99,10 +99,24 @@ class RealGuoEvaluator:
 
         self._word_vec = WordVectorizer(str(repo / "glove"), "our_vab")
 
-        # Mean / Std for 263-D feature normalization (HumanML3D-canonical).
-        h3d = Path(humanml3d_repo)
-        self._mean = torch.from_numpy(np.load(h3d / "HumanML3D" / "Mean.npy")).float().to(self._device)
-        self._std = torch.from_numpy(np.load(h3d / "HumanML3D" / "Std.npy")).float().to(self._device)
+        # Mean / Std for 263-D feature normalization. CRITICAL: must use the
+        # files shipped *with the evaluator checkpoint* (Comp_v6_KLD01/meta/),
+        # NOT the HumanML3D repo's Mean.npy/Std.npy. They differ — the
+        # evaluator was trained on a specific normalization, and feeding
+        # features normalized with different stats gives a 2-3× scale
+        # mismatch in embeddings (diversity_real ≈ 4 instead of ~9.5).
+        meta = repo / "checkpoints" / opt.dataset_name / "Comp_v6_KLD01" / "meta"
+        mean_path = meta / "mean.npy"
+        std_path = meta / "std.npy"
+        if not mean_path.exists():
+            # Fallback to HumanML3D repo (kept for tests / partial setups).
+            print(f"[guo] WARN: {mean_path} not found, falling back to HumanML3D Mean.npy", flush=True)
+            h3d = Path(humanml3d_repo)
+            mean_path = h3d / "HumanML3D" / "Mean.npy"
+            std_path = h3d / "HumanML3D" / "Std.npy"
+        self._mean = torch.from_numpy(np.load(mean_path)).float().to(self._device)
+        self._std = torch.from_numpy(np.load(std_path)).float().to(self._device)
+        print(f"[guo] loaded normalization from {mean_path}", flush=True)
 
     # ------------------------------------------------------------ helpers
 
