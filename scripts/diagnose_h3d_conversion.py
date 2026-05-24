@@ -44,9 +44,14 @@ from rmg.representation.skeleton import Skeleton as RmgSkeleton, forward_kinemat
 # Upstream loader — bring in process_file from the notebook
 # ---------------------------------------------------------------------------
 
-def load_upstream_process_file():
+def load_upstream_process_file(target_offsets: torch.Tensor):
     """Execute the relevant cells of motion_representation.ipynb in our process
-    so we can call `process_file` directly with our globals."""
+    so we can call `process_file` directly with our globals.
+
+    `target_offsets` (22, 3) is injected as `tgt_offsets` — upstream's
+    `uniform_skeleton` expects this exact shape and definition (per-joint bone
+    vector from parent), which is what we save in `target_offsets.pt`.
+    """
     hml3d = REPO / "external" / "HumanML3D"
     sys.path.insert(0, str(hml3d))
 
@@ -63,6 +68,7 @@ def load_upstream_process_file():
         "Skeleton": UpSkeleton,
         "n_raw_offsets": torch.from_numpy(t2m_raw_offsets),
         "kinematic_chain": t2m_kinematic_chain,
+        "tgt_offsets": target_offsets,
         # Constants from cell 5's main block:
         "face_joint_indx": [2, 1, 17, 16],
         "fid_l": [7, 10],
@@ -179,7 +185,7 @@ def main() -> int:
         clips = [n if n.endswith(".pt") else f"{n}.pt" for n in names[: args.n]]
     print(f"[diag] will diagnose: {clips}")
 
-    process_file = load_upstream_process_file()["process_file"]
+    process_file = load_upstream_process_file(target_offsets)["process_file"]
 
     all_reports = []
     for clip in clips:
