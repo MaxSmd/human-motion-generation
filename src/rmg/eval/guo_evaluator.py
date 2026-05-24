@@ -148,9 +148,17 @@ class RealGuoEvaluator:
     def encode_text_from_strings(self, texts: list[str]) -> Tensor:
         word_embs, pos_ohot, cap_lens = self._tokenize_for_text_enc(texts)
         # The upstream wrapper does paired encoding only (text + motion).
-        # Pull the text encoder directly:
+        # Pull the text encoder directly. Upstream's forward calls
+        # `pack_padded_sequence(..., enforce_sorted=True)` (the default), which
+        # requires lengths sorted descending — sort, encode, undo the sort.
+        sort_idx = torch.argsort(cap_lens, descending=True)
+        inv_idx = torch.empty_like(sort_idx)
+        inv_idx[sort_idx] = torch.arange(sort_idx.numel(), device=sort_idx.device)
         with torch.no_grad():
-            return self._wrapper.text_encoder(word_embs, pos_ohot, cap_lens)
+            emb = self._wrapper.text_encoder(
+                word_embs[sort_idx], pos_ohot[sort_idx], cap_lens[sort_idx],
+            )
+        return emb[inv_idx]
 
 
 # ---------------------------------------------------------------------------
