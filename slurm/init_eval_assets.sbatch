@@ -3,7 +3,6 @@
 #SBATCH --partition=data
 #SBATCH --qos=students_normal
 #SBATCH --nodes=1
-#SBATCH --cpus-per-task=2
 #SBATCH --time=00:30:00
 #SBATCH --output=slurm/logs/init-eval-%j.out
 #SBATCH --error=slurm/logs/init-eval-%j.err
