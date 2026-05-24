@@ -131,7 +131,14 @@ class RealGuoEvaluator:
             doc = nlp(text.lower())
             tokens = [t.text for t in doc][:max_len]
             poss = [t.pos_ for t in doc][:max_len]
-            tokens = ["sos/OTHER"] + [f"{w}/{p}" for w, p in zip(tokens, poss)] + ["eos/OTHER"]
+            # Upstream's WordVectorizer splits the "word/POS" token on '/' and
+            # expects exactly 2 parts, so the word itself must not contain '/'.
+            # Captions like "turn left/right" would otherwise break it.
+            tokens = (
+                ["sos/OTHER"]
+                + [f"{w.replace('/', '')}/{p}" for w, p in zip(tokens, poss)]
+                + ["eos/OTHER"]
+            )
             for j, tok in enumerate(tokens):
                 vec, pos = self._word_vec[tok]
                 word_embs[i, j] = torch.from_numpy(vec)
