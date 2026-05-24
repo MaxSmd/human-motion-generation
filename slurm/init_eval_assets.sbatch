@@ -64,10 +64,21 @@ if [ "${needs_clone}" = "true" ]; then
     git -c pack.threads=1 -c pack.windowMemory=64m -c pack.deltaCacheSize=64m \
         submodule update --init --depth 1 --force -- "${SUBMOD}"
 
-    # Restore the checkpoint.
+    # Restore the checkpoint. The upstream repo ships `checkpoints` as a
+    # symlink (or similar non-dir) — mkdir -p fails on those. Remove
+    # anything in the way, then create.
     if [ -f "${STASH}" ]; then
         echo "[init-eval] restoring finest.tar  ->  ${DEST}"
-        mkdir -p "${DEST_DIR}"
+        # Walk down each ancestor of DEST_DIR and turn any non-dir into a dir.
+        ancestor="${SUBMOD}"
+        for seg in checkpoints t2m text_mot_match model; do
+            ancestor="${ancestor}/${seg}"
+            if [ -e "${ancestor}" ] && [ ! -d "${ancestor}" ]; then
+                echo "[init-eval]   removing non-dir at ${ancestor}"
+                rm -f "${ancestor}"
+            fi
+            [ -d "${ancestor}" ] || mkdir "${ancestor}"
+        done
         mv "${STASH}" "${DEST}"
     fi
 else
@@ -88,7 +99,15 @@ if [ ! -f "${DEST}" ]; then
         echo "[init-eval] pass GUO_TAR=/abs/path/to/finest.tar"
         exit 1
     fi
-    mkdir -p "${DEST_DIR}"
+    ancestor="${SUBMOD}"
+    for seg in checkpoints t2m text_mot_match model; do
+        ancestor="${ancestor}/${seg}"
+        if [ -L "${ancestor}" ] || ([ -e "${ancestor}" ] && [ ! -d "${ancestor}" ]); then
+            echo "[init-eval]   removing non-dir / symlink at ${ancestor}"
+            rm -f "${ancestor}"
+        fi
+        [ -d "${ancestor}" ] || mkdir "${ancestor}"
+    done
     cp "${SRC}" "${DEST}"
 fi
 
