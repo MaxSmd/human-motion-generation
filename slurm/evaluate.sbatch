@@ -5,7 +5,7 @@
 #SBATCH --qos=students_normal
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
-#SBATCH --time=04:00:00
+#SBATCH --time=10:00:00
 #SBATCH --output=slurm/logs/rmg-eval-%j.out
 #SBATCH --error=slurm/logs/rmg-eval-%j.err
 #
@@ -47,7 +47,7 @@ enroot start \
         cd ${REPO}
         pip install -e . --no-deps --quiet
         python -m spacy download en_core_web_sm --quiet || true
-        python scripts/evaluate.py \\
+        python -u scripts/evaluate.py \\
             model=${MODEL_PRESET} \\
             train=${PRESET} \\
             text_encoder.type=qwen3 \\

@@ -322,17 +322,21 @@ def main(cfg: DictConfig) -> None:
         results["multimodality"] = multimodality(np.stack(mm_per_text, axis=0))
 
         all_results[float(omega)] = results
-        print(json.dumps(results, indent=2))
+        print(json.dumps(results, indent=2), flush=True)
 
-    # ---- write summary ----
-    out_dir = Path(cfg.output_dir) / "eval"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    with open(out_dir / "results.json", "w") as f:
-        json.dump(
-            {str(k): v for k, v in all_results.items()},
-            f, indent=2, default=float,
-        )
-    print(f"\n[evaluate] wrote {out_dir / 'results.json'}")
+        # Save incrementally after every ω so a wall-time hit doesn't lose
+        # everything. Each write overwrites the file with the cumulative results.
+        out_dir = Path(cfg.output_dir) / "eval"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        with open(out_dir / "results.json", "w") as f:
+            json.dump(
+                {str(k): v for k, v in all_results.items()},
+                f, indent=2, default=float,
+            )
+        print(f"[evaluate] wrote partial results ({len(all_results)}/{len(cfg.eval.guidance_scales)} ω) "
+              f"to {out_dir / 'results.json'}", flush=True)
+
+    print(f"\n[evaluate] done — all {len(all_results)} guidance levels saved.", flush=True)
 
 
 if __name__ == "__main__":
