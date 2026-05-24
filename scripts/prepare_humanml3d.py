@@ -284,6 +284,16 @@ def stage_pack(
     skel.set_offset(tgt_offsets)
     target_offsets_t = tgt_offsets.detach().clone().float()
 
+    # Per-clip scale factor matching upstream `uniform_skeleton` (HumanML3D
+    # motion_representation.ipynb cell 1). The Guo evaluator was trained on
+    # features where each body's root translation has been rescaled to the
+    # canonical leg length; without this, XZ-velocity features are off by the
+    # body's own leg-length ratio. `l_idx1=5, l_idx2=8` are the lower legs.
+    tgt_offsets_np = tgt_offsets.numpy()
+    _tgt_leg_len = abs(tgt_offsets_np[5]).max() + abs(tgt_offsets_np[8]).max()
+    # Cached source skeleton — reused only for computing per-clip src offsets.
+    _src_skel_for_offsets = Skeleton(n_raw_offsets, kinematic_chain, "cpu")
+
     # ---- texts ----
     print("[stage_pack] reading texts ...")
     texts_by_clip = _read_texts(humanml3d_repo)
@@ -345,8 +355,16 @@ def stage_pack(
             quat_params = skel.inverse_kinematics_np(
                 joints.numpy(), face_joint_indx, smooth_forward=False
             )  # (T, 22, 4)
-            # Root translation == joint 0 position
-            translation = joints[:, 0, :].clone()  # (T, 3)
+            # Rescale root translation to the canonical body, matching upstream
+            # `uniform_skeleton` (scale_rt = tgt_leg_len / src_leg_len). Without
+            # this the stored translation lives on each subject's own leg-length
+            # scale, while the Guo evaluator was trained on canonical-scale features.
+            src_offset = (
+                _src_skel_for_offsets.get_offsets_joints(joints[0]).numpy()
+            )
+            src_leg_len = abs(src_offset[5]).max() + abs(src_offset[8]).max()
+            scale_rt = float(_tgt_leg_len / src_leg_len)
+            translation = (joints[:, 0, :] * scale_rt).clone()  # (T, 3)
             quats = torch.from_numpy(quat_params).float()  # (T, 22, 4)
 
             captions = texts_by_clip.get(clip_id, [])
