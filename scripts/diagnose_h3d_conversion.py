@@ -120,8 +120,55 @@ def diff_report(name: str, ours: np.ndarray, theirs: np.ndarray) -> dict:
     return report
 
 
+def _load_raw_joints_with_prep_transforms(
+    clip_name: str,
+    index_rows: list,
+    joints_root: Path,
+) -> np.ndarray | None:
+    """Replay `stage_pack`'s prep transforms on the raw joints for this clip
+    to produce the joint positions upstream's `process_file` would have
+    consumed: subset pre-trim → index.csv slice → X-flip.
+
+    Returns None if we can't locate the source file.
+    """
+    target = clip_name[:-3] if clip_name.endswith(".pt") else clip_name
+    target = target + ".npy"
+    match = next(((src, s, e) for (src, s, e, name) in index_rows
+                  if Path(name).stem == Path(target).stem), None)
+    if match is None:
+        return None
+    src, start, end = match
+    src_rel = src.replace("./pose_data/", "")
+    npy_path = joints_root / src_rel
+    if not npy_path.exists():
+        return None
+    joints = np.load(npy_path).reshape(-1, 22, 3)
+
+    # Mirror stage_pack's subset pre-trims.
+    fps_for_trim = 20
+    if "Eyes_Japan_Dataset" in src:
+        joints = joints[3 * fps_for_trim:]
+    elif "MPI_HDM05" in src:
+        joints = joints[3 * fps_for_trim:]
+    elif "TotalCapture" in src:
+        joints = joints[1 * fps_for_trim:]
+    elif "MPI_Limits" in src:
+        joints = joints[1 * fps_for_trim:]
+    elif "Transitions_mocap" in src:
+        joints = joints[int(0.5 * fps_for_trim):]
+
+    joints = joints[start:end] if end > 0 else joints[start:]
+
+    # X-flip (skipped for humanact12, per stage_pack).
+    if "humanact12" not in src:
+        joints = joints.copy()
+        joints[..., 0] *= -1
+
+    return joints.astype(np.float32)
+
+
 def diagnose_clip(clip_name: str, packed_zip: Path, target_offsets: torch.Tensor,
-                  process_file) -> dict:
+                  process_file, index_rows: list, joints_root: Path) -> dict:
     print(f"\n{'=' * 78}\nCLIP: {clip_name}\n{'=' * 78}")
 
     # Load packed clip (T, R).
@@ -132,59 +179,81 @@ def diagnose_clip(clip_name: str, packed_zip: Path, target_offsets: torch.Tensor
     T = translation.shape[0]
     print(f"  frames={T}  text[0]={blob['texts'][0][:80]!r}")
 
-    # Our FK → joint positions (T, 22, 3) using stored quats + stored target offsets.
+    # Our FK from stored (quats, translation) → joint positions.
     skel = RmgSkeleton(offsets=target_offsets)
-    positions = forward_kinematics(skel, quats, translation).numpy().astype(np.float32)
-    print(f"  positions shape: {positions.shape}")
+    positions_from_packed = forward_kinematics(skel, quats, translation).numpy().astype(np.float32)
 
-    # Upstream: process_file on these joint positions → 263-D
-    data_up, _, _, _ = process_file(positions, 0.002)
-    theirs = np.asarray(data_up, dtype=np.float32)
-
-    # Ours (handwritten): T+R → 263-D using our reimplementation
-    ours_t = tplusr_to_h3d_features_with_quats(translation, quats, skel).numpy().astype(np.float32)
-    # Ours (upstream-routed): T+R → FK → upstream process_file → 263-D
-    ours_up = tplusr_to_h3d_features_upstream(translation, quats, skel).numpy().astype(np.float32)
-
-    print(f"  upstream output: {theirs.shape}    handwritten: {ours_t.shape}    upstream-routed: {ours_up.shape}")
-    if ours_t.shape != theirs.shape or ours_up.shape != theirs.shape:
-        print("  !! shape mismatch — can't continue comparison")
+    # Raw joints with the SAME prep transforms applied (the only honest baseline).
+    positions_raw = _load_raw_joints_with_prep_transforms(clip_name, index_rows, joints_root)
+    if positions_raw is None:
+        print("  !! raw joints not found — skipping raw-vs-packed comparison")
+        return {"clip": clip_name, "error": "raw joints missing"}
+    if positions_raw.shape != positions_from_packed.shape:
+        print(f"  !! shape mismatch raw={positions_raw.shape} packed_FK={positions_from_packed.shape}")
         return {"clip": clip_name, "error": "shape mismatch"}
 
-    # Two-way comparison: handwritten vs upstream, and upstream-routed vs upstream.
-    print(f"\n  HANDWRITTEN vs UPSTREAM:")
-    print(f"  {'block':<18}  {'shape':>14}  {'mean|Δ|':>10}  {'rel_max':>10}")
-    print(f"  {'-' * 60}")
-    reports_hw = []
-    for name, a, b in H3D_BLOCKS:
-        r = diff_report(name, ours_t[:, a:b], theirs[:, a:b])
-        reports_hw.append(r)
-        print(f"  {r['name']}  {str(r['shape']):>14}  {r['mean_abs_diff']:>10.4f}  {r['rel_max']:>10.4f}")
+    # ------------ Position-level comparison (the new, honest test) ------------
+    pos_diff = np.abs(positions_from_packed - positions_raw)
+    print(f"\n  RAW JOINTS vs PACKED→FK (joint positions, meters):")
+    print(f"    mean|Δ| = {pos_diff.mean():.6f}   max|Δ| = {pos_diff.max():.6f}")
+    print(f"    per-joint mean|Δ|:")
+    for j in range(22):
+        print(f"      joint {j:2d}: {pos_diff[:, j, :].mean():.6f}   max={pos_diff[:, j, :].max():.6f}")
 
-    print(f"\n  UPSTREAM-ROUTED vs UPSTREAM (should be ~0):")
+    # ------------ Feature-level comparison: raw → process_file vs packed-FK → process_file ----
+    feats_raw, _, _, _ = process_file(positions_raw, 0.002)
+    feats_raw = np.asarray(feats_raw, dtype=np.float32)
+    feats_packed, _, _, _ = process_file(positions_from_packed, 0.002)
+    feats_packed = np.asarray(feats_packed, dtype=np.float32)
+
+    print(f"\n  263-D FEATURES: process_file(raw) vs process_file(packed→FK):")
     print(f"  {'block':<18}  {'shape':>14}  {'mean|Δ|':>10}  {'rel_max':>10}")
     print(f"  {'-' * 60}")
-    reports_up = []
+    reports_real = []
     for name, a, b in H3D_BLOCKS:
-        r = diff_report(name, ours_up[:, a:b], theirs[:, a:b])
-        reports_up.append(r)
+        r = diff_report(name, feats_packed[:, a:b], feats_raw[:, a:b])
+        reports_real.append(r)
         print(f"  {r['name']}  {str(r['shape']):>14}  {r['mean_abs_diff']:>10.6f}  {r['rel_max']:>10.6f}")
-    return {"clip": clip_name, "blocks": reports_hw, "blocks_up": reports_up}
+
+    return {"clip": clip_name, "blocks_real": reports_real,
+            "pos_mean_abs_diff": float(pos_diff.mean()),
+            "pos_max_abs_diff": float(pos_diff.max())}
+
+
+def _read_index_csv_rows(humanml3d_repo: Path) -> list:
+    """Parse index.csv → list of (source_npy_relpath, start, end, new_name)."""
+    rows = []
+    with open(humanml3d_repo / "index.csv") as f:
+        next(f)  # header
+        for line in f:
+            cols = line.strip().split(",")
+            if len(cols) != 4:
+                continue
+            rows.append((cols[0], int(cols[1]), int(cols[2]), cols[3]))
+    return rows
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--data-root", default=str(REPO / "external" / "data" / "humanml3d_packed"))
+    ap.add_argument("--joints-root", default=str(REPO / "external" / "data" / "joints_cache"))
+    ap.add_argument("--humanml3d-repo", default=str(REPO / "external" / "HumanML3D"))
     ap.add_argument("--split", default="test")
     ap.add_argument("--clip", default=None, help="clip name like '000021.pt'")
     ap.add_argument("--n", type=int, default=3, help="how many clips to diagnose")
     args = ap.parse_args()
 
     data_root = Path(args.data_root)
+    joints_root = Path(args.joints_root)
+    humanml3d_repo = Path(args.humanml3d_repo)
     packed_zip = data_root / "humanml3d.zip"
     splits = json.loads((data_root / "splits.json").read_text())
     target_offsets = torch.load(data_root / "target_offsets.pt", weights_only=True).float()
     print(f"[diag] target_offsets shape: {tuple(target_offsets.shape)}")
+    print(f"[diag] joints_root: {joints_root}")
+
+    index_rows = _read_index_csv_rows(humanml3d_repo)
+    print(f"[diag] loaded {len(index_rows)} rows from index.csv")
 
     # Pick clips.
     if args.clip:
@@ -199,25 +268,33 @@ def main() -> int:
     all_reports = []
     for clip in clips:
         try:
-            all_reports.append(diagnose_clip(clip, packed_zip, target_offsets, process_file))
+            all_reports.append(diagnose_clip(
+                clip, packed_zip, target_offsets, process_file, index_rows, joints_root,
+            ))
         except Exception as e:
             print(f"  !! exception: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
             all_reports.append({"clip": clip, "error": str(e)})
 
-    # Summary across clips.
-    print(f"\n{'=' * 78}\nSUMMARY (mean across {len(all_reports)} clip(s)):\n{'=' * 78}")
+    # Summary across clips: raw vs packed at the position level + per-block features.
+    print(f"\n{'=' * 78}\nSUMMARY (across {len(all_reports)} clip(s)):\n{'=' * 78}")
+    pos_diffs = [r["pos_mean_abs_diff"] for r in all_reports if "pos_mean_abs_diff" in r]
+    if pos_diffs:
+        print(f"\n  Joint positions RAW vs PACKED→FK (meters):")
+        print(f"    mean|Δ|: {np.mean(pos_diffs):.6f}    max over clips: {np.max(pos_diffs):.6f}")
+        print(f"    interpretation: 0 = our IK+FK lossless;   >0.01 = prep loses motion info")
+
+    print(f"\n  263-D features RAW→process_file vs PACKED→FK→process_file:")
     block_names = [b[0] for b in H3D_BLOCKS]
     for name in block_names:
         diffs = []
         for r in all_reports:
-            if "blocks" not in r:
-                continue
-            for b in r["blocks"]:
+            for b in r.get("blocks_real", []):
                 if b["name"] == name:
                     diffs.append(b["mean_abs_diff"])
         if diffs:
-            print(f"  {name}  mean|Δ| over clips: {np.mean(diffs):.6f}  "
-                  f"max: {np.max(diffs):.6f}")
+            print(f"    {name}  mean|Δ|: {np.mean(diffs):.6f}    max: {np.max(diffs):.6f}")
     return 0
 
 
