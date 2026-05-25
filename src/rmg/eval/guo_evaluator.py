@@ -195,6 +195,45 @@ class RealGuoEvaluator:
             )
         return emb[inv_idx]
 
+    def encode_text_from_tokens(self, tokens_per_caption: list[list[str]]) -> Tensor:
+        """Encode using HumanML3D's *pre-tagged* word/POS tokens directly.
+
+        Each element of `tokens_per_caption` is a list of "word/POS" strings
+        already in the format `WordVectorizer` expects (e.g. `"left/Loc_VIP"`,
+        `"walks/VERB"`, `"a/DET"`). This bypasses spaCy entirely and preserves
+        HumanML3D's custom *_VIP semantic tags that the Guo text encoder was
+        trained on — fresh spaCy POS tagging never produces those, which
+        silently halves R-precision.
+
+        Pull the upstream tokens from `external/HumanML3D/HumanML3D/texts.zip`
+        (each line is `<caption>#<word/POS word/POS ...>#<start>#<end>`).
+        """
+        max_len = 20
+        B = len(tokens_per_caption)
+        word_embs = torch.zeros(B, max_len + 2, 300)
+        pos_ohot = torch.zeros(B, max_len + 2, 15)
+        cap_lens = torch.zeros(B, dtype=torch.long)
+        for i, raw_tokens in enumerate(tokens_per_caption):
+            toks = list(raw_tokens)[:max_len]
+            full = ["sos/OTHER"] + toks + ["eos/OTHER"]
+            for j, tok in enumerate(full):
+                vec, pos = self._word_vec[tok]
+                word_embs[i, j] = torch.from_numpy(vec)
+                pos_ohot[i, j] = torch.from_numpy(pos)
+            cap_lens[i] = len(full)
+        word_embs = word_embs.to(self._device)
+        pos_ohot = pos_ohot.to(self._device)
+        cap_lens_dev = cap_lens.to(self._device)
+        # Same sort/unsort dance as encode_text_from_strings.
+        sort_idx = torch.argsort(cap_lens_dev, descending=True)
+        inv_idx = torch.empty_like(sort_idx)
+        inv_idx[sort_idx] = torch.arange(sort_idx.numel(), device=sort_idx.device)
+        with torch.no_grad():
+            emb = self._wrapper.text_encoder(
+                word_embs[sort_idx], pos_ohot[sort_idx], cap_lens_dev[sort_idx],
+            )
+        return emb[inv_idx]
+
 
 # ---------------------------------------------------------------------------
 # Stub evaluator for tests

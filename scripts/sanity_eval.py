@@ -52,6 +52,41 @@ from rmg.representation import (
 )
 from rmg.utils import set_seed
 
+import zipfile
+
+
+def _load_pretagged_text_lookup(humanml3d_repo: str | Path) -> dict[str, dict[str, list[str]]]:
+    """Build {clip_id: {caption: [word/POS, ...]}} from HumanML3D's texts.zip.
+
+    The Guo evaluator's POS vocab includes custom *_VIP semantic tags
+    (Loc_VIP, Body_VIP, etc.) that vanilla spaCy never produces. HumanML3D
+    ships pre-tagged tokens in `texts.zip` lines of the form
+    `<caption>#<word/POS word/POS ...>#<start>#<end>`. We need those exact
+    tokens to drive the text encoder correctly.
+    """
+    p = Path(humanml3d_repo) / "HumanML3D" / "texts.zip"
+    out: dict[str, dict[str, list[str]]] = {}
+    with zipfile.ZipFile(p) as zf:
+        for name in zf.namelist():
+            if not name.endswith(".txt"):
+                continue
+            clip_id = Path(name).stem
+            lookup: dict[str, list[str]] = {}
+            for line in zf.read(name).decode("utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split("#")
+                if len(parts) < 2:
+                    continue
+                cap = parts[0].strip()
+                tokens = parts[1].strip().split()
+                if cap and tokens:
+                    lookup[cap] = tokens
+            if lookup:
+                out[clip_id] = lookup
+    return out
+
 
 # HumanML3D published GT-row reference values (Guo et al. 2022 Table 1, used in
 # every follow-up paper's "Real motions" row). Yardstick for this sanity check.
@@ -143,9 +178,14 @@ def main(cfg: DictConfig) -> None:
     skeleton = _load_target_offsets(cfg)
     evaluator = _build_evaluator(cfg, device)
 
+    pretagged_lookup = _load_pretagged_text_lookup(cfg.eval.humanml3d_repo)
+    print(f"[sanity_eval] loaded pre-tagged tokens for {len(pretagged_lookup)} clips "
+          f"from {cfg.eval.humanml3d_repo}/HumanML3D/texts.zip", flush=True)
+
     real_motion_feats: list[np.ndarray] = []
     text_feats: list[np.ndarray] = []
     n_seen = 0
+    n_text_misses = 0
 
     t0 = time.perf_counter()
     for batch in tqdm(loader, desc="decoding real motions"):
@@ -165,7 +205,40 @@ def main(cfg: DictConfig) -> None:
             padded[i, : f.shape[0]] = f
 
         m_emb = evaluator.encode_motion(padded, lengths - 1)
-        t_emb = evaluator.encode_text_from_strings(batch.texts)
+
+        # Pre-tagged token lookup per (clip_id, caption). If a caption isn't
+        # found (shouldn't happen on real test clips), fall back to spaCy.
+        tokens_per_clip: list[list[str]] = []
+        missing_idx: list[int] = []
+        for i, (cid, cap) in enumerate(zip(batch.clip_ids, batch.texts)):
+            toks = pretagged_lookup.get(cid, {}).get(cap)
+            if toks is None:
+                missing_idx.append(i)
+                tokens_per_clip.append([])  # placeholder
+            else:
+                tokens_per_clip.append(toks)
+
+        if missing_idx:
+            n_text_misses += len(missing_idx)
+            fallback_texts = [batch.texts[i] for i in missing_idx]
+            fallback_emb = evaluator.encode_text_from_strings(fallback_texts)
+            # Encode the rest via pre-tagged path
+            good_idx = [i for i in range(len(tokens_per_clip)) if i not in set(missing_idx)]
+            if good_idx:
+                good_emb = evaluator.encode_text_from_tokens(
+                    [tokens_per_clip[i] for i in good_idx]
+                )
+                t_emb = torch.zeros(
+                    len(tokens_per_clip), good_emb.shape[-1], device=good_emb.device
+                )
+                for j, i in enumerate(good_idx):
+                    t_emb[i] = good_emb[j]
+                for j, i in enumerate(missing_idx):
+                    t_emb[i] = fallback_emb[j].to(t_emb.device)
+            else:
+                t_emb = fallback_emb
+        else:
+            t_emb = evaluator.encode_text_from_tokens(tokens_per_clip)
 
         real_motion_feats.append(m_emb.cpu().numpy())
         text_feats.append(t_emb.cpu().numpy())
@@ -173,6 +246,9 @@ def main(cfg: DictConfig) -> None:
         n_seen += x1.shape[0]
         if cfg.eval.max_clips > 0 and n_seen >= cfg.eval.max_clips:
             break
+    if n_text_misses:
+        print(f"[sanity_eval] WARN: {n_text_misses}/{n_seen} captions had no pre-tagged "
+              f"match in texts.zip; fell back to spaCy for those.", flush=True)
 
     M = np.concatenate(real_motion_feats, axis=0)
     T = np.concatenate(text_feats, axis=0)
