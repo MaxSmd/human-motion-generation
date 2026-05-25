@@ -60,6 +60,20 @@ FOOT_LEFT_IDX = (7, 10)   # L_Ankle, L_Foot
 FOOT_RIGHT_IDX = (8, 11)  # R_Ankle, R_Foot
 FOOT_CONTACT_IDX = (*FOOT_LEFT_IDX, *FOOT_RIGHT_IDX)
 
+# HumanML3D's `t2m_kinematic_chain`. Per chain, upstream's IK/FK reset the
+# running rotation to `root_quat` (= quats[0]) at the start, then accumulate
+# local rotations along the chain. Arms therefore do NOT inherit the spine's
+# accumulated rotation — quats[14] is "L_Collar relative to root_quat", not
+# "L_Collar relative to Spine3's global rotation". FK MUST follow the same
+# per-chain convention or upper-body positions drift silently.
+T2M_KINEMATIC_CHAINS: tuple[tuple[int, ...], ...] = (
+    (0, 2, 5, 8, 11),       # right leg
+    (0, 1, 4, 7, 10),       # left leg
+    (0, 3, 6, 9, 12, 15),   # spine + neck + head
+    (9, 14, 17, 19, 21),    # right arm
+    (9, 13, 16, 18, 20),    # left arm
+)
+
 
 @dataclass
 class Skeleton:
@@ -134,14 +148,23 @@ def forward_kinematics(
 ) -> Tensor:
     """Compute world-space joint positions from per-joint local rotations.
 
-    Convention matches HumanML3D's `common/skeleton.py::forward_kinematics_np`:
-    `quats[..., j, :]` is the rotation that takes joint j's *canonical* bone
-    direction (parent → j, in `t2m_raw_offsets`) to its observed direction, so
-    j's own quaternion participates in placing j itself — not only its children
-    as in SMPL-standard FK. Stored quats from `inverse_kinematics_np` use this
-    convention; mixing them with SMPL-standard FK silently produces wrong
-    positions everywhere except the identity case (which is why `t_pose_joints`
-    looks fine).
+    Matches HumanML3D's `common/skeleton.py::forward_kinematics_np` exactly:
+    iterates over `T2M_KINEMATIC_CHAINS`, resetting the running rotation to
+    `quats[0]` (the root quaternion) at the start of every chain. The chain
+    rotation then accumulates `R = R · quats[chain[i]]` per joint, and joint
+    placement is `position[chain[i]] = position[chain[i-1]] + R · offset[chain[i]]`.
+
+    Why per-chain rather than per-kinematic-parent: arms hang off Spine3
+    (joint 9), but upstream's IK stores `quats[14]` (R_Collar) as the
+    rotation taking the *canonical* collar direction to the observed one in
+    the *root* frame — not in Spine3's frame. SMPL-standard FK (parent
+    propagation) silently bakes the spine rotation into arm positions and
+    drifts the upper body by 10+ cm.
+
+    Stored quats from `inverse_kinematics_np` use this per-chain convention;
+    using SMPL-standard FK with them produces correct lower body + spine but
+    wrong arms (head is on the spine chain so it stays correct, which is
+    why `t_pose_joints` and most regression tests miss this).
 
     Args:
         skeleton: rest-pose offsets and parents.
@@ -157,23 +180,27 @@ def forward_kinematics(
         raise ValueError(f"translation must be (..., 3), got {tuple(translation.shape)}")
 
     offsets = skeleton.offsets.to(dtype=quats.dtype, device=quats.device)
-    parents = skeleton.parents
-
     leading = quats.shape[:-2]
-    global_quats: list[Tensor] = [None] * NUM_JOINTS  # type: ignore[list-item]
-    positions: list[Tensor] = [None] * NUM_JOINTS    # type: ignore[list-item]
-    for j in range(NUM_JOINTS):
-        local_q = quats[..., j, :]
-        if j == ROOT_JOINT:
-            global_quats[j] = local_q
-            positions[j] = translation
-        else:
-            p = parents[j]
-            gq = quat_mul(global_quats[p], local_q)
-            global_quats[j] = gq
-            off_j = offsets[j].expand(*leading, 3)
-            positions[j] = positions[p] + quat_rotate(gq, off_j)
-    return torch.stack(positions, dim=-2)
+    root_quat = quats[..., 0, :]
+
+    positions: list[Tensor | None] = [None] * NUM_JOINTS
+    positions[ROOT_JOINT] = translation
+
+    for chain in T2M_KINEMATIC_CHAINS:
+        # Per-chain running rotation, reset to root_quat (upstream convention).
+        R = root_quat
+        for i in range(1, len(chain)):
+            R = quat_mul(R, quats[..., chain[i], :])
+            off = offsets[chain[i]].expand(*leading, 3)
+            parent_pos = positions[chain[i - 1]]
+            if parent_pos is None:
+                raise RuntimeError(
+                    f"chain {chain} requires position[{chain[i - 1]}] "
+                    f"to be set by an earlier chain — check T2M_KINEMATIC_CHAINS order"
+                )
+            positions[chain[i]] = parent_pos + quat_rotate(R, off)
+
+    return torch.stack(positions, dim=-2)  # type: ignore[arg-type]
 
 
 def t_pose_joints(skeleton: Skeleton, batch_shape: tuple[int, ...] = ()) -> Tensor:
