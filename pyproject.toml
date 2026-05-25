@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "rmg"
+name = "motion-reproductions"
 version = "0.0.1"
-description = "Riemannian Motion Generation"
+description = "Shared codebase for RMG, MoMask, and MARDM reproductions on HumanML3D"
 requires-python = ">=3.10"
 dependencies = [
     "torch>=2.4",
@@ -29,6 +29,7 @@ dev = ["pytest", "pytest-xdist", "ruff", "mypy"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["rmg*", "momask*", "mardm*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
