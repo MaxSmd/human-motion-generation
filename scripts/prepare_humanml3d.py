@@ -343,7 +343,37 @@ def stage_pack(
                 # silently skip missing files; user gets a count summary
                 continue
             joints = np.load(joints_path).reshape(-1, 22, 3)
+
+            # Subset-specific pre-trim that upstream applies *before* slicing
+            # with index.csv (raw_pose_processing.ipynb cell 11). `index.csv`'s
+            # start/end frames are post-trim indices, so without this our
+            # slices are off for these 5 subsets. `fps_for_trim=20` matches
+            # upstream's behavior (cell 11 uses whatever `fps` happened to be
+            # left in scope from the previous loop — usually 20 since that's
+            # what `amass_to_pose` returns last; we hard-code it explicitly).
+            fps_for_trim = 20
+            if "Eyes_Japan_Dataset" in src:
+                joints = joints[3 * fps_for_trim:]
+            elif "MPI_HDM05" in src:
+                joints = joints[3 * fps_for_trim:]
+            elif "TotalCapture" in src:
+                joints = joints[1 * fps_for_trim:]
+            elif "MPI_Limits" in src:
+                joints = joints[1 * fps_for_trim:]
+            elif "Transitions_mocap" in src:
+                joints = joints[int(0.5 * fps_for_trim):]
+
             joints = joints[start:end] if end > 0 else joints[start:]
+
+            # X-flip — applied by upstream to EVERY non-humanact12 clip
+            # (raw_pose_processing.ipynb cell 11: `data[..., 0] *= -1`). The
+            # Guo evaluator was trained on these X-flipped joints; without the
+            # flip our IK assigns L/R joint rotations to the wrong side and
+            # R-precision collapses (motion's L/R is opposite of caption's).
+            if "humanact12" not in src:
+                joints = joints.copy()
+                joints[..., 0] *= -1
+
             if joints.shape[0] < 40:
                 continue
             joints = torch.from_numpy(joints).float()
