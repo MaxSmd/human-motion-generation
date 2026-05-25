@@ -54,7 +54,6 @@ slurm/                  sbatch templates (12g + 24g partitions; QoS: students_no
   sanity_train.sbatch   2-min tiny-DiT end-to-end pipeline check
   sanity_eval.sbatch    decode/eval check on real data (NO training)
   prep_data.sbatch      full prep: AMASS → joints → packed zip
-  repack_data.sbatch    CPU-only re-pack from existing joints cache
   train_rmg_base.sbatch RMG-base (6L/384h, 150k steps, ~3.5d)
   train_rmg_large.sbatch
                         RMG-large (24L/1024h, 600k steps)
@@ -131,8 +130,7 @@ shared mount once** — see below for how to share.
 ## Cluster mounts: per-user vs shared
 
 The cluster gives each of us a per-user `/mnt/home/<user>/` mount, and there's
-a shared mount (let's call it `/mnt/shared/motion/` — adjust to the actual
-path). Default rule: **anything that's expensive to produce and identical
+a shared mount `/mnt/projects/drl4cvb/human-motion/`. Default rule: **anything that's expensive to produce and identical
 across users goes on the shared mount, read-only; everything else stays
 per-user.**
 
@@ -246,7 +244,7 @@ numbers (HumanML3D ground-truth row, Guo et al. 2022):
 To re-verify:
 
 ```bash
-sbatch slurm/repack_data.sbatch                 # ~10 min CPU
+sbatch slurm/prep_data.sbatch                 # ~10 min CPU
 MAX_CLIPS=512 sbatch slurm/sanity_eval.sbatch   # ~3 min
 cat slurm/logs/rmg-sanity-eval-*.out | grep -A 10 verdict
 ```
