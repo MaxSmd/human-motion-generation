@@ -199,75 +199,47 @@ sbatch slurm/sanity_train.sbatch   # 2 min end-to-end
 
 ---
 
-## <a id="data-status"></a>Data status — read before training
+## <a id="data-status"></a>Data status
 
-The packed dataset has had three known bugs. **Until `sanity_eval` reports
-PASS on real data, no method should train against this data**: every metric
-you'd compute would be against a broken eval baseline.
+Before training anything new, run `sanity_eval` and confirm the numbers below.
+The pipeline had five upstream-incompatibilities that took several rounds of
+debugging to find; everything below was wrong silently and only `sanity_eval`
+on real motions exposed it.
 
-### What's been fixed
+| Fix | Where | Effect on `diversity_real / R@3` |
+|-----|-------|----------------------------------|
+| FK uses upstream's *per-chain* rotation convention (reset `R = root_quat` at the start of each kinematic chain in `T2M_KINEMATIC_CHAINS`, not propagate by kinematic parent). Wrong propagation drifts arms by 10+ cm; head and lower body stay correct, which is why every unit test passed. | `src/rmg/representation/skeleton.py::forward_kinematics` | `4.6 / 0.27 → 9.32 / 0.34` |
+| Prep applies upstream's X-flip (`data[..., 0] *= -1`) and the five subset pre-trims (`Eyes_Japan_Dataset`, `MPI_HDM05`, `TotalCapture`, `MPI_Limits`, `Transitions_mocap`). Without the X-flip, IK assigns L/R rotations to the wrong side. | `scripts/prepare_humanml3d.py::stage_pack` | small move on R@k |
+| Prep rescales root translation by `scale_rt = tgt_leg_len / src_leg_len` (upstream's `uniform_skeleton` does this). Without it, XZ velocity features are on each subject's own scale. | `stage_pack` | not measurable on sanity, kept on principle |
+| Text encoder uses HumanML3D's *pre-tagged* tokens from `texts.zip` (`<caption>#<word/POS ...>#<start>#<end>`) instead of re-tagging with spaCy. The Guo POS vocabulary includes 5 custom `*_VIP` tags (`Loc_VIP`, `Body_VIP`, etc.) that spaCy never produces. | `sanity_eval.py` + `RealGuoEvaluator.encode_text_from_tokens` | `R@1 0.19 → 0.32` |
+| Pair only whole-clip captions (`start = end = 0`) with the full motion; sub-clip captions describe a portion and would otherwise be paired with the wrong motion. | `sanity_eval._load_pretagged_text_lookup(whole_clip_only=True)` | ~4% of captions filtered |
+| Prep generates mirrored `M`-prefixed clips (upstream `swap_left_right`: L/R joint-index swap). HumanML3D's test split is 4384 clips (half regular, half mirrored); without the mirrors we evaluate on half the data and R@k undershoots. | `stage_pack` | *being verified* |
 
-1. **FK convention** (in `src/rmg/representation/skeleton.py::forward_kinematics`).
-   We used SMPL-standard "rotation OF the outgoing frame"; HumanML3D's upstream
-   uses "rotation that takes the canonical bone direction to the observed one"
-   (j's own quaternion participates in placing j itself). Fixed by rotating
-   the offset by `gq = global_parent * local_j` instead of `global_parent`.
-   *Improvement on sanity_eval: diversity_real 4.6 → 7.1.*
+Diagnostic that pins our 263-D output bit-equal to upstream's `process_file`
+(per-block max |Δ| ≈ 1e-6, position round-trip ≈ 0 on the canonical body
+`000021`): `scripts/diagnose_h3d_conversion.py` → `sbatch slurm/diagnose_h3d.sbatch`.
 
-2. **Translation rescaling at prep** (in `scripts/prepare_humanml3d.py::stage_pack`).
-   Upstream's `uniform_skeleton` rescales root translation by
-   `scale_rt = tgt_leg_len / src_leg_len` so XZ velocity is in canonical-body
-   scale. We weren't applying this. *Improvement on sanity_eval: none
-   measured (so the body-size variance in HumanML3D may be smaller than I
-   thought) but the fix is correct in principle and we keep it.*
+### Sanity_eval verdicts to clear before training
 
-3. **X-flip + subset pre-trim at prep** (also in `stage_pack`).
-   Upstream's `raw_pose_processing.ipynb` cell 11 applies `data[..., 0] *= -1`
-   to *every* non-humanact12 clip, and pre-trims a few seconds from
-   `Eyes_Japan_Dataset`, `MPI_HDM05`, `TotalCapture`, `MPI_Limits`, and
-   `Transitions_mocap`. Without the flip our IK assigns L/R joint rotations
-   to the wrong side and R-precision collapses (captions say "left", motions
-   look right). *Expected to close the remaining gap to paper.*
+| Metric           | Paper GT | Threshold |
+|------------------|----------|-----------|
+| `diversity_real` | 9.503    | within ±1.5 |
+| `R@3`            | 0.797    | within ±0.10 |
+| `MM-Dist`        | 2.974    | within ±1.0 |
+| `FID(real, real)`| 0.002    | < 0.5 (sample-noise floor on 2110 clips) |
 
-### What needs verification
-
-Run `sanity_eval` against a freshly re-packed dataset. Expected real-data
-numbers (HumanML3D ground-truth row, Guo et al. 2022):
-
-| Metric           | Expected   | Last seen (pre-X-flip fix) | Verdict |
-|------------------|------------|----------------------------|---------|
-| `diversity_real` | ≈ 9.503    | 7.118                       | not yet |
-| `R@1 / R@2 / R@3`| 0.51 / 0.70 / 0.80 | 0.11 / 0.21 / 0.27 | not yet |
-| `MM-Dist`        | ≈ 2.974    | 5.86                        | not yet |
-| `FID(real, real)`| ≈ 0.002    | 0.76                        | not yet |
-
-To re-verify:
+To verify:
 
 ```bash
-sbatch slurm/prep_data.sbatch                 # ~10 min CPU
-MAX_CLIPS=512 sbatch slurm/sanity_eval.sbatch   # ~3 min
-cat slurm/logs/rmg-sanity-eval-*.out | grep -A 10 verdict
+rm external/data/humanml3d_packed/humanml3d.zip
+sbatch slurm/prep_data.sbatch                   # ~10 min CPU (raw-pose stage is cached)
+sbatch slurm/sanity_eval.sbatch                 # ~2 min, full 4384-clip split
 ```
 
-### If sanity_eval still fails
+### Once sanity passes
 
-Two open questions if the next round doesn't pass:
-
-- **Our `forward_kinematics` may still differ from upstream's somewhere
-  subtle.** Easy test: `scripts/diagnose_h3d_conversion.py` does an element-
-  wise diff per feature block; if `cont6d` is still far from zero, our FK is
-  not bit-comparable. *Add a regression test that pins this.*
-- **`spaCy` POS tagging may not match** what the Guo evaluator was trained
-  against (different model versions ⇒ different POS tags ⇒ different word/POS
-  embeddings ⇒ different text features). The text encoder is a BiGRU over
-  GloVe + POS one-hot; if R-precision is still bad but `diversity_real` is
-  fine, this is the suspect.
-
-### When sanity passes
-
-- Existing `rmg-base` checkpoint is trained on L/R-confused data → **toss it,
-  retrain from scratch** (3.5 days). The model learned anti-handedness.
-- Anyone starting MoMask / MARDM gets a clean dataset to train against.
+The existing `rmg-base` checkpoint was trained on L/R-confused data and must
+be discarded. Re-train from scratch (`sbatch slurm/train_rmg_base.sqsh`, ~3.5d).
 
 ---
 

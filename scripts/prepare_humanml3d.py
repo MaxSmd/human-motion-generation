@@ -407,6 +407,38 @@ def stage_pack(
             zf.writestr(f"{clip_id}.pt", buf.getvalue())
             n_written += 1
 
+            # Mirror — upstream's `swap_left_right` followed by IK. For non-
+            # humanact12 clips upstream saves both `<id>.npy` (X-flipped) and
+            # `M<id>.npy` (X-flipped + L/R-joint-swapped, i.e. original-pose
+            # body with left and right indices switched). The Guo evaluator's
+            # 4384-clip test split is half regular, half M-prefixed.
+            if "humanact12" not in src:
+                right_chain = [2, 5, 8, 11, 14, 17, 19, 21]
+                left_chain  = [1, 4, 7, 10, 13, 16, 18, 20]
+                joints_m = joints.numpy().copy()
+                joints_m[..., 0] *= -1                                # cancel our X-flip
+                tmp = joints_m[:, right_chain].copy()
+                joints_m[:, right_chain] = joints_m[:, left_chain]
+                joints_m[:, left_chain] = tmp
+                joints_m_t = torch.from_numpy(joints_m).float()
+
+                quat_params_m = skel.inverse_kinematics_np(
+                    joints_m, face_joint_indx, smooth_forward=False
+                )
+                src_offset_m = _src_skel_for_offsets.get_offsets_joints(joints_m_t[0]).numpy()
+                src_leg_len_m = abs(src_offset_m[5]).max() + abs(src_offset_m[8]).max()
+                scale_rt_m = float(_tgt_leg_len / src_leg_len_m)
+                translation_m = (joints_m_t[:, 0, :] * scale_rt_m).clone()
+                quats_m = torch.from_numpy(quat_params_m).float()
+
+                m_id = f"M{clip_id}"
+                m_captions = texts_by_clip.get(m_id, captions)
+                blob_m = {"translation": translation_m, "quats": quats_m, "texts": m_captions}
+                buf_m = io.BytesIO()
+                torch.save(blob_m, buf_m)
+                zf.writestr(f"{m_id}.pt", buf_m.getvalue())
+                n_written += 1
+
     print(f"[stage_pack] wrote {n_written} new clips → {zip_out}")
     if n_skipped_existing:
         print(f"[stage_pack] skipped {n_skipped_existing} already-packed clips")
