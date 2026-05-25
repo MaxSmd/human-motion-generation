@@ -55,36 +55,57 @@ from rmg.utils import set_seed
 import zipfile
 
 
-def _load_pretagged_text_lookup(humanml3d_repo: str | Path) -> dict[str, dict[str, list[str]]]:
-    """Build {clip_id: {caption: [word/POS, ...]}} from HumanML3D's texts.zip.
+def _load_pretagged_text_lookup(
+    humanml3d_repo: str | Path, whole_clip_only: bool = True,
+) -> dict[str, list[tuple[str, list[str]]]]:
+    """Build {clip_id: [(caption, [word/POS, ...]), ...]} from texts.zip.
 
-    The Guo evaluator's POS vocab includes custom *_VIP semantic tags
-    (Loc_VIP, Body_VIP, etc.) that vanilla spaCy never produces. HumanML3D
-    ships pre-tagged tokens in `texts.zip` lines of the form
-    `<caption>#<word/POS word/POS ...>#<start>#<end>`. We need those exact
-    tokens to drive the text encoder correctly.
+    Each line in HumanML3D's `texts.zip` is
+        `<caption>#<word/POS word/POS ...>#<start>#<end>`
+    where `start`/`end` are in seconds. When `start != 0` or `end != 0`, the
+    caption describes a SUB-PORTION of the clip (not the whole motion). The
+    Guo evaluator pairs caption with motion at *matching* frame indices; we
+    feed the full motion in sanity_eval, so we must only evaluate against
+    whole-clip captions (start = end = 0). Set `whole_clip_only=False` only
+    if you handle sub-clip slicing yourself.
+
+    Also includes the *_VIP semantic tags HumanML3D ships pre-tagged — fresh
+    spaCy POS tagging at eval time loses these and silently halves R-precision.
     """
     p = Path(humanml3d_repo) / "HumanML3D" / "texts.zip"
-    out: dict[str, dict[str, list[str]]] = {}
+    out: dict[str, list[tuple[str, list[str]]]] = {}
+    n_total = 0
+    n_kept = 0
     with zipfile.ZipFile(p) as zf:
         for name in zf.namelist():
             if not name.endswith(".txt"):
                 continue
             clip_id = Path(name).stem
-            lookup: dict[str, list[str]] = {}
+            captions: list[tuple[str, list[str]]] = []
             for line in zf.read(name).decode("utf-8").splitlines():
                 line = line.strip()
                 if not line:
                     continue
                 parts = line.split("#")
-                if len(parts) < 2:
+                if len(parts) < 4:
                     continue
+                n_total += 1
                 cap = parts[0].strip()
                 tokens = parts[1].strip().split()
+                try:
+                    start = float(parts[2])
+                    end = float(parts[3])
+                except ValueError:
+                    continue
+                if whole_clip_only and (start != 0.0 or end != 0.0):
+                    continue
                 if cap and tokens:
-                    lookup[cap] = tokens
-            if lookup:
-                out[clip_id] = lookup
+                    captions.append((cap, tokens))
+                    n_kept += 1
+            if captions:
+                out[clip_id] = captions
+    print(f"[sanity_eval] text lookup: kept {n_kept}/{n_total} caption lines "
+          f"(whole_clip_only={whole_clip_only}) across {len(out)} clips", flush=True)
     return out
 
 
@@ -179,13 +200,12 @@ def main(cfg: DictConfig) -> None:
     evaluator = _build_evaluator(cfg, device)
 
     pretagged_lookup = _load_pretagged_text_lookup(cfg.eval.humanml3d_repo)
-    print(f"[sanity_eval] loaded pre-tagged tokens for {len(pretagged_lookup)} clips "
-          f"from {cfg.eval.humanml3d_repo}/HumanML3D/texts.zip", flush=True)
 
     real_motion_feats: list[np.ndarray] = []
     text_feats: list[np.ndarray] = []
     n_seen = 0
     n_text_misses = 0
+    cap_rng = np.random.default_rng(int(cfg.eval.seed))
 
     t0 = time.perf_counter()
     for batch in tqdm(loader, desc="decoding real motions"):
@@ -206,34 +226,38 @@ def main(cfg: DictConfig) -> None:
 
         m_emb = evaluator.encode_motion(padded, lengths - 1)
 
-        # Pre-tagged token lookup per (clip_id, caption). If a caption isn't
-        # found (shouldn't happen on real test clips), fall back to spaCy.
+        # Pick a WHOLE-CLIP pre-tagged caption per clip in the batch. This
+        # overrides whatever caption the dataset's random.choice handed us
+        # (the dataset doesn't filter sub-clip captions). Falls back to spaCy
+        # if no whole-clip caption exists for the clip (extremely rare).
         tokens_per_clip: list[list[str]] = []
-        missing_idx: list[int] = []
-        for i, (cid, cap) in enumerate(zip(batch.clip_ids, batch.texts)):
-            toks = pretagged_lookup.get(cid, {}).get(cap)
-            if toks is None:
-                missing_idx.append(i)
-                tokens_per_clip.append([])  # placeholder
-            else:
+        fallback_texts: list[str] = []
+        fallback_slots: list[int] = []
+        for i, cid in enumerate(batch.clip_ids):
+            caps = pretagged_lookup.get(cid, [])
+            if caps:
+                # Random whole-clip caption; seeded for reproducibility.
+                cap, toks = caps[int(cap_rng.integers(len(caps)))]
                 tokens_per_clip.append(toks)
+            else:
+                tokens_per_clip.append([])  # placeholder
+                fallback_slots.append(i)
+                fallback_texts.append(batch.texts[i])
 
-        if missing_idx:
-            n_text_misses += len(missing_idx)
-            fallback_texts = [batch.texts[i] for i in missing_idx]
+        if fallback_slots:
+            n_text_misses += len(fallback_slots)
             fallback_emb = evaluator.encode_text_from_strings(fallback_texts)
-            # Encode the rest via pre-tagged path
-            good_idx = [i for i in range(len(tokens_per_clip)) if i not in set(missing_idx)]
-            if good_idx:
+            good_slots = [i for i in range(len(tokens_per_clip)) if i not in set(fallback_slots)]
+            if good_slots:
                 good_emb = evaluator.encode_text_from_tokens(
-                    [tokens_per_clip[i] for i in good_idx]
+                    [tokens_per_clip[i] for i in good_slots]
                 )
                 t_emb = torch.zeros(
                     len(tokens_per_clip), good_emb.shape[-1], device=good_emb.device
                 )
-                for j, i in enumerate(good_idx):
+                for j, i in enumerate(good_slots):
                     t_emb[i] = good_emb[j]
-                for j, i in enumerate(missing_idx):
+                for j, i in enumerate(fallback_slots):
                     t_emb[i] = fallback_emb[j].to(t_emb.device)
             else:
                 t_emb = fallback_emb
@@ -247,8 +271,8 @@ def main(cfg: DictConfig) -> None:
         if cfg.eval.max_clips > 0 and n_seen >= cfg.eval.max_clips:
             break
     if n_text_misses:
-        print(f"[sanity_eval] WARN: {n_text_misses}/{n_seen} captions had no pre-tagged "
-              f"match in texts.zip; fell back to spaCy for those.", flush=True)
+        print(f"[sanity_eval] WARN: {n_text_misses}/{n_seen} clips had no whole-clip "
+              f"caption; fell back to spaCy for those.", flush=True)
 
     M = np.concatenate(real_motion_feats, axis=0)
     T = np.concatenate(text_feats, axis=0)
