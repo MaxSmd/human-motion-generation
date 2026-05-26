@@ -173,6 +173,26 @@ def _run_eval(label: str, motion_dir: Path, text_dir: Path, split_file: Path,
     print(f"  text_dir:   {text_dir}", flush=True)
     print(f"  split:      {split_file}", flush=True)
 
+    # Spot-check 3 files: what shape and dtype are these?
+    sample_files = sorted(motion_dir.glob("*.npy"))[:3]
+    print(f"  sample file shapes:", flush=True)
+    for f in sample_files:
+        try:
+            arr = np.load(f)
+            print(f"    {f.name}: shape={arr.shape}  dtype={arr.dtype}  "
+                  f"finite={bool(np.isfinite(arr).all())}", flush=True)
+        except Exception as e:
+            print(f"    {f.name}: FAILED TO LOAD ({type(e).__name__}: {e})", flush=True)
+
+    # Verify a few IDs from the split actually have a matching file
+    split_ids = [l.strip() for l in Path(split_file).read_text().splitlines() if l.strip()]
+    missing = [sid for sid in split_ids[:20] if not (motion_dir / f"{sid}.npy").exists()]
+    if missing:
+        print(f"  first-20 split IDs missing in motion_dir: {missing}", flush=True)
+    text_missing = [sid for sid in split_ids[:20] if not (text_dir / f"{sid}.txt").exists()]
+    if text_missing:
+        print(f"  first-20 split IDs missing in text_dir: {text_missing}", flush=True)
+
     n_bad, bad = _count_nan_in_motion_dir(motion_dir)
     print(f"  NaN/inf motion .npy files: {n_bad}", flush=True)
     if n_bad and n_bad <= 20:
@@ -182,7 +202,16 @@ def _run_eval(label: str, motion_dir: Path, text_dir: Path, split_file: Path,
     w_vec = WordVectorizer(str(text_to_motion_repo / "glove"), "our_vab")
     mean = np.load(text_to_motion_repo / "checkpoints/t2m/Comp_v6_KLD01/meta/mean.npy")
     std  = np.load(text_to_motion_repo / "checkpoints/t2m/Comp_v6_KLD01/meta/std.npy")
-    dataset = Text2MotionDatasetV2(opt, mean, std, str(split_file), w_vec)
+    try:
+        dataset = Text2MotionDatasetV2(opt, mean, std, str(split_file), w_vec)
+    except ValueError as e:
+        print(f"  Text2MotionDatasetV2 ctor failed: {e}", flush=True)
+        print(f"  (likely: all motion files filtered out — wrong shape, wrong content, "
+              f"or text files missing)", flush=True)
+        return
+    if len(dataset) == 0:
+        print(f"  dataset is EMPTY — no valid (motion, text) pairs constructed", flush=True)
+        return
     loader = DataLoader(dataset, batch_size=32, shuffle=True, num_workers=0, drop_last=True)
     print(f"  dataset: {len(dataset)} entries  loader: {len(loader)} batches", flush=True)
 
