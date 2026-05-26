@@ -128,14 +128,14 @@ def _vocab_coverage_check(texts_zip: Path, w_vec) -> None:
         print(f"  first 30 unk tokens: {unk_examples}", flush=True)
 
 
-def _build_upstream_opt(staging: Path, text_to_motion_repo: Path) -> types.SimpleNamespace:
+def _build_upstream_opt(motion_dir: Path, text_dir: Path, text_to_motion_repo: Path) -> types.SimpleNamespace:
     opt = types.SimpleNamespace()
     opt.dataset_name = "t2m"
     opt.max_motion_length = 196
     opt.max_text_len = 20
     opt.unit_length = 4
-    opt.motion_dir = str(staging / "new_joint_vecs")
-    opt.text_dir = str(staging / "texts")
+    opt.motion_dir = str(motion_dir)
+    opt.text_dir = str(text_dir)
     opt.joints_num = 22
     opt.dim_pose = 263
     opt.checkpoints_dir = str(text_to_motion_repo / "checkpoints")
@@ -148,6 +148,113 @@ def _build_upstream_opt(staging: Path, text_to_motion_repo: Path) -> types.Simpl
     opt.dim_movement_enc_hidden = 512
     opt.dim_movement_latent = 512
     return opt
+
+
+def _count_nan_in_motion_dir(motion_dir: Path) -> tuple[int, list[str]]:
+    """Scan all .npy files for NaN/inf; return (count, list of bad clip names)."""
+    bad = []
+    for npy in sorted(motion_dir.glob("*.npy")):
+        arr = np.load(npy)
+        if not np.isfinite(arr).all():
+            bad.append(npy.stem)
+    return len(bad), bad
+
+
+def _run_eval(label: str, motion_dir: Path, text_dir: Path, split_file: Path,
+              text_to_motion_repo: Path, humanml3d_repo: Path) -> None:
+    """Run upstream's Text2MotionDatasetV2 + matching-score loop on the given
+    motion_dir / text_dir / split_file. NaN-robust: drops NaN rows from R@k."""
+    from data.dataset import Text2MotionDatasetV2  # type: ignore
+    from networks.evaluator_wrapper import EvaluatorModelWrapper  # type: ignore
+    from utils.word_vectorizer import WordVectorizer  # type: ignore
+
+    print(f"\n----- {label} -----", flush=True)
+    print(f"  motion_dir: {motion_dir}", flush=True)
+    print(f"  text_dir:   {text_dir}", flush=True)
+    print(f"  split:      {split_file}", flush=True)
+
+    n_bad, bad = _count_nan_in_motion_dir(motion_dir)
+    print(f"  NaN/inf motion .npy files: {n_bad}", flush=True)
+    if n_bad and n_bad <= 20:
+        print(f"  bad clips: {bad}", flush=True)
+
+    opt = _build_upstream_opt(motion_dir, text_dir, text_to_motion_repo)
+    w_vec = WordVectorizer(str(text_to_motion_repo / "glove"), "our_vab")
+    mean = np.load(text_to_motion_repo / "checkpoints/t2m/Comp_v6_KLD01/meta/mean.npy")
+    std  = np.load(text_to_motion_repo / "checkpoints/t2m/Comp_v6_KLD01/meta/std.npy")
+    dataset = Text2MotionDatasetV2(opt, mean, std, str(split_file), w_vec)
+    loader = DataLoader(dataset, batch_size=32, shuffle=True, num_workers=0, drop_last=True)
+    print(f"  dataset: {len(dataset)} entries  loader: {len(loader)} batches", flush=True)
+
+    eval_wrapper = EvaluatorModelWrapper(opt)
+
+    def _encode_motion(motions, m_lens):
+        m_sort = torch.argsort(m_lens, descending=True)
+        m_inv = torch.empty_like(m_sort)
+        m_inv[m_sort] = torch.arange(m_sort.numel())
+        sorted_emb = eval_wrapper.get_motion_embeddings(motions[m_sort], m_lens[m_sort])
+        return sorted_emb[m_inv]
+
+    def _encode_text(word_embs, pos_ohots, sent_lens):
+        t_sort = torch.argsort(sent_lens, descending=True)
+        t_inv = torch.empty_like(t_sort)
+        t_inv[t_sort] = torch.arange(t_sort.numel())
+        with torch.no_grad():
+            emb = eval_wrapper.text_encoder(
+                word_embs[t_sort].to(opt.device).float(),
+                pos_ohots[t_sort].to(opt.device).float(),
+                sent_lens[t_sort],
+            )
+        return emb[t_inv]
+
+    all_text = []
+    all_motion = []
+    with torch.no_grad():
+        for batch in loader:
+            word_embs, pos_ohots, _, sent_lens, motions, m_lens, _ = batch
+            text_emb = _encode_text(word_embs, pos_ohots, sent_lens).cpu().numpy()
+            motion_emb = _encode_motion(motions, m_lens).cpu().numpy()
+            all_text.append(text_emb)
+            all_motion.append(motion_emb)
+    T = np.concatenate(all_text, axis=0)
+    M = np.concatenate(all_motion, axis=0)
+
+    # NaN-robust R@k + MM-Dist on paired (T, M)
+    good = np.isfinite(T).all(-1) & np.isfinite(M).all(-1)
+    n_dropped = int((~good).sum())
+    if n_dropped:
+        print(f"  dropping {n_dropped}/{len(T)} pairs with NaN/inf embeddings", flush=True)
+    T = T[good]; M = M[good]
+    n = len(T)
+    bs = 32
+    nb = n // bs
+    rng = np.random.default_rng(0)
+    perm = rng.permutation(n)
+    T = T[perm]; M = M[perm]
+    top_k = np.zeros(3, dtype=np.float64)
+    mm_sum = 0.0
+    for b in range(nb):
+        s = slice(b * bs, (b + 1) * bs)
+        diff = T[s][:, None, :] - M[s][None, :, :]
+        dist = np.linalg.norm(diff, axis=-1)
+        order = np.argsort(dist, axis=1)
+        for k in range(3):
+            top_k[k] += ((order[:, : k + 1] == np.arange(bs)[:, None]).any(axis=1)).sum()
+        mm_sum += float(np.trace(dist))
+    r_prec = top_k / (nb * bs)
+    mm_dist = mm_sum / (nb * bs)
+    # Diversity on motion embeddings
+    n_pairs = min(300, len(M) // 2)
+    ia = rng.choice(len(M), n_pairs, replace=False)
+    ib = rng.choice(len(M), n_pairs, replace=False)
+    diversity = float(np.linalg.norm(M[ia] - M[ib], axis=-1).mean())
+
+    print(f"  pairs used:        {nb * bs}", flush=True)
+    print(f"  MM-Dist:           {mm_dist:.4f}   paper=2.974", flush=True)
+    print(f"  R@1 / R@2 / R@3:   {r_prec[0]:.4f}  {r_prec[1]:.4f}  {r_prec[2]:.4f}",
+          flush=True)
+    print(f"                 paper:  0.5110  0.7030  0.7970", flush=True)
+    print(f"  diversity_real:    {diversity:.4f}   paper=9.503", flush=True)
 
 
 def main() -> None:
@@ -198,107 +305,40 @@ def main() -> None:
             humanml3d_repo / "HumanML3D" / "texts.zip", text_dir
         )
 
-    # ------------------------------------------------------------------
-    _section("3. Build upstream Text2MotionDatasetV2")
-    # ------------------------------------------------------------------
-    opt = _build_upstream_opt(staging, text_to_motion_repo)
-    mean = np.load(
-        text_to_motion_repo / "checkpoints" / "t2m" / "Comp_v6_KLD01" / "meta" / "mean.npy"
-    )
-    std = np.load(
-        text_to_motion_repo / "checkpoints" / "t2m" / "Comp_v6_KLD01" / "meta" / "std.npy"
-    )
-    split_file = str(humanml3d_repo / "HumanML3D" / "test.txt")
-    print(f"  motion_dir: {opt.motion_dir}  ({n_motions} npy files)", flush=True)
-    print(f"  text_dir:   {opt.text_dir}    ({n_texts} txt files)", flush=True)
-    print(f"  split:      {split_file}", flush=True)
-
-    dataset = Text2MotionDatasetV2(opt, mean, std, split_file, w_vec)
-    print(f"  dataset:    {len(dataset)} entries "
-          f"(after pointer + sub-clip expansion)", flush=True)
-
-    loader = DataLoader(dataset, batch_size=32, shuffle=True, num_workers=0,
-                        drop_last=True)
-    print(f"  loader:     {len(loader)} batches × 32", flush=True)
+    split_file = humanml3d_repo / "HumanML3D" / "test.txt"
 
     # ------------------------------------------------------------------
-    _section("4. Eval with upstream EvaluatorModelWrapper + matching-score loop")
+    _section("3. Upstream pipeline on OUR data")
     # ------------------------------------------------------------------
-    eval_wrapper = EvaluatorModelWrapper(opt)
-
-    matching_score_sum = 0.0
-    top_k_count = np.zeros(3, dtype=np.float64)
-    all_size = 0
-    all_motion_emb = []
-
-    def _encode_motion(motions, m_lens):
-        """Same as upstream.get_motion_embeddings but with sort + unsort so we
-        can pair embeddings with text by original-batch index."""
-        m_sort = torch.argsort(m_lens, descending=True)
-        m_inv = torch.empty_like(m_sort)
-        m_inv[m_sort] = torch.arange(m_sort.numel())
-        sorted_emb = eval_wrapper.get_motion_embeddings(motions[m_sort], m_lens[m_sort])
-        return sorted_emb[m_inv]
-
-    def _encode_text(word_embs, pos_ohots, sent_lens):
-        """text_encoder needs cap_lens sorted desc (pack_padded_sequence with
-        enforce_sorted=True). Sort, encode, undo."""
-        t_sort = torch.argsort(sent_lens, descending=True)
-        t_inv = torch.empty_like(t_sort)
-        t_inv[t_sort] = torch.arange(t_sort.numel())
-        with torch.no_grad():
-            emb = eval_wrapper.text_encoder(
-                word_embs[t_sort].to(opt.device).float(),
-                pos_ohots[t_sort].to(opt.device).float(),
-                sent_lens[t_sort],
-            )
-        return emb[t_inv]
-
-    t0 = time.perf_counter()
-    with torch.no_grad():
-        for idx, batch in enumerate(loader):
-            word_embs, pos_ohots, _, sent_lens, motions, m_lens, _ = batch
-            motion_emb = _encode_motion(motions, m_lens)
-            text_emb = _encode_text(word_embs, pos_ohots, sent_lens)
-            tn = text_emb.cpu().numpy()
-            mn = motion_emb.cpu().numpy()
-            B = tn.shape[0]
-            # Euclidean distance matrix (B, B)
-            diff = tn[:, None, :] - mn[None, :, :]
-            dist = np.linalg.norm(diff, axis=-1)
-            matching_score_sum += float(np.trace(dist))
-            order = np.argsort(dist, axis=1)
-            for k in range(3):
-                top_k_count[k] += float(((order[:, : k + 1] ==
-                                          np.arange(B)[:, None]).any(axis=1)).sum())
-            all_size += B
-            all_motion_emb.append(mn)
-            if (idx + 1) % 20 == 0:
-                print(f"  batch {idx+1}/{len(loader)} ({time.perf_counter()-t0:.0f}s)",
-                      flush=True)
-
-    matching_score = matching_score_sum / max(all_size, 1)
-    r_precision = top_k_count / max(all_size, 1)
-    all_motion_emb_np = np.concatenate(all_motion_emb, axis=0)
-
-    # Diversity on motion embeddings (same convention as our metrics.diversity)
-    rng = np.random.default_rng(0)
-    n_pairs = min(300, all_motion_emb_np.shape[0] // 2)
-    idx_a = rng.choice(all_motion_emb_np.shape[0], n_pairs, replace=False)
-    idx_b = rng.choice(all_motion_emb_np.shape[0], n_pairs, replace=False)
-    diversity = float(
-        np.linalg.norm(all_motion_emb_np[idx_a] - all_motion_emb_np[idx_b], axis=-1).mean()
+    _run_eval(
+        "OUR packed data → upstream pipeline",
+        motion_dir=motion_dir,
+        text_dir=text_dir,
+        split_file=split_file,
+        text_to_motion_repo=text_to_motion_repo,
+        humanml3d_repo=humanml3d_repo,
     )
 
-    print(f"\n  ALL_SIZE: {all_size}", flush=True)
-    print(f"  Matching Score (MM-Dist):   {matching_score:.4f}   "
-          f"paper={2.974:.4f}", flush=True)
-    print(f"  R-precision  (top-1..top-3): "
-          f"{r_precision[0]:.4f}  {r_precision[1]:.4f}  {r_precision[2]:.4f}",
-          flush=True)
-    print(f"                          paper:  0.5110  0.7030  0.7970", flush=True)
-    print(f"  Diversity (motion-only):    {diversity:.4f}   paper={9.503:.4f}",
-          flush=True)
+    # ------------------------------------------------------------------
+    _section("4. Upstream pipeline on UPSTREAM's shipped data (if available)")
+    # ------------------------------------------------------------------
+    upstream_motion_dir = humanml3d_repo / "HumanML3D" / "new_joint_vecs"
+    if upstream_motion_dir.exists() and any(upstream_motion_dir.glob("*.npy")):
+        _run_eval(
+            "UPSTREAM shipped data → upstream pipeline (the true reference)",
+            motion_dir=upstream_motion_dir,
+            text_dir=text_dir,
+            split_file=split_file,
+            text_to_motion_repo=text_to_motion_repo,
+            humanml3d_repo=humanml3d_repo,
+        )
+    else:
+        print(f"  upstream's new_joint_vecs/ not found at {upstream_motion_dir}", flush=True)
+        print(f"  → cannot test upstream's pipeline on upstream's data as ground truth",
+              flush=True)
+        print(f"  → either run external/HumanML3D/motion_representation.ipynb to "
+              f"generate it, or download the precomputed features from HumanML3D's "
+              f"Google Drive", flush=True)
 
     print("\n[done]", flush=True)
 
