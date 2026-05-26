@@ -155,9 +155,17 @@ def main() -> None:
     humanml3d_repo = REPO / "external" / "HumanML3D"
     packed_zip = REPO / "external" / "data" / "humanml3d_packed" / "humanml3d.zip"
     staging = Path("/tmp/rmg_upstream_eval_staging")
-    if staging.exists():
-        shutil.rmtree(staging)
-    staging.mkdir(parents=True)
+    # Don't blow away staging — decoding 27k clips takes ~16 min. If we want
+    # a fresh decode (e.g. after re-prep), `rm -rf /tmp/rmg_upstream_eval_staging`.
+    staging.mkdir(parents=True, exist_ok=True)
+    motion_dir = staging / "new_joint_vecs"
+    text_dir = staging / "texts"
+    has_motions = motion_dir.exists() and any(motion_dir.glob("*.npy"))
+    has_texts = text_dir.exists() and any(text_dir.glob("*.txt"))
+    if has_motions:
+        print(f"[upstream_eval] staging motions already present, skipping decode")
+    if has_texts:
+        print(f"[upstream_eval] staging texts already present, skipping extract")
 
     sys.path.insert(0, str(text_to_motion_repo))
     from utils.word_vectorizer import WordVectorizer
@@ -173,14 +181,22 @@ def main() -> None:
     # ------------------------------------------------------------------
     _section("1. Decode our packed clips → 263-D .npy (upstream format)")
     # ------------------------------------------------------------------
-    n_motions = _decode_clips_to_upstream_format(packed_zip, staging / "new_joint_vecs")
+    if has_motions:
+        n_motions = len(list(motion_dir.glob("*.npy")))
+        print(f"  skipped: {n_motions} npy files already in {motion_dir}", flush=True)
+    else:
+        n_motions = _decode_clips_to_upstream_format(packed_zip, motion_dir)
 
     # ------------------------------------------------------------------
     _section("2. Extract texts.zip → flat .txt directory")
     # ------------------------------------------------------------------
-    n_texts = _extract_texts_zip(
-        humanml3d_repo / "HumanML3D" / "texts.zip", staging / "texts"
-    )
+    if has_texts:
+        n_texts = len(list(text_dir.glob("*.txt")))
+        print(f"  skipped: {n_texts} txt files already in {text_dir}", flush=True)
+    else:
+        n_texts = _extract_texts_zip(
+            humanml3d_repo / "HumanML3D" / "texts.zip", text_dir
+        )
 
     # ------------------------------------------------------------------
     _section("3. Build upstream Text2MotionDatasetV2")
@@ -215,17 +231,35 @@ def main() -> None:
     all_size = 0
     all_motion_emb = []
 
+    def _encode_motion(motions, m_lens):
+        """Same as upstream.get_motion_embeddings but with sort + unsort so we
+        can pair embeddings with text by original-batch index."""
+        m_sort = torch.argsort(m_lens, descending=True)
+        m_inv = torch.empty_like(m_sort)
+        m_inv[m_sort] = torch.arange(m_sort.numel())
+        sorted_emb = eval_wrapper.get_motion_embeddings(motions[m_sort], m_lens[m_sort])
+        return sorted_emb[m_inv]
+
+    def _encode_text(word_embs, pos_ohots, sent_lens):
+        """text_encoder needs cap_lens sorted desc (pack_padded_sequence with
+        enforce_sorted=True). Sort, encode, undo."""
+        t_sort = torch.argsort(sent_lens, descending=True)
+        t_inv = torch.empty_like(t_sort)
+        t_inv[t_sort] = torch.arange(t_sort.numel())
+        with torch.no_grad():
+            emb = eval_wrapper.text_encoder(
+                word_embs[t_sort].to(opt.device).float(),
+                pos_ohots[t_sort].to(opt.device).float(),
+                sent_lens[t_sort],
+            )
+        return emb[t_inv]
+
     t0 = time.perf_counter()
     with torch.no_grad():
         for idx, batch in enumerate(loader):
             word_embs, pos_ohots, _, sent_lens, motions, m_lens, _ = batch
-            text_emb, motion_emb = eval_wrapper.get_co_embeddings(
-                word_embs=word_embs,
-                pos_ohot=pos_ohots,
-                cap_lens=sent_lens,
-                motions=motions,
-                m_lens=m_lens,
-            )
+            motion_emb = _encode_motion(motions, m_lens)
+            text_emb = _encode_text(word_embs, pos_ohots, sent_lens)
             tn = text_emb.cpu().numpy()
             mn = motion_emb.cpu().numpy()
             B = tn.shape[0]
