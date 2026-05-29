@@ -83,6 +83,8 @@ def _build_dataset(cfg: DictConfig, split: str, representation: Representation) 
         splits_name=cfg.data.splits_name,
         offsets_name=cfg.data.offsets_name,
         representation=representation,
+        subset_fraction=float(cfg.data.get("subset_fraction", 1.0)),
+        subset_seed=int(cfg.data.get("subset_seed", 0)),
     )
 
 

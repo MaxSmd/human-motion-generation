@@ -16,6 +16,12 @@ max_seq_len: 196
 min_seq_len: 40
 mirror_augment: true
 
+# Fast-iteration subset (train split only). Set <1.0 to train on a fixed
+# random subset of training clips, deterministic by seed. Mirror pairs are
+# kept together. Same subset_seed across all three methods → comparable runs.
+subset_fraction: 1.0
+subset_seed: 0
+
 num_workers: 8              # local SSD on compute node — can push harder
 pin_memory: true
 persistent_workers: true

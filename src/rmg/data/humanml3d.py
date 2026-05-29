@@ -114,6 +114,8 @@ class HumanML3DDataset(Dataset):
         splits_name: str = "splits.json",
         offsets_name: str = "target_offsets.pt",
         representation: Representation | None = None,
+        subset_fraction: float = 1.0,
+        subset_seed: int = 0,
     ) -> None:
         if split not in ("train", "val", "test"):
             raise ValueError(f"split must be one of train/val/test, got {split}")
@@ -134,6 +136,25 @@ class HumanML3DDataset(Dataset):
         with open(self.root / splits_name) as f:
             splits = json.load(f)
         self.clip_ids: list[str] = list(splits[split])
+
+        # Deterministic fast-iteration subset (applied to train split only).
+        # Keeps mirror pairs together: sample regular clips then attach their
+        # `M<id>` counterparts so the model sees both halves of every chosen
+        # body. Same seed → same clips for all three of us comparing methods.
+        if subset_fraction < 1.0 and split == "train":
+            import random as _random
+            rng = _random.Random(subset_seed)
+            regular = [c for c in self.clip_ids if not c.startswith("M")]
+            n_keep_reg = max(1, int(round(len(regular) * subset_fraction)))
+            keep_reg = set(rng.sample(regular, k=n_keep_reg))
+            all_keep = set(keep_reg) | {f"M{c}" for c in keep_reg}
+            self.clip_ids = sorted(c for c in self.clip_ids if c in all_keep)
+            print(
+                f"[HumanML3DDataset] subset_fraction={subset_fraction} "
+                f"subset_seed={subset_seed} → {len(self.clip_ids)} train clips "
+                f"({n_keep_reg} regular + their mirrors)",
+                flush=True,
+            )
 
         # Per-worker zip handle (lazily opened on first __getitem__).
         self._zip: zipfile.ZipFile | None = None
