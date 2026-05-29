@@ -55,23 +55,72 @@ from rmg.representation.tplusr import decode as tplusr_decode  # noqa: E402
 from rmg.utils import EMA, load_checkpoint, set_seed  # noqa: E402
 
 
-def _import_upstream_plot():
-    """Lazy-import HumanML3D's plot_3d_motion + kinematic chain. Adds the repo
-    to sys.path; polyfills the np.float alias removed in numpy ≥1.20."""
-    sys.path.insert(0, str(REPO / "external" / "HumanML3D"))
-    if not hasattr(np, "float"):
-        np.float = float  # type: ignore[attr-defined]
-    from utils.plot_script import plot_3d_motion  # type: ignore
-    from paramUtil import t2m_kinematic_chain  # type: ignore
-    return plot_3d_motion, t2m_kinematic_chain
+# HumanML3D 22-joint kinematic chains (same as upstream's t2m_kinematic_chain).
+_T2M_CHAINS: tuple[tuple[int, ...], ...] = (
+    (0, 2, 5, 8, 11),       # right leg
+    (0, 1, 4, 7, 10),       # left leg
+    (0, 3, 6, 9, 12, 15),   # spine + head
+    (9, 14, 17, 19, 21),    # right arm
+    (9, 13, 16, 18, 20),    # left arm
+)
 
 
 def _render(joints: np.ndarray, save_path: Path, title: str, fps: int) -> None:
-    """Render (T, 22, 3) world-frame joint positions to an MP4."""
-    plot_3d_motion, kinematic_chain = _import_upstream_plot()
+    """Render (T, 22, 3) joint positions to GIF (via Pillow — no ffmpeg).
+
+    Also dumps the raw joints next to the GIF as `<stem>.npy` so the same
+    motion can be re-rendered to MP4 locally with a system ffmpeg if you want.
+    """
     save_path.parent.mkdir(parents=True, exist_ok=True)
-    plot_3d_motion(str(save_path), kinematic_chain, joints, title=title, fps=fps)
-    print(f"[visualize] wrote {save_path}", flush=True)
+    # Always save joints — cheap insurance, useful for local re-render.
+    npy_path = save_path.with_suffix(".npy")
+    np.save(npy_path, joints.astype(np.float32))
+
+    import matplotlib.pyplot as plt
+    from matplotlib.animation import FuncAnimation, PillowWriter
+    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  (registers 3d projection)
+
+    T = joints.shape[0]
+    # Shared axis limits so the camera doesn't jitter between frames.
+    pts = joints.reshape(-1, 3)
+    lo, hi = pts.min(axis=0), pts.max(axis=0)
+    center = (lo + hi) / 2
+    radius = float(np.max(hi - lo)) / 2 * 1.1 + 1e-3
+
+    fig = plt.figure(figsize=(7, 7))
+    ax = fig.add_subplot(111, projection="3d")
+    chain_lines = [ax.plot([], [], [], "-o", linewidth=2, markersize=3)[0]
+                   for _ in _T2M_CHAINS]
+    title_text = ax.set_title("")
+
+    def _setup_axes():
+        # HumanML3D is Y-up; matplotlib's 3D viewer treats Z as up by default,
+        # so swap Y↔Z for display.
+        ax.set_xlim(center[0] - radius, center[0] + radius)
+        ax.set_ylim(center[2] - radius, center[2] + radius)
+        ax.set_zlim(center[1] - radius, center[1] + radius)
+        ax.set_xlabel("x")
+        ax.set_ylabel("z")
+        ax.set_zlabel("y")
+        ax.view_init(elev=15, azim=-70)
+
+    def update(t):
+        _setup_axes()
+        for line, chain in zip(chain_lines, _T2M_CHAINS):
+            xs = joints[t, list(chain), 0]
+            ys = joints[t, list(chain), 2]   # Y/Z swap for display
+            zs = joints[t, list(chain), 1]
+            line.set_data(xs, ys)
+            line.set_3d_properties(zs)
+        title_text.set_text(f"{title}\nframe {t + 1}/{T}")
+        return chain_lines + [title_text]
+
+    ani = FuncAnimation(fig, update, frames=T, interval=1000 // fps, blit=False)
+    # Force GIF extension regardless of caller (PillowWriter doesn't do MP4).
+    gif_path = save_path.with_suffix(".gif")
+    ani.save(str(gif_path), writer=PillowWriter(fps=fps))
+    plt.close(fig)
+    print(f"[visualize] wrote {gif_path}  (+ joints at {npy_path.name})", flush=True)
 
 
 def _load_real_clip(data_root: Path, clip_id: str) -> tuple[torch.Tensor, torch.Tensor, str]:

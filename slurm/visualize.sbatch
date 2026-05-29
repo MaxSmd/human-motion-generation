@@ -76,10 +76,8 @@ enroot start \
         set -euo pipefail
         cd ${REPO}
         pip install -e . --no-deps --quiet
-        # ffmpeg is needed by matplotlib animation → MP4. Install if missing.
-        which ffmpeg >/dev/null 2>&1 || {
-            apt-get update -qq && apt-get install -y --no-install-recommends ffmpeg
-        }
+        # No ffmpeg needed — visualize.py outputs GIF via PillowWriter (Pillow
+        # ships with matplotlib). Joints also dumped as .npy alongside the GIF.
         python -u scripts/visualize.py \\
             model=${MODEL_PRESET} \\
             train=${PRESET} \\
