@@ -55,14 +55,9 @@ if [ "$MODE" = "prompt" ] && [ -z "$CKPT" ]; then
     exit 1
 fi
 
-# Build the mode-specific Hydra args
-if [ "$MODE" = "prompt" ]; then
-    EXTRA="+viz.mode=prompt +viz.checkpoint=${CKPT} +viz.prompts='${PROMPTS}'"
-    EXTRA="${EXTRA} +viz.num_frames=${NUM_FRAMES} +viz.num_sample_steps=${NUM_STEPS}"
-    EXTRA="${EXTRA} +viz.guidance_scale=${GUIDANCE}"
-else
-    EXTRA="+viz.mode=clip +viz.clips=${CLIPS}"
-fi
+# Hydra needs the value side of comma-bearing args quoted to disambiguate
+# "string with commas" from "list literal". We pass literal single quotes
+# through bash → inner bash → python argv via `\"…\"` escaping.
 
 enroot start \
     --rw \
@@ -78,10 +73,25 @@ enroot start \
         pip install -e . --no-deps --quiet
         # No ffmpeg needed — visualize.py outputs GIF via PillowWriter (Pillow
         # ships with matplotlib). Joints also dumped as .npy alongside the GIF.
-        python -u scripts/visualize.py \\
-            model=${MODEL_PRESET} \\
-            train=${PRESET} \\
-            text_encoder.type=qwen3 \\
-            run_name='${RUN_NAME}' \\
-            ${EXTRA}
+        if [ '${MODE}' = 'prompt' ]; then
+            python -u scripts/visualize.py \\
+                model=${MODEL_PRESET} \\
+                train=${PRESET} \\
+                text_encoder.type=qwen3 \\
+                run_name='${RUN_NAME}' \\
+                +viz.mode=prompt \\
+                +viz.checkpoint=${CKPT} \\
+                \"+viz.prompts='${PROMPTS}'\" \\
+                +viz.num_frames=${NUM_FRAMES} \\
+                +viz.num_sample_steps=${NUM_STEPS} \\
+                +viz.guidance_scale=${GUIDANCE}
+        else
+            python -u scripts/visualize.py \\
+                model=${MODEL_PRESET} \\
+                train=${PRESET} \\
+                text_encoder.type=qwen3 \\
+                run_name='${RUN_NAME}' \\
+                +viz.mode=clip \\
+                \"+viz.clips='${CLIPS}'\"
+        fi
     "
