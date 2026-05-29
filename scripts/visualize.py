@@ -169,7 +169,7 @@ def _build_model(cfg: DictConfig, representation, device) -> RMGDiT:
 @hydra.main(config_path="../configs", config_name="train", version_base=None)
 def main(cfg: DictConfig) -> None:
     viz_cfg = OmegaConf.create({
-        "mode": "clip",                                # clip | prompt
+        "mode": "clip",                                # clip | prompt | info
         "checkpoint": "???",                           # required for prompt
         "clips": "000021,000019,000022,000026",        # comma-separated
         "prompts": "a person walks forward in a circle"
@@ -181,6 +181,12 @@ def main(cfg: DictConfig) -> None:
         "guidance_scale": 6.5,
         "fps": 20,
         "seed": 0,
+        # For mode=info — replay the train subset selection logic so we can
+        # tell whether the model saw a given clip during 1%-subset training.
+        # MUST match the values used when launching training.
+        "subset_fraction": 0.01,
+        "subset_seed": 0,
+        "list_subset_n": 30,                            # how many subset clips to dump
     })
     cfg.viz = OmegaConf.merge(viz_cfg, cfg.get("viz", OmegaConf.create({})))
     set_seed(int(cfg.viz.seed))
@@ -197,6 +203,70 @@ def main(cfg: DictConfig) -> None:
         data_root / cfg.data.offsets_name, weights_only=True,
     ).float()
     skel = Skeleton(offsets=target_offsets)
+
+    if cfg.viz.mode == "info":
+        # ---- Report split membership + subset hits for queried clip IDs ----
+        import json
+        import random as _random
+        with open(data_root / cfg.data.splits_name) as f:
+            splits = json.load(f)
+
+        # Replay HumanML3DDataset's subset selection exactly.
+        sub_frac = float(cfg.viz.subset_fraction)
+        sub_seed = int(cfg.viz.subset_seed)
+        train_ids = list(splits["train"])
+        regular = [c for c in train_ids if not c.startswith("M")]
+        n_keep = max(1, int(round(len(regular) * sub_frac)))
+        rng = _random.Random(sub_seed)
+        keep_reg = set(rng.sample(regular, k=n_keep))
+        subset_train = set(keep_reg) | {f"M{c}" for c in keep_reg}
+
+        print(
+            f"\nsplit sizes: train={len(train_ids)} val={len(splits['val'])} "
+            f"test={len(splits['test'])}", flush=True,
+        )
+        print(
+            f"train subset (fraction={sub_frac}, seed={sub_seed}): "
+            f"{len(subset_train)} clips ({len(keep_reg)} regular + their mirrors)",
+            flush=True,
+        )
+
+        queries = [c.strip() for c in str(cfg.viz.clips).split(",") if c.strip()]
+        if queries:
+            print(f"\nquery results — did the model see these during training?")
+            print(f"  {'clip_id':<12}  {'split':<6}  {'in_subset':<10}  verdict", flush=True)
+            print(f"  {'-' * 60}", flush=True)
+            for cid in queries:
+                where = next((s for s in ("train", "val", "test")
+                              if cid in splits[s]), "NOT_FOUND")
+                in_sub = cid in subset_train
+                saw = (where == "train") and in_sub
+                tag = "MODEL SAW" if saw else (
+                    "in train but not subset" if where == "train" else f"never (in {where})"
+                )
+                print(f"  {cid:<12}  {where:<6}  {str(in_sub):<10}  {tag}", flush=True)
+
+        # Dump a few subset clips' captions so user can pick prompts/clips
+        # the model definitely overfit on.
+        n_list = int(cfg.viz.list_subset_n)
+        if n_list > 0:
+            sample_ids = sorted(c for c in subset_train if not c.startswith("M"))[:n_list]
+            print(f"\nfirst {len(sample_ids)} regular clips in the train subset "
+                  f"(model HAS trained on these):", flush=True)
+            zip_path = data_root / "humanml3d.zip"
+            with zipfile.ZipFile(zip_path) as zf:
+                for cid in sample_ids:
+                    try:
+                        blob = torch.load(io.BytesIO(zf.read(f"{cid}.pt")),
+                                          weights_only=False)
+                        cap = blob["texts"][0][:80]
+                        n_caps = len(blob["texts"])
+                        T = blob["translation"].shape[0]
+                        print(f"  {cid}  T={T:3d}  caps={n_caps}  cap[0]={cap!r}",
+                              flush=True)
+                    except KeyError:
+                        print(f"  {cid}: (not present in zip)", flush=True)
+        return
 
     if cfg.viz.mode == "clip":
         # ---- Real packed clips → FK → render ----

@@ -85,6 +85,16 @@ enroot start \
                 +viz.num_frames=${NUM_FRAMES} \\
                 +viz.num_sample_steps=${NUM_STEPS} \\
                 +viz.guidance_scale=${GUIDANCE}
+        elif [ '${MODE}' = 'info' ]; then
+            python -u scripts/visualize.py \\
+                model=${MODEL_PRESET} \\
+                train=${PRESET} \\
+                text_encoder.type=qwen3 \\
+                run_name='${RUN_NAME}' \\
+                +viz.mode=info \\
+                +viz.subset_fraction=${SUBSET_FRACTION:-0.01} \\
+                +viz.subset_seed=${SUBSET_SEED:-0} \\
+                \"+viz.clips='${CLIPS}'\"
         else
             python -u scripts/visualize.py \\
                 model=${MODEL_PRESET} \\
