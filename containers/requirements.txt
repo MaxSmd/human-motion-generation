@@ -15,6 +15,9 @@ accelerate>=0.34
 roma>=1.5.0
 einops>=0.8
 smplx>=0.1.28
+# MARDM's SiT diffusion head uses an ODE sampler from torchdiffeq. Its only
+# deps are torch + scipy (both already present), so it won't downgrade torch.
+torchdiffeq>=0.2.4
 
 # Config / orchestration
 hydra-core>=1.3
