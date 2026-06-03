@@ -25,6 +25,11 @@
 #                                kassel with workers=8, fixed by =0)
 #   * data.persistent_workers=false (irrelevant when workers=0; explicit to
 #                                avoid the DataLoader warning)
+#   * train.micro_batch_size=16 train.grad_accum=1 (default 64 with drop_last=True
+#                                yields 0 batches per epoch on a 56-clip subset;
+#                                _infinite() then spins forever on an empty
+#                                iterator and the job hangs at 100% CPU. BS=16
+#                                gives 3 batches/epoch — plenty for overfit.)
 #   * model.cond_drop_prob=0 (no CFG dropout — let it memorize text→motion)
 #   * model.dropout=0           (transformer dropout off)
 #
@@ -83,6 +88,8 @@ enroot start \
             data.mirror_augment=false \\
             data.num_workers=0 \\
             data.persistent_workers=false \\
+            train.micro_batch_size=16 \\
+            train.grad_accum=1 \\
             train.max_steps=${AE_STEPS} \\
             train.val_every=$((AE_STEPS / 4)) \\
             train.ckpt_every=${AE_STEPS} \\
@@ -97,6 +104,8 @@ enroot start \
             data.mirror_augment=false \\
             data.num_workers=0 \\
             data.persistent_workers=false \\
+            train.micro_batch_size=16 \\
+            train.grad_accum=1 \\
             model.cond_drop_prob=0 \\
             model.dropout=0 \\
             train.max_steps=${GEN_STEPS} \\

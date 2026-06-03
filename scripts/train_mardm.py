@@ -110,6 +110,16 @@ def _build_loader(ds: EssentialDataset, cfg: DictConfig, shuffle: bool) -> DataL
 
 
 def _infinite(loader: DataLoader):
+    # Guard: an empty loader (micro_batch_size > len(dataset) with drop_last=True)
+    # would otherwise turn `while True: for _ in loader: ...` into a silent busy
+    # loop — pegging one CPU and producing no batches, no logs, no errors.
+    if len(loader) == 0:
+        raise RuntimeError(
+            f"DataLoader yields 0 batches per epoch (dataset size "
+            f"{len(loader.dataset)} < batch_size {loader.batch_size} with "
+            "drop_last=True). Reduce train.micro_batch_size or raise "
+            "subset_frac/limit_clips."
+        )
     while True:
         for batch in loader:
             yield batch
