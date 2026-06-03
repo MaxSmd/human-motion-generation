@@ -1,7 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=mardm-ae
-#SBATCH --partition=12g
-#SBATCH --nodelist=frankfurt,hamburg,kassel,leipzig
+#SBATCH --partition=24g
 #SBATCH --qos=students_normal
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
