@@ -18,6 +18,13 @@
 # Hyperparameters (vs. a normal run):
 #   * subset_frac=0.005 (overridable via SUBSET_FRAC)
 #   * data.mirror_augment=false (don't perturb the small set)
+#   * data.num_workers=0        (multiproc dataloader hangs on tiny subsets due
+#                                to fork+zipfile interaction; the subset is
+#                                small enough that single-process loading is
+#                                trivially fast — observed step 0 hang on
+#                                kassel with workers=8, fixed by =0)
+#   * data.persistent_workers=false (irrelevant when workers=0; explicit to
+#                                avoid the DataLoader warning)
 #   * model.cond_drop_prob=0 (no CFG dropout — let it memorize text→motion)
 #   * model.dropout=0           (transformer dropout off)
 #
@@ -74,6 +81,8 @@ enroot start \
             run_name='${AE_RUN}' \\
             subset_frac=${SUBSET_FRAC} \\
             data.mirror_augment=false \\
+            data.num_workers=0 \\
+            data.persistent_workers=false \\
             train.max_steps=${AE_STEPS} \\
             train.val_every=$((AE_STEPS / 4)) \\
             train.ckpt_every=${AE_STEPS} \\
@@ -86,6 +95,8 @@ enroot start \
             text_encoder.type=qwen3 \\
             subset_frac=${SUBSET_FRAC} \\
             data.mirror_augment=false \\
+            data.num_workers=0 \\
+            data.persistent_workers=false \\
             model.cond_drop_prob=0 \\
             model.dropout=0 \\
             train.max_steps=${GEN_STEPS} \\
