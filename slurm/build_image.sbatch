@@ -24,8 +24,15 @@
 set -euo pipefail
 mkdir -p slurm/logs
 
-REPO="${HOME}/riemann-motion-generation"
-IMAGE_OUT="${HOME}/rmg.sqsh"
+# Resolve repo root: prefer SLURM_SUBMIT_DIR (the dir `sbatch` was invoked from)
+# so the build doesn't assume the checkout lives under $HOME.
+if [ -n "${SLURM_SUBMIT_DIR:-}" ]; then
+    REPO="${REPO:-${SLURM_SUBMIT_DIR}}"
+else
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+    REPO="${REPO:-$(dirname "${SCRIPT_DIR}")}"
+fi
+IMAGE_OUT="${IMAGE_OUT:-${HOME}/rmg.sqsh}"
 
 echo "[build] pulling upstream image ..."
 enroot import -o /tmp/base.sqsh 'docker://pytorch/pytorch:2.9.0-cuda13.0-cudnn9-devel'
