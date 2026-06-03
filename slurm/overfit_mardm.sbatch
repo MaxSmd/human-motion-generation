@@ -68,6 +68,8 @@ enroot start \
     --mount /tmp:tmp \
     --env "HF_HOME=${HF_CACHE}" \
     --env "WANDB_MODE=${WANDB_MODE}" \
+    --env "WANDB_API_KEY=${WANDB_API_KEY:-}" \
+    --env "WANDB_ENTITY=${WANDB_ENTITY:-}" \
     --env "RMG_RUNS_DIR=${RUNS_ROOT}" \
     --env "RMG_DATA_ROOT=${DATA_ROOT}" \
     --env "MARDM_STATS=${MARDM_STATS}" \
