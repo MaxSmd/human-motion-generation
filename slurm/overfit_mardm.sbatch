@@ -60,7 +60,11 @@ STAMP="${SLURM_JOB_ID:-$(date +%Y%m%d-%H%M%S)}"
 AE_RUN="mardm-overfit-ae-${STAMP}"
 GEN_RUN="mardm-overfit-gen-${STAMP}"
 AE_OUT="${RUNS_ROOT}/${AE_RUN}"
-: "${WANDB_MODE:=offline}"
+if [ -n "${WANDB_API_KEY:-}" ]; then
+    : "${WANDB_MODE:=online}"
+else
+    : "${WANDB_MODE:=offline}"
+fi
 
 enroot start \
     --rw \

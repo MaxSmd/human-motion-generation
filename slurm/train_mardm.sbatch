@@ -39,7 +39,11 @@ RUNS_ROOT="${RUNS_ROOT:-${HOME}/rmg-runs}"
 HF_CACHE="${HF_CACHE:-${HOME}/hf-cache}"
 DATA_ROOT="${RMG_DATA_ROOT:-${REPO}/external/data/humanml3d_packed}"
 MARDM_STATS="${MARDM_STATS:-${RUNS_ROOT}/mardm_essential_stats.pt}"
-: "${WANDB_MODE:=offline}"
+if [ -n "${WANDB_API_KEY:-}" ]; then
+    : "${WANDB_MODE:=online}"
+else
+    : "${WANDB_MODE:=offline}"
+fi
 
 enroot start \
     --rw \
