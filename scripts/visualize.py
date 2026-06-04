@@ -16,12 +16,13 @@ Modes:
                 so GT vs prediction can be shown side by side. This is the mode
                 for "what did the model learn on the clips it actually saw."
 
-  mode=samples +viz.samples_file='runs/<run>/samples/step-000000500.pt'
+  mode=samples +viz.samples_file='runs/<run>/samples'
               → renders the training-time sample dumps (the 3 fixed prompts the
                 trainer generates every sample_every steps). No checkpoint /
                 model / GPU needed — the motions are already in the .pt file;
-                we just decode → FK → render. Pass several files comma-separated
-                to make a per-step filmstrip of how generation evolved.
+                we just decode → FK → render. Point samples_file at a DIRECTORY
+                to render every step-*.pt inside (step-sorted), or pass one/more
+                .pt paths comma-separated to pick specific steps.
 
 Outputs land under `${output_dir}/viz/`. Both paths go through
 `rmg.representation.forward_kinematics` so the rendered skeleton uses the same
@@ -392,14 +393,34 @@ def main(cfg: DictConfig) -> None:
         # ---- Training-time sample dumps (no model needed) ----
         # Each step-*.pt is {"texts": [...], "samples": (B, T, ambient_dim)} of
         # EMA generations the trainer saved. Decode → FK → render per prompt.
-        files = [f.strip() for f in str(cfg.viz.samples_file).split(",") if f.strip()]
+        #
+        # `samples_file` accepts any of:
+        #   - a directory          → renders ALL step-*.pt inside, step-sorted
+        #   - one or more .pt paths → comma-separated
+        raw = [f.strip() for f in str(cfg.viz.samples_file).split(",") if f.strip()]
+        if not raw:
+            raise ValueError(
+                "mode=samples requires +viz.samples_file=<dir | path/to/step-*.pt> "
+                "(a directory renders every step-*.pt inside; comma-separate paths "
+                "to pick specific steps)"
+            )
+        files: list[Path] = []
+        for entry in raw:
+            p = Path(entry).expanduser()
+            if p.is_dir():
+                found = sorted(p.glob("step-*.pt"))
+                if not found:
+                    print(f"[visualize] no step-*.pt files under {p} — skipping",
+                          flush=True)
+                files.extend(found)
+            else:
+                files.append(p)
         if not files:
             raise ValueError(
-                "mode=samples requires +viz.samples_file=<path/to/step-*.pt> "
-                "(comma-separate several to render a multi-step filmstrip)"
+                f"mode=samples: no .pt files resolved from {cfg.viz.samples_file!r}"
             )
-        for fpath in files:
-            p = Path(fpath)
+        print(f"[visualize] rendering {len(files)} sample dump(s)", flush=True)
+        for p in files:
             if not p.exists():
                 print(f"[visualize] samples file {p} not found — skipping", flush=True)
                 continue

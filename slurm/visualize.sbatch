@@ -33,9 +33,10 @@
 #       sbatch slurm/visualize.sbatch
 #
 #   # 4. Render the trainer's periodic sample dumps (no model/ckpt needed).
-#   #    Comma-separate several step-*.pt files for a per-step filmstrip.
+#   #    Point at the whole samples/ dir to render EVERY step-*.pt (step-sorted),
+#   #    or comma-separate specific step-*.pt files for a hand-picked filmstrip.
 #   MODE=samples \
-#       SAMPLES_FILE='/mnt/home/'"${USER}"'/rmg-runs/<run>/samples/step-000004000.pt' \
+#       SAMPLES_FILE="${HOME}/rmg-runs/<run>/samples" \
 #       sbatch slurm/visualize.sbatch
 #
 # Outputs land in ~/rmg-runs/<RUN_NAME>/viz/*.gif (+ .npy joints alongside)
