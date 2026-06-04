@@ -241,7 +241,7 @@ class HumanML3DDataset(Dataset):
         quats = make_continuous(quats, time_dim=0)
         x1 = self.representation.encode_clip(translation, quats, skeleton=self._skeleton)
 
-        return HumanML3DSample(x1=x1.float(), text=random.choice(texts), length=T, clip_id=clip_id)
+        return HumanML3DSample(x1=x1.float(), text=random.choice(texts), length=x1.shape[0], clip_id=clip_id)
 
 
 @dataclass
