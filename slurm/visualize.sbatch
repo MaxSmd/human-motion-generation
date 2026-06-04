@@ -65,6 +65,7 @@ PRESET="${PRESET:-rmg_base}"
 NUM_FRAMES="${NUM_FRAMES:-100}"
 NUM_STEPS="${NUM_STEPS:-50}"
 GUIDANCE="${GUIDANCE:-6.5}"
+USE_EMA="${USE_EMA:-true}"   # set false to sample LIVE weights (EMA lags hard at low step counts)
 RUN_NAME="${RUN_NAME:-viz-${MODE}-${SLURM_JOB_ID:-$(date +%Y%m%d-%H%M%S)}}"
 
 if { [ "$MODE" = "prompt" ] || [ "$MODE" = "compare" ]; } && [ -z "$CKPT" ]; then
@@ -102,6 +103,7 @@ enroot start \
                 run_name='${RUN_NAME}' \\
                 +viz.mode=prompt \\
                 +viz.checkpoint=${CKPT} \\
+                +viz.use_ema=${USE_EMA} \\
                 \"+viz.prompts='${PROMPTS}'\" \\
                 +viz.num_frames=${NUM_FRAMES} \\
                 +viz.num_sample_steps=${NUM_STEPS} \\
@@ -114,6 +116,7 @@ enroot start \
                 run_name='${RUN_NAME}' \\
                 +viz.mode=compare \\
                 +viz.checkpoint=${CKPT} \\
+                +viz.use_ema=${USE_EMA} \\
                 \"+viz.clips='${CLIPS}'\" \\
                 +viz.num_sample_steps=${NUM_STEPS} \\
                 +viz.guidance_scale=${GUIDANCE}

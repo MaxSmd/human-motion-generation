@@ -170,11 +170,14 @@ def _build_model(cfg: DictConfig, representation, device) -> RMGDiT:
     model = RMGDiT(dit_cfg).to(device)
     state = load_checkpoint(cfg.viz.checkpoint, map_location=device)
     model.load_state_dict(state.model)
-    if state.ema is not None:
+    use_ema = bool(cfg.viz.get("use_ema", True))
+    if use_ema and state.ema is not None:
         ema = EMA(model, decay=0.0)
         ema.load_state_dict(state.ema)
         ema.copy_to(model)
         print(f"[visualize] loaded EMA at step {state.step}", flush=True)
+    elif not use_ema:
+        print(f"[visualize] using LIVE (non-EMA) weights at step {state.step}", flush=True)
     else:
         print(f"[visualize] loaded live weights at step {state.step}", flush=True)
     model.eval()
@@ -212,6 +215,11 @@ def main(cfg: DictConfig) -> None:
         "num_frames": 100,                             # length of sampled motion
         "num_sample_steps": 50,
         "guidance_scale": 6.5,
+        "use_ema": True,                               # prompt/compare: EMA vs live weights.
+                                                       # At low step counts EMA still carries
+                                                       # heavy random-init weight (decay 0.9999
+                                                       # ⇒ ~7k-step half-life) — set False to
+                                                       # see the actual trained weights.
         "fps": 20,
         "seed": 0,
         # For mode=info — replay the train subset selection logic so we can
