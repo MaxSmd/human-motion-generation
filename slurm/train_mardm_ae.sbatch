@@ -62,5 +62,5 @@ enroot start \
         pip install -e . --no-deps --quiet
         [ -f '${MARDM_STATS}' ] || python scripts/compute_mardm_stats.py \\
             --data-root '${DATA_ROOT}' --out '${MARDM_STATS}'
-        python scripts/train_mardm_ae.py run_name='${RUN_NAME}'
+        python scripts/train_mardm_ae.py run_name='${RUN_NAME}' data.preload=true
     "

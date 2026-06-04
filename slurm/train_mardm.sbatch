@@ -66,5 +66,6 @@ enroot start \
         python scripts/train_mardm.py \\
             ae_checkpoint='${AE_CKPT}' \\
             text_encoder.type=qwen3 \\
+            data.preload=true \\
             run_name='${RUN_NAME}'
     "

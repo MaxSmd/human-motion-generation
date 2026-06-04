@@ -96,6 +96,7 @@ def _build_dataset(cfg: DictConfig, split: str, mean, std, mirror: bool) -> Esse
         mirror_augment=mirror, max_seq_len=cfg.data.max_seq_len, min_seq_len=cfg.data.min_seq_len,
         subset_frac=cfg.get("subset_frac"), limit_clips=cfg.get("limit_clips"),
         zip_name=cfg.data.zip_name, splits_name=cfg.data.splits_name, offsets_name=cfg.data.offsets_name,
+        preload=cfg.data.get("preload", False),
     )
 
 

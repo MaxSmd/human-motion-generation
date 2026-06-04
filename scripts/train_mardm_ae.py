@@ -70,6 +70,7 @@ def _build_dataset(cfg: DictConfig, split: str, mean, std, mirror: bool) -> Esse
         zip_name=cfg.data.zip_name,
         splits_name=cfg.data.splits_name,
         offsets_name=cfg.data.offsets_name,
+        preload=cfg.data.get("preload", False),
     )
 
 
