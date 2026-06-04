@@ -32,6 +32,12 @@
 #       CLIPS=000021,000019,000022,000026 \
 #       sbatch slurm/visualize.sbatch
 #
+#   # 4. Render the trainer's periodic sample dumps (no model/ckpt needed).
+#   #    Comma-separate several step-*.pt files for a per-step filmstrip.
+#   MODE=samples \
+#       SAMPLES_FILE='/mnt/home/'"${USER}"'/rmg-runs/<run>/samples/step-000004000.pt' \
+#       sbatch slurm/visualize.sbatch
+#
 # Outputs land in ~/rmg-runs/<RUN_NAME>/viz/*.gif (+ .npy joints alongside)
 
 set -euo pipefail
@@ -50,6 +56,7 @@ RUNS_ROOT="${RUNS_ROOT:-${HOME}/rmg-runs}"
 
 MODE="${MODE:-clip}"
 CLIPS="${CLIPS:-000021,000019,000022,000026}"
+SAMPLES_FILE="${SAMPLES_FILE:-}"
 PROMPTS="${PROMPTS:-a person walks forward in a circle|a person sits down on the floor|a person waves their left hand|a person does jumping jacks}"
 CKPT="${CKPT:-}"
 MODEL_PRESET="${MODEL_PRESET:-dit_base}"
@@ -61,6 +68,10 @@ RUN_NAME="${RUN_NAME:-viz-${MODE}-${SLURM_JOB_ID:-$(date +%Y%m%d-%H%M%S)}}"
 
 if { [ "$MODE" = "prompt" ] || [ "$MODE" = "compare" ]; } && [ -z "$CKPT" ]; then
     echo "ERROR: MODE=${MODE} requires CKPT=/path/to/checkpoint.pt"
+    exit 1
+fi
+if [ "$MODE" = "samples" ] && [ -z "$SAMPLES_FILE" ]; then
+    echo "ERROR: MODE=samples requires SAMPLES_FILE=/path/to/step-*.pt"
     exit 1
 fi
 
@@ -105,6 +116,14 @@ enroot start \
                 \"+viz.clips='${CLIPS}'\" \\
                 +viz.num_sample_steps=${NUM_STEPS} \\
                 +viz.guidance_scale=${GUIDANCE}
+        elif [ '${MODE}' = 'samples' ]; then
+            python -u scripts/visualize.py \\
+                model=${MODEL_PRESET} \\
+                train=${PRESET} \\
+                text_encoder.type=qwen3 \\
+                run_name='${RUN_NAME}' \\
+                +viz.mode=samples \\
+                \"+viz.samples_file='${SAMPLES_FILE}'\"
         elif [ '${MODE}' = 'info' ]; then
             python -u scripts/visualize.py \\
                 model=${MODEL_PRESET} \\

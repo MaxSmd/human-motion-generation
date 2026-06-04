@@ -16,6 +16,13 @@ Modes:
                 so GT vs prediction can be shown side by side. This is the mode
                 for "what did the model learn on the clips it actually saw."
 
+  mode=samples +viz.samples_file='runs/<run>/samples/step-000000500.pt'
+              → renders the training-time sample dumps (the 3 fixed prompts the
+                trainer generates every sample_every steps). No checkpoint /
+                model / GPU needed — the motions are already in the .pt file;
+                we just decode → FK → render. Pass several files comma-separated
+                to make a per-step filmstrip of how generation evolved.
+
 Outputs land under `${output_dir}/viz/`. Both paths go through
 `rmg.representation.forward_kinematics` so the rendered skeleton uses the same
 HumanML3D-convention FK the evaluator expects.
@@ -193,8 +200,9 @@ def _build_sampler(cfg, representation, skel) -> RiemannianEulerSampler:
 @hydra.main(config_path="../configs", config_name="train", version_base=None)
 def main(cfg: DictConfig) -> None:
     viz_cfg = OmegaConf.create({
-        "mode": "clip",                                # clip | prompt | info
-        "checkpoint": "???",                           # required for prompt
+        "mode": "clip",                                # clip | prompt | compare | samples | info
+        "checkpoint": "???",                           # required for prompt/compare
+        "samples_file": "",                            # required for mode=samples (one or more step-*.pt, comma-separated)
         "clips": "000021,000019,000022,000026",        # comma-separated
         "prompts": "a person walks forward in a circle"
                    "|a person sits down on the floor"
@@ -378,6 +386,37 @@ def main(cfg: DictConfig) -> None:
             ).cpu().numpy()
             _render(pred_joints, out_dir / f"gen-{cid}.mp4",
                     title=f"PRED [{cid}] {caption[:55]}", fps=int(cfg.viz.fps))
+        return
+
+    if cfg.viz.mode == "samples":
+        # ---- Training-time sample dumps (no model needed) ----
+        # Each step-*.pt is {"texts": [...], "samples": (B, T, ambient_dim)} of
+        # EMA generations the trainer saved. Decode → FK → render per prompt.
+        files = [f.strip() for f in str(cfg.viz.samples_file).split(",") if f.strip()]
+        if not files:
+            raise ValueError(
+                "mode=samples requires +viz.samples_file=<path/to/step-*.pt> "
+                "(comma-separate several to render a multi-step filmstrip)"
+            )
+        for fpath in files:
+            p = Path(fpath)
+            if not p.exists():
+                print(f"[visualize] samples file {p} not found — skipping", flush=True)
+                continue
+            blob = torch.load(p, map_location="cpu", weights_only=False)
+            texts = blob["texts"]
+            samples = blob["samples"]                     # (B, T, ambient_dim)
+            step_tag = p.stem                             # e.g. "step-000000500"
+            print(f"[visualize] {step_tag}: {samples.shape[0]} prompts, "
+                  f"{samples.shape[1]} frames", flush=True)
+            for i, text in enumerate(texts):
+                tpr = tplusr_decode(samples[i].float())
+                joints = forward_kinematics(
+                    skel, tpr.quaternions.float(), tpr.translation.float()
+                ).cpu().numpy()
+                safe = "".join(c if c.isalnum() else "_" for c in text)[:40]
+                _render(joints, out_dir / f"{step_tag}-{i:02d}-{safe}.mp4",
+                        title=f"[{step_tag}] {text[:55]}", fps=int(cfg.viz.fps))
         return
 
     raise ValueError(f"unknown viz.mode {cfg.viz.mode!r}")
