@@ -8,21 +8,28 @@
 #SBATCH --output=slurm/logs/rmg-eval-%j.out
 #SBATCH --error=slurm/logs/rmg-eval-%j.err
 #
-# Evaluate an RMG checkpoint on the HumanML3D test split with a guidance
-# sweep. Reproduces paper Table 4 / Figure 3a values (modulo the actual
-# trained model).
+# Evaluate an RMG checkpoint. Defaults to the full Table 4 / Figure 3a
+# protocol (test split, 8 guidance scales) but every knob is overridable
+# via env var for fast iteration cycles.
 #
-# Usage:
-#     CKPT=/path/to/checkpoint.pt sbatch slurm/evaluate.sbatch
-#     # or
-#     sbatch slurm/evaluate.sbatch /mnt/home/${USER}/rmg-runs/<run>/checkpoints/latest.pt
+# Common usages:
+#
+#   # Full protocol (~45 min on 24g)
+#   CKPT=/path sbatch slurm/evaluate.sbatch
+#
+#   # Fast test-split eval (~5 min): 256 clips, single guidance, reduced MM
+#   CKPT=/path MAX_CLIPS=256 GUIDANCE_SCALES='[6.5]' MM_NUM_TEXTS=10 MM_REPEATS=3 \
+#       sbatch slurm/evaluate.sbatch
+#
+#   # Train-subset eval (overfit sanity check on what the model actually saw):
+#   CKPT=/path EVAL_SPLIT=train SUBSET_FRACTION=0.01 SUBSET_SEED=0 \
+#       MAX_CLIPS=128 GUIDANCE_SCALES='[6.5]' MM_NUM_TEXTS=10 MM_REPEATS=3 \
+#       sbatch slurm/evaluate.sbatch
 
 set -euo pipefail
 mkdir -p slurm/logs
 
 CKPT="${CKPT:-${1:?set CKPT env var or pass as first positional arg}}"
-# Use SLURM_SUBMIT_DIR when run under sbatch (script is spooled, BASH_SOURCE
-# doesn't resolve to the repo). Fall back to BASH_SOURCE for direct runs.
 if [ -n "${SLURM_SUBMIT_DIR:-}" ]; then
     REPO="${REPO:-${SLURM_SUBMIT_DIR}}"
 else
@@ -33,6 +40,16 @@ IMAGE="${IMAGE:-${HOME}/rmg.sqsh}"
 HF_CACHE="${HF_CACHE:-${HOME}/hf-cache}"
 PRESET="${PRESET:-rmg_base}"
 MODEL_PRESET="${MODEL_PRESET:-dit_base}"
+
+# Eval-protocol knobs (all overridable for fast iteration)
+EVAL_SPLIT="${EVAL_SPLIT:-test}"
+MAX_CLIPS="${MAX_CLIPS:--1}"
+GUIDANCE_SCALES="${GUIDANCE_SCALES:-[2.5,3.5,4.5,5.5,6.5,7.5,8.5,9.5]}"
+MM_NUM_TEXTS="${MM_NUM_TEXTS:-30}"
+MM_REPEATS="${MM_REPEATS:-10}"
+SUBSET_FRACTION="${SUBSET_FRACTION:-1.0}"
+SUBSET_SEED="${SUBSET_SEED:-0}"
+NUM_SAMPLE_STEPS="${NUM_SAMPLE_STEPS:-50}"
 
 enroot start \
     --rw \
@@ -50,8 +67,15 @@ enroot start \
             model=${MODEL_PRESET} \\
             train=${PRESET} \\
             text_encoder.type=qwen3 \\
+            data.subset_fraction=${SUBSET_FRACTION} \\
+            data.subset_seed=${SUBSET_SEED} \\
             +eval.checkpoint=${CKPT} \\
             +eval.evaluator=real \\
-            +eval.guidance_scales='[2.5,3.5,4.5,5.5,6.5,7.5,8.5,9.5]' \\
-            run_name=eval-\$(basename ${CKPT} .pt)
+            +eval.split=${EVAL_SPLIT} \\
+            +eval.max_clips=${MAX_CLIPS} \\
+            +eval.mm_num_texts=${MM_NUM_TEXTS} \\
+            +eval.mm_repeats=${MM_REPEATS} \\
+            +eval.num_sample_steps=${NUM_SAMPLE_STEPS} \\
+            +eval.guidance_scales='${GUIDANCE_SCALES}' \\
+            run_name=eval-\$(basename ${CKPT} .pt)-\$(date +%H%M%S)
     "

@@ -82,6 +82,11 @@ def _build_dataset(cfg: DictConfig, split: str, representation: Representation) 
         splits_name=cfg.data.splits_name,
         offsets_name=cfg.data.offsets_name,
         representation=representation,
+        # Honor the fast-iteration subset so a train-split eval restricts to the
+        # exact clips the model saw (subset only applies to split == "train").
+        # No-op for val/test, where HumanML3DDataset ignores these.
+        subset_fraction=cfg.data.subset_fraction,
+        subset_seed=cfg.data.subset_seed,
     )
 
 

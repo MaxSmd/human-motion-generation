@@ -9,6 +9,13 @@ Modes:
               → loads checkpoint, samples via the Riemannian Euler ODE with CFG,
                 renders each sampled motion as MP4
 
+  mode=compare +viz.checkpoint=... +viz.clips='000021,000019'
+              → for each clip, renders BOTH the GT motion and the model's
+                prediction conditioned on that clip's own caption (matched to
+                the GT length). Outputs a paired real-<cid> / gen-<cid> per clip
+                so GT vs prediction can be shown side by side. This is the mode
+                for "what did the model learn on the clips it actually saw."
+
 Outputs land under `${output_dir}/viz/`. Both paths go through
 `rmg.representation.forward_kinematics` so the rendered skeleton uses the same
 HumanML3D-convention FK the evaluator expects.
@@ -166,6 +173,23 @@ def _build_model(cfg: DictConfig, representation, device) -> RMGDiT:
     return model
 
 
+def _build_sampler(cfg, representation, skel) -> RiemannianEulerSampler:
+    """Riemannian Euler ODE sampler with CFG, sharing the training prior."""
+    M = representation.build_manifold()
+    if hasattr(representation, "prior_mu_from_skeleton"):
+        mu = representation.prior_mu_from_skeleton(skel)
+    else:
+        mu = representation.prior_mu()
+    prior = WrappedGaussianPrior(M, mu, sigma=cfg.train.prior_sigma)
+    return RiemannianEulerSampler(
+        manifold=M, prior=prior,
+        cfg=SamplerCfg(
+            num_steps=int(cfg.viz.num_sample_steps),
+            guidance_scale=float(cfg.viz.guidance_scale),
+        ),
+    )
+
+
 @hydra.main(config_path="../configs", config_name="train", version_base=None)
 def main(cfg: DictConfig) -> None:
     viz_cfg = OmegaConf.create({
@@ -289,20 +313,7 @@ def main(cfg: DictConfig) -> None:
 
         text_encoder = _build_text_encoder(cfg)
         model = _build_model(cfg, representation, device)
-
-        M = representation.build_manifold()
-        if hasattr(representation, "prior_mu_from_skeleton"):
-            mu = representation.prior_mu_from_skeleton(skel)
-        else:
-            mu = representation.prior_mu()
-        prior = WrappedGaussianPrior(M, mu, sigma=cfg.train.prior_sigma)
-        sampler = RiemannianEulerSampler(
-            manifold=M, prior=prior,
-            cfg=SamplerCfg(
-                num_steps=int(cfg.viz.num_sample_steps),
-                guidance_scale=float(cfg.viz.guidance_scale),
-            ),
-        )
+        sampler = _build_sampler(cfg, representation, skel)
 
         prompts = [p.strip() for p in str(cfg.viz.prompts).split("|") if p.strip()]
         print(f"[visualize] sampling {len(prompts)} prompts "
@@ -324,6 +335,49 @@ def main(cfg: DictConfig) -> None:
             safe = "".join(c if c.isalnum() else "_" for c in prompt)[:48]
             _render(joints, out_dir / f"gen-{i:02d}-{safe}.mp4",
                     title=prompt[:60], fps=int(cfg.viz.fps))
+        return
+
+    if cfg.viz.mode == "compare":
+        # ---- GT clip vs model prediction on that clip's own caption ----
+        # For each clip: render the stored GT motion, then condition the model
+        # on the clip's caption and sample at the GT's frame count so the two
+        # GIFs are directly comparable.
+        if cfg.viz.checkpoint in (None, "", "???"):
+            raise ValueError("mode=compare requires +viz.checkpoint=<path/to/latest.pt>")
+
+        clip_ids = [c.strip() for c in str(cfg.viz.clips).split(",") if c.strip()]
+        if not clip_ids:
+            raise ValueError("mode=compare requires +viz.clips='<id>,<id>,...'")
+
+        text_encoder = _build_text_encoder(cfg)
+        model = _build_model(cfg, representation, device)
+        sampler = _build_sampler(cfg, representation, skel)
+
+        for cid in clip_ids:
+            try:
+                translation, quats, caption = _load_real_clip(data_root, cid)
+            except KeyError:
+                print(f"[visualize] clip {cid!r} not in packed zip — skipping", flush=True)
+                continue
+
+            # GT.
+            gt_joints = forward_kinematics(skel, quats, translation).numpy()
+            _render(gt_joints, out_dir / f"real-{cid}.mp4",
+                    title=f"GT [{cid}] {caption[:55]}", fps=int(cfg.viz.fps))
+
+            # Prediction: same caption, matched length.
+            n_frames = int(translation.shape[0])
+            print(f"[visualize] compare {cid}: sampling {n_frames} frames for "
+                  f"caption {caption[:60]!r}", flush=True)
+            with torch.no_grad():
+                cond = text_encoder.encode([caption], device=device)
+                samples = sampler.sample(model, shape=(1, n_frames), cond=cond)
+            tpr = tplusr_decode(samples[0])
+            pred_joints = forward_kinematics(
+                skel, tpr.quaternions.float(), tpr.translation.float()
+            ).cpu().numpy()
+            _render(pred_joints, out_dir / f"gen-{cid}.mp4",
+                    title=f"PRED [{cid}] {caption[:55]}", fps=int(cfg.viz.fps))
         return
 
     raise ValueError(f"unknown viz.mode {cfg.viz.mode!r}")

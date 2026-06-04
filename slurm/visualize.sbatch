@@ -23,7 +23,16 @@
 #       PROMPTS='a person walks forward in a circle|a person sits down|a person waves left hand|a person jumps' \
 #       sbatch slurm/visualize.sbatch
 #
-# Outputs land in ~/rmg-runs/<RUN_NAME>/viz/*.mp4
+#   # 3. Compare GT vs prediction on clips the model trained on (1% subset).
+#   #    Renders real-<cid> AND gen-<cid> per clip, matched length + caption.
+#   MODE=compare \
+#       CKPT=/mnt/home/${USER}/rmg-runs/<run>/checkpoints/latest.pt \
+#       MODEL_PRESET=dit_large \
+#       PRESET=rmg_large \
+#       CLIPS=000021,000019,000022,000026 \
+#       sbatch slurm/visualize.sbatch
+#
+# Outputs land in ~/rmg-runs/<RUN_NAME>/viz/*.gif (+ .npy joints alongside)
 
 set -euo pipefail
 mkdir -p slurm/logs
@@ -50,8 +59,8 @@ NUM_STEPS="${NUM_STEPS:-50}"
 GUIDANCE="${GUIDANCE:-6.5}"
 RUN_NAME="${RUN_NAME:-viz-${MODE}-${SLURM_JOB_ID:-$(date +%Y%m%d-%H%M%S)}}"
 
-if [ "$MODE" = "prompt" ] && [ -z "$CKPT" ]; then
-    echo "ERROR: MODE=prompt requires CKPT=/path/to/checkpoint.pt"
+if { [ "$MODE" = "prompt" ] || [ "$MODE" = "compare" ]; } && [ -z "$CKPT" ]; then
+    echo "ERROR: MODE=${MODE} requires CKPT=/path/to/checkpoint.pt"
     exit 1
 fi
 
@@ -83,6 +92,17 @@ enroot start \
                 +viz.checkpoint=${CKPT} \\
                 \"+viz.prompts='${PROMPTS}'\" \\
                 +viz.num_frames=${NUM_FRAMES} \\
+                +viz.num_sample_steps=${NUM_STEPS} \\
+                +viz.guidance_scale=${GUIDANCE}
+        elif [ '${MODE}' = 'compare' ]; then
+            python -u scripts/visualize.py \\
+                model=${MODEL_PRESET} \\
+                train=${PRESET} \\
+                text_encoder.type=qwen3 \\
+                run_name='${RUN_NAME}' \\
+                +viz.mode=compare \\
+                +viz.checkpoint=${CKPT} \\
+                \"+viz.clips='${CLIPS}'\" \\
                 +viz.num_sample_steps=${NUM_STEPS} \\
                 +viz.guidance_scale=${GUIDANCE}
         elif [ '${MODE}' = 'info' ]; then
