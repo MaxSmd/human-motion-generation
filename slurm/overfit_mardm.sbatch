@@ -17,18 +17,12 @@
 # Hyperparameters (vs. a normal run):
 #   * subset_frac=0.005 (overridable via SUBSET_FRAC)
 #   * data.mirror_augment=false (don't perturb the small set)
-#   * data.num_workers=0        (multiproc dataloader hangs on tiny subsets due
-#                                to fork+zipfile interaction; the subset is
-#                                small enough that single-process loading is
-#                                trivially fast — observed step 0 hang on
-#                                kassel with workers=8, fixed by =0)
-#   * data.persistent_workers=false (irrelevant when workers=0; explicit to
-#                                avoid the DataLoader warning)
-#   * train.micro_batch_size=16 train.grad_accum=1 (default 64 with drop_last=True
-#                                yields 0 batches per epoch on a 56-clip subset;
-#                                _infinite() then spins forever on an empty
-#                                iterator and the job hangs at 100% CPU. BS=16
-#                                gives 3 batches/epoch — plenty for overfit.)
+#   * data.preload=true         (encodes the ~56 clips into RAM once at init;
+#                                the train script auto-forces num_workers=0
+#                                because workers + preload is pickle-overhead
+#                                without speedup)
+#   * train.micro_batch_size=16 train.grad_accum=1 (BS=64 would yield 0 batches
+#                                per epoch on a 56-clip subset with drop_last)
 #   * model.cond_drop_prob=0 (no CFG dropout — let it memorize text→motion)
 #   * model.dropout=0           (transformer dropout off)
 #
@@ -91,8 +85,7 @@ enroot start \
             run_name='${AE_RUN}' \\
             subset_frac=${SUBSET_FRAC} \\
             data.mirror_augment=false \\
-            data.num_workers=0 \\
-            data.persistent_workers=false \\
+            data.preload=true \\
             train.micro_batch_size=16 \\
             train.grad_accum=1 \\
             train.max_steps=${AE_STEPS} \\
@@ -107,8 +100,7 @@ enroot start \
             text_encoder.type=qwen3 \\
             subset_frac=${SUBSET_FRAC} \\
             data.mirror_augment=false \\
-            data.num_workers=0 \\
-            data.persistent_workers=false \\
+            data.preload=true \\
             train.micro_batch_size=16 \\
             train.grad_accum=1 \\
             model.cond_drop_prob=0 \\

@@ -13,6 +13,11 @@
 # on the frozen AE's latents. Requires a stage-1 AE checkpoint whose `ae:` block
 # matches configs/mardm/gen.yaml (paper-faithful AE by default).
 #
+# Defaults to the 24g partition (matches the documented 1-day-per-model GPU
+# budget). 12g works equivalently — the train script auto-picks fp16 on
+# Turing and bf16 on Ampere+, so precision doesn't need a manual override.
+# To use 12g: `sbatch --partition=12g --nodelist=frankfurt,hamburg,kassel,leipzig ...`
+#
 # Submit:
 #     AE_CKPT=/path/to/mardm-ae-XXXX/checkpoints/latest.pt sbatch slurm/train_mardm.sbatch
 #     # or pass as the first positional arg

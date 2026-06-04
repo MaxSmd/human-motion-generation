@@ -71,7 +71,7 @@ train:
   grad_clip: 0.5
   ema:
     decay: 0.9999
-  precision: bf16
+  precision: auto               # auto | bf16 | fp16 | fp32 — auto picks bf16 on Ampere+, fp16 on Turing
   log_every: 50
   ckpt_every: 5_000
   val_every: 2_000

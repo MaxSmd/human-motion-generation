@@ -43,6 +43,7 @@ from rmg.utils import (
     collect_rng_state,
     find_latest_checkpoint,
     load_checkpoint,
+    resolve_precision,
     restore_rng_state,
     save_checkpoint,
     set_seed,
@@ -154,6 +155,18 @@ def main(cfg: DictConfig) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     set_seed(cfg.seed, deterministic=cfg.deterministic)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Resolve precision against the local GPU and harmonize the dataloader
+    # config — both are no-ops when the user already passed sensible values.
+    OmegaConf.set_struct(cfg, False)
+    cfg.train.precision = resolve_precision(cfg.train.precision)
+    if cfg.data.preload and cfg.data.num_workers > 0:
+        print(f"[data] preload=true → forcing num_workers=0 (was "
+              f"{cfg.data.num_workers}); workers add IPC overhead without "
+              "speedup when features live in RAM.")
+        cfg.data.num_workers = 0
+        cfg.data.persistent_workers = False
+    OmegaConf.set_struct(cfg, True)
 
     mean, std = _load_stats(cfg.stats_path)
     text_encoder = _build_text_encoder(cfg)

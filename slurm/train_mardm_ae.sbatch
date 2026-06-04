@@ -14,6 +14,11 @@
 # The AE is the cheap stage (a few hours); leave the bulk of the 1-day,
 # per-model budget for the generation branch (slurm/train_mardm.sbatch).
 #
+# Defaults to the 24g partition (matches the documented 1-day-per-model GPU
+# budget). 12g works equivalently — the train script auto-picks fp16 on
+# Turing and bf16 on Ampere+, so precision doesn't need a manual override.
+# To use 12g: `sbatch --partition=12g --nodelist=frankfurt,hamburg,kassel,leipzig ...`
+#
 # Submit:  sbatch slurm/train_mardm_ae.sbatch
 # Resume:  just resubmit (auto-detects latest checkpoint under the run dir).
 #
