@@ -138,6 +138,23 @@ def _render(joints: np.ndarray, save_path: Path, title: str, fps: int) -> None:
     print(f"[visualize] wrote {gif_path}  (+ joints at {npy_path.name})", flush=True)
 
 
+def _subset_train_ids(
+    data_root: Path, splits_name: str, fraction: float, seed: int,
+) -> list[str]:
+    """Replay HumanML3DDataset's train-subset selection and return the sorted
+    regular (non-mirror) clip IDs the model trained on. Identical logic to the
+    dataset + mode=info so picks are consistent across the codebase."""
+    import json
+    import random as _random
+    with open(data_root / splits_name) as f:
+        splits = json.load(f)
+    regular = [c for c in splits["train"] if not c.startswith("M")]
+    n_keep = max(1, int(round(len(regular) * fraction)))
+    rng = _random.Random(seed)
+    keep_reg = set(rng.sample(regular, k=n_keep))
+    return sorted(keep_reg)
+
+
 def _load_real_clip(data_root: Path, clip_id: str) -> tuple[torch.Tensor, torch.Tensor, str]:
     zip_path = data_root / "humanml3d.zip"
     with zipfile.ZipFile(zip_path) as zf:
@@ -362,9 +379,23 @@ def main(cfg: DictConfig) -> None:
         if cfg.viz.checkpoint in (None, "", "???"):
             raise ValueError("mode=compare requires +viz.checkpoint=<path/to/latest.pt>")
 
-        clip_ids = [c.strip() for c in str(cfg.viz.clips).split(",") if c.strip()]
+        clips_raw = str(cfg.viz.clips).strip()
+        if clips_raw.lower() in ("", "auto"):
+            # Auto-pick clips the model definitely trained on — no need to run
+            # mode=info first. Uses the same subset_fraction/subset_seed as training.
+            n_pick = max(1, int(cfg.viz.get("list_subset_n", 4)))
+            n_pick = min(n_pick, 6)   # keep the render job bounded
+            clip_ids = _subset_train_ids(
+                data_root, cfg.data.splits_name,
+                float(cfg.viz.subset_fraction), int(cfg.viz.subset_seed),
+            )[:n_pick]
+            print(f"[visualize] compare auto-picked {len(clip_ids)} in-subset clips "
+                  f"(fraction={cfg.viz.subset_fraction}, seed={cfg.viz.subset_seed}): "
+                  f"{clip_ids}", flush=True)
+        else:
+            clip_ids = [c.strip() for c in clips_raw.split(",") if c.strip()]
         if not clip_ids:
-            raise ValueError("mode=compare requires +viz.clips='<id>,<id>,...'")
+            raise ValueError("mode=compare requires +viz.clips='<id>,...' or 'auto'")
 
         text_encoder = _build_text_encoder(cfg)
         model = _build_model(cfg, representation, device)

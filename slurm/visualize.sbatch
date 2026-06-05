@@ -117,6 +117,9 @@ enroot start \
                 +viz.mode=compare \\
                 +viz.checkpoint=${CKPT} \\
                 +viz.use_ema=${USE_EMA} \\
+                +viz.subset_fraction=${SUBSET_FRACTION:-0.01} \\
+                +viz.subset_seed=${SUBSET_SEED:-0} \\
+                +viz.list_subset_n=${N_COMPARE:-4} \\
                 \"+viz.clips='${CLIPS}'\" \\
                 +viz.num_sample_steps=${NUM_STEPS} \\
                 +viz.guidance_scale=${GUIDANCE}

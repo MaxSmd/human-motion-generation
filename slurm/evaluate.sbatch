@@ -50,6 +50,7 @@ MM_REPEATS="${MM_REPEATS:-10}"
 SUBSET_FRACTION="${SUBSET_FRACTION:-1.0}"
 SUBSET_SEED="${SUBSET_SEED:-0}"
 NUM_SAMPLE_STEPS="${NUM_SAMPLE_STEPS:-50}"
+USE_EMA="${USE_EMA:-true}"   # set false to eval LIVE weights (EMA lags hard at low step counts)
 
 enroot start \
     --rw \
@@ -71,6 +72,7 @@ enroot start \
             data.subset_seed=${SUBSET_SEED} \\
             +eval.checkpoint=${CKPT} \\
             +eval.evaluator=real \\
+            +eval.use_ema=${USE_EMA} \\
             +eval.split=${EVAL_SPLIT} \\
             +eval.max_clips=${MAX_CLIPS} \\
             +eval.mm_num_texts=${MM_NUM_TEXTS} \\
