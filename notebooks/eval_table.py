@@ -94,25 +94,27 @@ def build_tex(rows):
         if i == n_baselines - 1 and len(rows) > n_baselines:
             body_lines.append(r"\midrule")
 
+    # Vanilla LaTeX — no booktabs/multirow/standalone needed (those aren't in
+    # BasicTeX by default). `\hline\hline` mimics \toprule/\bottomrule.
     table = (
         "\\begin{tabular}{l|cccc}\n"
-        "\\toprule\n"
-        "\\multirow{2}{*}{\\textbf{Method}} & "
-        "\\multicolumn{4}{c}{\\textbf{HumanML3D Format}} \\\\\n"
-        "\\cmidrule(lr){2-5}\n"
-        " & " + " & ".join(HEADS) + " \\\\\n"
-        "\\midrule\n"
+        "\\hline\\hline\n"
+        " & \\multicolumn{4}{c}{\\textbf{HumanML3D Format}} \\\\\n"
+        "\\cline{2-5}\n"
+        "\\textbf{Method} & " + " & ".join(HEADS) + " \\\\\n"
+        "\\hline\n"
         + "\n".join(body_lines) + "\n"
-        "\\bottomrule\n"
+        "\\hline\\hline\n"
         "\\end{tabular}\n"
     )
 
     doc = (
-        "\\documentclass[border=4pt]{standalone}\n"
-        "\\usepackage{booktabs}\n"
-        "\\usepackage{multirow}\n"
+        "\\documentclass{article}\n"
+        "\\usepackage[paperwidth=15cm,paperheight=5cm,margin=0.4cm]{geometry}\n"
         "\\usepackage[T1]{fontenc}\n"
+        "\\pagestyle{empty}\n"
         "\\begin{document}\n"
+        "\\centering\n"
         + table +
         "\\end{document}\n"
     )
