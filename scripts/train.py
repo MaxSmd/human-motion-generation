@@ -85,6 +85,7 @@ def _build_dataset(cfg: DictConfig, split: str, representation: Representation) 
         representation=representation,
         subset_fraction=float(cfg.data.get("subset_fraction", 1.0)),
         subset_seed=int(cfg.data.get("subset_seed", 0)),
+        subset_n=int(cfg.data.get("subset_n", 0)),
     )
 
 
@@ -300,6 +301,7 @@ def main(cfg: DictConfig) -> None:
             lr = sched.get_last_lr()[0]
             logger.log(
                 {
+                    "step": step,
                     "loss": accum_loss * cfg.train.grad_accum,  # un-divide
                     "lr": lr,
                     "grad_norm": float(grad_norm),

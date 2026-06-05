@@ -116,6 +116,7 @@ class HumanML3DDataset(Dataset):
         representation: Representation | None = None,
         subset_fraction: float = 1.0,
         subset_seed: int = 0,
+        subset_n: int = 0,
     ) -> None:
         if split not in ("train", "val", "test"):
             raise ValueError(f"split must be one of train/val/test, got {split}")
@@ -141,7 +142,22 @@ class HumanML3DDataset(Dataset):
         # Keeps mirror pairs together: sample regular clips then attach their
         # `M<id>` counterparts so the model sees both halves of every chosen
         # body. Same seed → same clips for all three of us comparing methods.
-        if subset_fraction < 1.0 and split == "train":
+        if subset_n > 0 and split == "train":
+            # Exact-count subset for tiny-overfit sanity checks: keep exactly
+            # `subset_n` regular clips (deterministic by seed), NO mirror
+            # expansion, so the model sees a precise, fixed handful of clips.
+            import random as _random
+            rng = _random.Random(subset_seed)
+            regular = [c for c in self.clip_ids if not c.startswith("M")]
+            n_keep = min(subset_n, len(regular))
+            self.clip_ids = sorted(rng.sample(regular, k=n_keep))
+            print(
+                f"[HumanML3DDataset] subset_n={subset_n} subset_seed={subset_seed} "
+                f"→ {len(self.clip_ids)} train clips (exact, no mirrors): "
+                f"{self.clip_ids}",
+                flush=True,
+            )
+        elif subset_fraction < 1.0 and split == "train":
             import random as _random
             rng = _random.Random(subset_seed)
             regular = [c for c in self.clip_ids if not c.startswith("M")]

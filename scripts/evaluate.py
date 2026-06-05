@@ -87,6 +87,7 @@ def _build_dataset(cfg: DictConfig, split: str, representation: Representation) 
         # No-op for val/test, where HumanML3DDataset ignores these.
         subset_fraction=cfg.data.subset_fraction,
         subset_seed=cfg.data.subset_seed,
+        subset_n=int(cfg.data.get("subset_n", 0)),
     )
 
 
