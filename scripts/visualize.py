@@ -408,13 +408,24 @@ def main(cfg: DictConfig) -> None:
                 print(f"[visualize] clip {cid!r} not in packed zip — skipping", flush=True)
                 continue
 
-            # GT.
+            # Cap length at the model's max_seq_len — the DiT can't process
+            # longer sequences, and training crops clips to <= max_seq_len
+            # anyway. Crop the GT to the same length so GT vs PRED are aligned.
+            max_T = int(cfg.model.max_seq_len)
+            full_T = int(translation.shape[0])
+            n_frames = min(full_T, max_T)
+            if full_T > max_T:
+                print(f"[visualize] compare {cid}: clip is {full_T} frames > "
+                      f"max_seq_len {max_T} — cropping to first {max_T}", flush=True)
+            translation = translation[:n_frames]
+            quats = quats[:n_frames]
+
+            # GT (cropped to n_frames).
             gt_joints = forward_kinematics(skel, quats, translation).numpy()
             _render(gt_joints, out_dir / f"real-{cid}.mp4",
                     title=f"GT [{cid}] {caption[:55]}", fps=int(cfg.viz.fps))
 
-            # Prediction: same caption, matched length.
-            n_frames = int(translation.shape[0])
+            # Prediction: same caption, matched (capped) length.
             print(f"[visualize] compare {cid}: sampling {n_frames} frames for "
                   f"caption {caption[:60]!r}", flush=True)
             with torch.no_grad():
