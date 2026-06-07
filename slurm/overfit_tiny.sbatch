@@ -52,6 +52,9 @@ PRESET="${PRESET:-rmg_large}"
 EMA_DECAY="${EMA_DECAY:-0.99}"
 CKPT_EVERY="${CKPT_EVERY:-500}"
 SAMPLE_EVERY="${SAMPLE_EVERY:-250}"
+PRECISION="${PRECISION:-bf16}"        # fp32 for a clean overfit (no bf16 rounding floor)
+GRAD_CLIP="${GRAD_CLIP:-0.5}"         # raise (e.g. 1.0) so spiky steps aren't clipped ~100x
+LR="${LR:-1e-4}"
 RUN_NAME="${RUN_NAME:-rmg-overfit-${N}clip-${SLURM_JOB_ID:-$(date +%Y%m%d-%H%M%S)}}"
 
 : "${WANDB_MODE:=offline}"
@@ -80,6 +83,9 @@ enroot start \
             train.grad_accum=1 \\
             train.max_steps=${MAX_STEPS} \\
             train.ema.decay=${EMA_DECAY} \\
+            train.precision=${PRECISION} \\
+            train.grad_clip=${GRAD_CLIP} \\
+            train.optimizer.lr=${LR} \\
             train.ckpt_every=${CKPT_EVERY} \\
             train.sample_every=${SAMPLE_EVERY} \\
             train.log_every=10 \\
