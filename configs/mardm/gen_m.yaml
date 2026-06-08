@@ -1,0 +1,103 @@
+# @package _global_
+# MARDM generation branch — paper-M variant (the largest of the four M-line
+# configs in Table A5 of Meng et al. 2025: 12-head 768-dim transformer with a
+# single layer, paired with an 8-layer 1280-dim DiffMLPs head).
+#
+# Pairs with the mini AE checkpoint from configs/mardm/ae.yaml (the AE is
+# paper-faithful and unchanged across model sizes).
+#
+# Launch:
+#   sbatch --export=ALL,AE_CKPT=/path/to/mardm-ae-XXXX/checkpoints/latest.pt \
+#       slurm/train_mardm.sbatch +experiment=gen_m
+# or directly:
+#   python scripts/train_mardm.py --config-name=gen_m \
+#       ae_checkpoint=runs/mardm-ae-10104/checkpoints/latest.pt
+
+defaults:
+  - /data: local_submodule
+  - _self_
+
+run_name: mardm-gen-m-${now:%Y%m%d-%H%M%S}
+output_dir: ${oc.env:RMG_RUNS_DIR,${hydra:runtime.cwd}/runs}/${run_name}
+seed: 0
+deterministic: false
+
+stats_path: ${oc.env:MARDM_STATS,${hydra:runtime.cwd}/external/data/mardm_essential_stats.pt}
+ae_checkpoint: ???              # stage-1 AE checkpoint (required)
+ae_use_ema: true                # load the AE's EMA weights for the frozen encoder
+
+# Deterministic dataset subset (overfit smoke / debugging). subset_frac takes
+# precedence over limit_clips. Both apply to train AND val splits.
+subset_frac: null               # e.g. 0.005 -> 0.5% of clips per split
+limit_clips: null               # e.g. 64    -> first 64 clips per split
+
+# Must match the trained AE (used to rebuild the module before loading weights).
+ae:
+  input_width: 67
+  output_emb_width: 512
+  down_t: 2
+  stride_t: 2
+  width: 512
+  depth: 3
+  dilation_growth_rate: 3
+  activation: relu
+
+# MARDM paper-M generation branch (~3-4x params vs mini; ae_dim/text_dim filled at runtime).
+model:
+  latent_dim: 768
+  ff_size: 3072
+  num_layers: 1                 # upstream paper-M uses a single transformer layer
+  num_heads: 12
+  dropout: 0.2
+  diffmlps_width: 1280
+  diffmlps_depth: 8
+  diffmlps_batch_mul: 4
+  cond_drop_prob: 0.1
+
+text_encoder:
+  type: qwen3                   # random (smoke) | qwen3
+  text_dim: 1024
+  model_name: Qwen/Qwen3-Embedding-0.6B
+  cache_dir: ${oc.env:HF_HOME,${oc.env:HOME}/.cache/huggingface}
+  max_length: 256
+
+train:
+  # max_steps is a placeholder for the 1-day-per-model budget. Run a 500-step
+  # throughput probe first (see header comment in slurm/train_mardm.sbatch),
+  # then set max_steps ≈ steps_per_s * 84_000 (23h25m, leaves headroom under
+  # the 23h55m wall-clock limit).
+  max_steps: 200_000
+  micro_batch_size: 128         # pushed up from 64 to keep VRAM > ~15% on 24g
+  grad_accum: 1                 # effective BS = 128 (one big step beats N substeps)
+  optimizer:
+    name: AdamW
+    lr: 2.0e-4
+    betas: [0.9, 0.99]
+    weight_decay: 1.0e-5
+    eps: 1.0e-8
+  scheduler:
+    warmup_ratio: 0.02          # ~4k steps at 200k (upstream warmup)
+    min_lr_ratio: 0.1
+  grad_clip: 0.5
+  ema:
+    decay: 0.9999
+  precision: auto               # auto | bf16 | fp16 | fp32 — auto picks bf16 on Ampere+
+  log_every: 50
+  ckpt_every: 5_000
+  val_every: 2_000
+  val_batches: 16
+
+logging:
+  use_wandb: true
+  use_tensorboard: true
+  wandb_project: mardm
+  wandb_mode: ${oc.env:WANDB_MODE,offline}
+  wandb_entity: ${oc.env:WANDB_ENTITY,null}
+
+hydra:
+  run:
+    dir: ${output_dir}
+  sweep:
+    dir: ${output_dir}
+  job:
+    chdir: false

@@ -30,7 +30,15 @@
 set -euo pipefail
 mkdir -p slurm/logs
 
-AE_CKPT="${AE_CKPT:-${1:?set AE_CKPT env var or pass the AE checkpoint as the first positional arg}}"
+# AE_CKPT: prefer env var; otherwise consume $1 as the positional fallback.
+# Anything left in "$@" after that gets forwarded to the python script as
+# extra hydra overrides (e.g. train.max_steps=500, ae.width=384).
+if [ -z "${AE_CKPT:-}" ]; then
+    AE_CKPT="${1:?set AE_CKPT env var or pass the AE checkpoint as the first positional arg}"
+    shift
+fi
+EXTRA_HYDRA_ARGS="$*"
+CONFIG_NAME="${CONFIG_NAME:-gen}"
 if [ -n "${SLURM_SUBMIT_DIR:-}" ]; then
     REPO="${REPO:-${SLURM_SUBMIT_DIR}}"
 else
@@ -69,8 +77,10 @@ enroot start \
         [ -f '${MARDM_STATS}' ] || python scripts/compute_mardm_stats.py \\
             --data-root '${DATA_ROOT}' --out '${MARDM_STATS}'
         python scripts/train_mardm.py \\
+            --config-name=${CONFIG_NAME} \\
             ae_checkpoint='${AE_CKPT}' \\
             text_encoder.type=qwen3 \\
             data.preload=true \\
-            run_name='${RUN_NAME}'
+            run_name='${RUN_NAME}' \\
+            ${EXTRA_HYDRA_ARGS}
     "
