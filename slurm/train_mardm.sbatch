@@ -38,7 +38,7 @@ if [ -z "${AE_CKPT:-}" ]; then
     shift
 fi
 EXTRA_HYDRA_ARGS="$*"
-CONFIG_NAME="${CONFIG_NAME:-gen}"
+CONFIG_NAME="${CONFIG_NAME:-mardm/gen}"
 if [ -n "${SLURM_SUBMIT_DIR:-}" ]; then
     REPO="${REPO:-${SLURM_SUBMIT_DIR}}"
 else
