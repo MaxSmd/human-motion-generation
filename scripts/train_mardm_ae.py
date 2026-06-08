@@ -106,27 +106,51 @@ def _infinite(loader: DataLoader):
             yield batch
 
 
-def _recon_loss(ae: AE, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    """Masked L1 between reconstruction and input. x: (B, T, 67), mask: (B, T)."""
+def _recon_loss(
+    ae: AE, x: torch.Tensor, mask: torch.Tensor, aux_loss_joints: float = 1.0,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Smooth-L1 reconstruction + auxiliary local-position term.
+
+    Mirrors upstream MARDM (`train_AE.py`):
+        loss = criterion(recon, x) + aux_loss_joints * criterion(recon[..., 4:67], x[..., 4:67])
+    The explicit term re-weights the 63 local-position dims relative to the 4
+    root dims (rot_vel, lin_vel_xz, height). No FK / IK — direct slice on the
+    normalized feature. Returns (total, feature_term, joint_term)."""
     recon = ae(x)
-    per_frame = (recon - x).abs().mean(dim=-1)        # (B, T)
-    mask_f = mask.to(per_frame.dtype)
-    return (per_frame * mask_f).sum() / mask_f.sum().clamp_min(1.0)
+    mask_f = mask.to(recon.dtype)
+    norm = mask_f.sum().clamp_min(1.0)
+
+    per_frame_full = F.smooth_l1_loss(recon, x, reduction="none").mean(dim=-1)
+    feature_l1 = (per_frame_full * mask_f).sum() / norm
+
+    per_frame_pos = F.smooth_l1_loss(recon[..., 4:67], x[..., 4:67], reduction="none").mean(dim=-1)
+    joint_l1 = (per_frame_pos * mask_f).sum() / norm
+
+    total = feature_l1 + aux_loss_joints * joint_l1
+    return total, feature_l1, joint_l1
 
 
 @torch.no_grad()
-def _validate(ae: AE, loader: DataLoader, device: torch.device, max_batches: int) -> float:
+def _validate(
+    ae: AE, loader: DataLoader, device: torch.device, max_batches: int,
+    aux_loss_joints: float = 1.0,
+) -> tuple[float, float, float]:
     ae.eval()
-    total, n = 0.0, 0
+    tot_total = tot_feat = tot_joint = 0.0
+    n = 0
     for i, batch in enumerate(loader):
         if i >= max_batches:
             break
         x = batch.x1.to(device)
         mask = batch.mask.to(device)
-        total += float(_recon_loss(ae, x, mask))
+        total, feat, joint = _recon_loss(ae, x, mask, aux_loss_joints=aux_loss_joints)
+        tot_total += float(total)
+        tot_feat += float(feat)
+        tot_joint += float(joint)
         n += 1
     ae.train()
-    return total / max(n, 1)
+    denom = max(n, 1)
+    return tot_total / denom, tot_feat / denom, tot_joint / denom
 
 
 @hydra.main(config_path="../configs", config_name="mardm/ae", version_base=None)
@@ -197,19 +221,25 @@ def main(cfg: DictConfig) -> None:
     print(f"[ae] start step={step} max_steps={cfg.train.max_steps} "
           f"effective BS={cfg.train.micro_batch_size * cfg.train.grad_accum}")
 
+    aux_w = float(cfg.train.get("aux_loss_joints", 1.0))
     t_last = time.time()
     while step < cfg.train.max_steps:
         opt.zero_grad(set_to_none=True)
         accum_loss = 0.0
+        accum_feat = 0.0
+        accum_joint = 0.0
         for _ in range(cfg.train.grad_accum):
             batch = next(train_iter)
             x = batch.x1.to(device, non_blocking=True)
             mask = batch.mask.to(device, non_blocking=True)
             ctx = torch.amp.autocast(device.type, dtype=amp_dtype) if use_amp else nullcontext()
             with ctx:
-                loss = _recon_loss(ae, x, mask) / cfg.train.grad_accum
+                total, feat_l1, joint_l1 = _recon_loss(ae, x, mask, aux_loss_joints=aux_w)
+                loss = total / cfg.train.grad_accum
             (scaler.scale(loss) if scaler is not None else loss).backward()
             accum_loss += float(loss.detach())
+            accum_feat += float(feat_l1.detach()) / cfg.train.grad_accum
+            accum_joint += float(joint_l1.detach()) / cfg.train.grad_accum
 
         if scaler is not None:
             scaler.unscale_(opt)
@@ -227,6 +257,8 @@ def main(cfg: DictConfig) -> None:
             now = time.time()
             logger.log({
                 "ae/l1": accum_loss * cfg.train.grad_accum,
+                "ae/feature_l1": accum_feat,
+                "ae/joint_l1": accum_joint,
                 "lr": sched.get_last_lr()[0],
                 "grad_norm": float(grad_norm),
                 "steps_per_s": cfg.train.log_every / max(now - t_last, 1e-9),
@@ -235,9 +267,19 @@ def main(cfg: DictConfig) -> None:
 
         if step % cfg.train.val_every == 0 or step == cfg.train.max_steps:
             with ema.swapped(ae):
-                val_l1 = _validate(ae, val_loader, device, cfg.train.val_batches)
-            logger.log({"ae/val_l1": val_l1}, step=step)
-            print(f"[ae] step {step}: val_l1(ema)={val_l1:.4f}", flush=True)
+                val_total, val_feat, val_joint = _validate(
+                    ae, val_loader, device, cfg.train.val_batches, aux_loss_joints=aux_w,
+                )
+            logger.log({
+                "ae/val_l1": val_total,
+                "ae/val_feature_l1": val_feat,
+                "ae/val_joint_l1": val_joint,
+            }, step=step)
+            print(
+                f"[ae] step {step}: val_l1(ema)={val_total:.4f} "
+                f"(feature={val_feat:.4f} joint={val_joint:.4f})",
+                flush=True,
+            )
 
         latest_every = max(1, int(cfg.train.ckpt_every) // 10)
         if step % latest_every == 0 or step % cfg.train.ckpt_every == 0 or step == cfg.train.max_steps:

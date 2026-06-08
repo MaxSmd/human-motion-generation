@@ -40,9 +40,10 @@ ae:
 
 train:
   window_size: 64               # fixed-window AE training (upstream uses 64)
-  max_steps: 50_000             # bounded for the ≤1-day budget (calibrate via probe)
+  max_steps: 300_000            # paper-faithful (upstream ≈ epoch=50 × ~6k iters)
   micro_batch_size: 64
   grad_accum: 4                 # effective BS = 256 (paper)
+  aux_loss_joints: 1.0          # weight on the local-position term (upstream default)
 
   optimizer:
     name: AdamW
