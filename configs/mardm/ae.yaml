@@ -40,9 +40,10 @@ ae:
 
 train:
   window_size: 64               # fixed-window AE training (upstream uses 64)
-  max_steps: 50_000             # bounded for the ≤1-day budget (calibrate via probe)
+  max_steps: 300_000            # paper-faithful (upstream ≈ epoch=50 × ~6k iters)
   micro_batch_size: 64
   grad_accum: 4                 # effective BS = 256 (paper)
+  aux_loss_joints: 1.0          # weight on the local-position term (upstream default)
 
   optimizer:
     name: AdamW
@@ -58,7 +59,7 @@ train:
   grad_clip: 0.5
   ema:
     decay: 0.9999
-  precision: bf16               # bf16 | fp16 | fp32
+  precision: auto               # auto | bf16 | fp16 | fp32 — auto picks bf16 on Ampere+, fp16 on Turing
 
   log_every: 50
   ckpt_every: 5_000

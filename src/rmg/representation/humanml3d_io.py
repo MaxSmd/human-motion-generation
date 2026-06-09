@@ -225,7 +225,9 @@ def _features_from_positions_and_quats(
     # Following upstream: r_velocity = arcsin(r_vel_quat.y). For a pure-Y
     # rotation by angle θ, q = [cos(θ/2), 0, sin(θ/2), 0]; arcsin(sin(θ/2)) = θ/2.
     # The factor of 1/2 is consistent with how `recover_root_rot_pos` cumsums it.
-    r_velocity = torch.asin(r_vel_quat[:, 2:3])  # (T-1, 1)
+    # Clamp guards float32 round-off that can push the y component slightly
+    # outside [-1, 1] after quat_mul/quat_inv, which would otherwise NaN asin.
+    r_velocity = torch.asin(r_vel_quat[:, 2:3].clamp(-1.0, 1.0))  # (T-1, 1)
 
     # --- Root linear velocity in canonical frame ---
     raw_vel = positions[1:, 0] - positions[:-1, 0]  # (T-1, 3) world XYZ root vel

@@ -176,5 +176,7 @@ def essential_to_h3d(
         essential = denormalize(essential, mean, std)
     joints = recover_joints_from_ric(essential)          # (L, 22, 3), canonical frame
     quats = _ik_quaternions(joints, skeleton.offsets, Path(humanml3d_repo))
-    translation = joints[:, 0, :].contiguous()           # (L, 3) recovered root trajectory
+    # `_ik_quaternions` lands on CPU (numpy roundtrip); pin everything to its
+    # device so the downstream FK doesn't see a CUDA/CPU mismatch.
+    translation = joints[:, 0, :].contiguous().to(quats.device)
     return tplusr_to_h3d_features_with_quats(translation, quats, skeleton)

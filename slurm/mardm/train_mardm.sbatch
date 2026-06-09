@@ -1,7 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=mardm-gen
-#SBATCH --partition=12g
-#SBATCH --nodelist=frankfurt,hamburg,kassel,leipzig
+#SBATCH --partition=24g
 #SBATCH --qos=students_normal
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -13,6 +12,11 @@
 # MARDM stage 2: train the masked-autoregressive generation branch (mardm_mini)
 # on the frozen AE's latents. Requires a stage-1 AE checkpoint whose `ae:` block
 # matches configs/mardm/gen.yaml (paper-faithful AE by default).
+#
+# Defaults to the 24g partition (matches the documented 1-day-per-model GPU
+# budget). 12g works equivalently — the train script auto-picks fp16 on
+# Turing and bf16 on Ampere+, so precision doesn't need a manual override.
+# To use 12g: `sbatch --partition=12g --nodelist=frankfurt,hamburg,kassel,leipzig ...`
 #
 # Submit:
 #     AE_CKPT=/path/to/mardm-ae-XXXX/checkpoints/latest.pt sbatch slurm/train_mardm.sbatch
@@ -26,7 +30,15 @@
 set -euo pipefail
 mkdir -p slurm/logs
 
-AE_CKPT="${AE_CKPT:-${1:?set AE_CKPT env var or pass the AE checkpoint as the first positional arg}}"
+# AE_CKPT: prefer env var; otherwise consume $1 as the positional fallback.
+# Anything left in "$@" after that gets forwarded to the python script as
+# extra hydra overrides (e.g. train.max_steps=500, ae.width=384).
+if [ -z "${AE_CKPT:-}" ]; then
+    AE_CKPT="${1:?set AE_CKPT env var or pass the AE checkpoint as the first positional arg}"
+    shift
+fi
+EXTRA_HYDRA_ARGS="$*"
+CONFIG_NAME="${CONFIG_NAME:-mardm/gen}"
 if [ -n "${SLURM_SUBMIT_DIR:-}" ]; then
     REPO="${REPO:-${SLURM_SUBMIT_DIR}}"
 else
@@ -39,7 +51,11 @@ RUNS_ROOT="${RUNS_ROOT:-${HOME}/rmg-runs}"
 HF_CACHE="${HF_CACHE:-${HOME}/hf-cache}"
 DATA_ROOT="${RMG_DATA_ROOT:-${REPO}/external/data/humanml3d_packed}"
 MARDM_STATS="${MARDM_STATS:-${RUNS_ROOT}/mardm_essential_stats.pt}"
-: "${WANDB_MODE:=offline}"
+if [ -n "${WANDB_API_KEY:-}" ]; then
+    : "${WANDB_MODE:=online}"
+else
+    : "${WANDB_MODE:=offline}"
+fi
 
 enroot start \
     --rw \
@@ -47,6 +63,8 @@ enroot start \
     --mount /tmp:tmp \
     --env "HF_HOME=${HF_CACHE}" \
     --env "WANDB_MODE=${WANDB_MODE}" \
+    --env "WANDB_API_KEY=${WANDB_API_KEY:-}" \
+    --env "WANDB_ENTITY=${WANDB_ENTITY:-}" \
     --env "RMG_RUNS_DIR=${RUNS_ROOT}" \
     --env "RMG_DATA_ROOT=${DATA_ROOT}" \
     --env "MARDM_STATS=${MARDM_STATS}" \
@@ -59,7 +77,10 @@ enroot start \
         [ -f '${MARDM_STATS}' ] || python scripts/compute_mardm_stats.py \\
             --data-root '${DATA_ROOT}' --out '${MARDM_STATS}'
         python scripts/train_mardm.py \\
+            --config-name=${CONFIG_NAME} \\
             ae_checkpoint='${AE_CKPT}' \\
             text_encoder.type=qwen3 \\
-            run_name='${RUN_NAME}'
+            data.preload=true \\
+            run_name='${RUN_NAME}' \\
+            ${EXTRA_HYDRA_ARGS}
     "

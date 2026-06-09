@@ -1,7 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=mardm-overfit
-#SBATCH --partition=12g
-#SBATCH --nodelist=frankfurt,hamburg,kassel,leipzig
+#SBATCH --partition=24g
 #SBATCH --qos=students_normal
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -18,6 +17,12 @@
 # Hyperparameters (vs. a normal run):
 #   * subset_frac=0.005 (overridable via SUBSET_FRAC)
 #   * data.mirror_augment=false (don't perturb the small set)
+#   * data.preload=true         (encodes the ~56 clips into RAM once at init;
+#                                the train script auto-forces num_workers=0
+#                                because workers + preload is pickle-overhead
+#                                without speedup)
+#   * train.micro_batch_size=16 train.grad_accum=1 (BS=64 would yield 0 batches
+#                                per epoch on a 56-clip subset with drop_last)
 #   * model.cond_drop_prob=0 (no CFG dropout — let it memorize text→motion)
 #   * model.dropout=0           (transformer dropout off)
 #
@@ -48,7 +53,11 @@ STAMP="${SLURM_JOB_ID:-$(date +%Y%m%d-%H%M%S)}"
 AE_RUN="mardm-overfit-ae-${STAMP}"
 GEN_RUN="mardm-overfit-gen-${STAMP}"
 AE_OUT="${RUNS_ROOT}/${AE_RUN}"
-: "${WANDB_MODE:=offline}"
+if [ -n "${WANDB_API_KEY:-}" ]; then
+    : "${WANDB_MODE:=online}"
+else
+    : "${WANDB_MODE:=offline}"
+fi
 
 enroot start \
     --rw \
@@ -56,6 +65,8 @@ enroot start \
     --mount /tmp:tmp \
     --env "HF_HOME=${HF_CACHE}" \
     --env "WANDB_MODE=${WANDB_MODE}" \
+    --env "WANDB_API_KEY=${WANDB_API_KEY:-}" \
+    --env "WANDB_ENTITY=${WANDB_ENTITY:-}" \
     --env "RMG_RUNS_DIR=${RUNS_ROOT}" \
     --env "RMG_DATA_ROOT=${DATA_ROOT}" \
     --env "MARDM_STATS=${MARDM_STATS}" \
@@ -74,6 +85,9 @@ enroot start \
             run_name='${AE_RUN}' \\
             subset_frac=${SUBSET_FRAC} \\
             data.mirror_augment=false \\
+            data.preload=true \\
+            train.micro_batch_size=16 \\
+            train.grad_accum=1 \\
             train.max_steps=${AE_STEPS} \\
             train.val_every=$((AE_STEPS / 4)) \\
             train.ckpt_every=${AE_STEPS} \\
@@ -86,6 +100,9 @@ enroot start \
             text_encoder.type=qwen3 \\
             subset_frac=${SUBSET_FRAC} \\
             data.mirror_augment=false \\
+            data.preload=true \\
+            train.micro_batch_size=16 \\
+            train.grad_accum=1 \\
             model.cond_drop_prob=0 \\
             model.dropout=0 \\
             train.max_steps=${GEN_STEPS} \\

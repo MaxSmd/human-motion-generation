@@ -8,6 +8,7 @@ from .checkpoint import (
 )
 from .ema import EMA
 from .logging import Logger, LoggerConfig
+from .precision import resolve_precision
 from .scheduler import build_scheduler, cosine_with_warmup
 from .seed import set_seed, worker_init_fn
 
@@ -25,4 +26,5 @@ __all__ = [
     "restore_rng_state",
     "Logger",
     "LoggerConfig",
+    "resolve_precision",
 ]

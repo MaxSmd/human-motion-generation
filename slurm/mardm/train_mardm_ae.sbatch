@@ -1,7 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=mardm-ae
-#SBATCH --partition=12g
-#SBATCH --nodelist=frankfurt,hamburg,kassel,leipzig
+#SBATCH --partition=24g
 #SBATCH --qos=students_normal
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -14,6 +13,11 @@
 # downsample). Computes the essential mean/std once (if missing) then trains.
 # The AE is the cheap stage (a few hours); leave the bulk of the 1-day,
 # per-model budget for the generation branch (slurm/train_mardm.sbatch).
+#
+# Defaults to the 24g partition (matches the documented 1-day-per-model GPU
+# budget). 12g works equivalently — the train script auto-picks fp16 on
+# Turing and bf16 on Ampere+, so precision doesn't need a manual override.
+# To use 12g: `sbatch --partition=12g --nodelist=frankfurt,hamburg,kassel,leipzig ...`
 #
 # Submit:  sbatch slurm/train_mardm_ae.sbatch
 # Resume:  just resubmit (auto-detects latest checkpoint under the run dir).
@@ -38,7 +42,11 @@ HF_CACHE="${HF_CACHE:-${HOME}/hf-cache}"
 DATA_ROOT="${RMG_DATA_ROOT:-${REPO}/external/data/humanml3d_packed}"
 # Shared across AE / gen / eval — must be a writable path (the dataset mount is RO).
 MARDM_STATS="${MARDM_STATS:-${RUNS_ROOT}/mardm_essential_stats.pt}"
-: "${WANDB_MODE:=offline}"
+if [ -n "${WANDB_API_KEY:-}" ]; then
+    : "${WANDB_MODE:=online}"
+else
+    : "${WANDB_MODE:=offline}"
+fi
 
 enroot start \
     --rw \
@@ -46,6 +54,8 @@ enroot start \
     --mount /tmp:tmp \
     --env "HF_HOME=${HF_CACHE}" \
     --env "WANDB_MODE=${WANDB_MODE}" \
+    --env "WANDB_API_KEY=${WANDB_API_KEY:-}" \
+    --env "WANDB_ENTITY=${WANDB_ENTITY:-}" \
     --env "RMG_RUNS_DIR=${RUNS_ROOT}" \
     --env "RMG_DATA_ROOT=${DATA_ROOT}" \
     --env "MARDM_STATS=${MARDM_STATS}" \
@@ -57,5 +67,5 @@ enroot start \
         pip install -e . --no-deps --quiet
         [ -f '${MARDM_STATS}' ] || python scripts/compute_mardm_stats.py \\
             --data-root '${DATA_ROOT}' --out '${MARDM_STATS}'
-        python scripts/train_mardm_ae.py run_name='${RUN_NAME}'
+        python scripts/train_mardm_ae.py run_name='${RUN_NAME}' data.preload=true
     "

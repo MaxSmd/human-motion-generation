@@ -112,6 +112,54 @@ def test_subset_truncation(tmp_path: Path) -> None:
     assert len(both) == 5
 
 
+def test_preload_matches_on_the_fly(tmp_path: Path) -> None:
+    # Cached features must equal on-the-fly encoded features so the cache is a
+    # pure speedup, not a numerical change.
+    _build(tmp_path, n_train=4)
+    fly = EssentialDataset(tmp_path, "train", window_size=None, mirror_augment=False,
+                           min_seq_len=10)
+    cached = EssentialDataset(tmp_path, "train", window_size=None, mirror_augment=False,
+                              min_seq_len=10, preload=True)
+    assert len(fly) == len(cached)
+    for i in range(len(fly)):
+        a, b = fly[i], cached[i]
+        assert a.clip_id == b.clip_id
+        assert a.length == b.length
+        torch.testing.assert_close(a.x1, b.x1)
+
+
+def test_preload_with_windowing(tmp_path: Path) -> None:
+    _build(tmp_path, n_train=4)
+    ds = EssentialDataset(tmp_path, "train", window_size=32, mirror_augment=False,
+                          min_seq_len=10, preload=True)
+    loader = DataLoader(ds, batch_size=2, collate_fn=collate, num_workers=0, drop_last=True)
+    batch = next(iter(loader))
+    assert batch.x1.shape == (2, 32, ESSENTIAL_DIM)
+    assert torch.isfinite(batch.x1).all()
+
+
+def test_preload_caches_mirrored_when_enabled(tmp_path: Path) -> None:
+    _build(tmp_path, n_train=2)
+    ds = EssentialDataset(tmp_path, "train", window_size=None, mirror_augment=True,
+                          min_seq_len=10, preload=True)
+    for entry in ds._preload_cache.values():
+        assert "x1_mirrored" in entry
+        assert entry["x1_mirrored"].shape == entry["x1"].shape
+
+
+def test_preload_forbids_set_stats_after_init(tmp_path: Path) -> None:
+    _build(tmp_path, n_train=2)
+    ds = EssentialDataset(tmp_path, "train", mirror_augment=False, min_seq_len=10,
+                          preload=True)
+    mean = torch.zeros(ESSENTIAL_DIM)
+    std = torch.ones(ESSENTIAL_DIM)
+    try:
+        ds.set_stats(mean, std)
+    except RuntimeError:
+        return
+    raise AssertionError("set_stats() should raise when called after preload")
+
+
 def test_ae_forward_backward_on_windows(tmp_path: Path) -> None:
     _build(tmp_path)
     ds = EssentialDataset(tmp_path, "train", window_size=32, mirror_augment=False, min_seq_len=10)

@@ -43,6 +43,7 @@ from rmg.utils import (
     collect_rng_state,
     find_latest_checkpoint,
     load_checkpoint,
+    resolve_precision,
     restore_rng_state,
     save_checkpoint,
     set_seed,
@@ -96,6 +97,7 @@ def _build_dataset(cfg: DictConfig, split: str, mean, std, mirror: bool) -> Esse
         mirror_augment=mirror, max_seq_len=cfg.data.max_seq_len, min_seq_len=cfg.data.min_seq_len,
         subset_frac=cfg.get("subset_frac"), limit_clips=cfg.get("limit_clips"),
         zip_name=cfg.data.zip_name, splits_name=cfg.data.splits_name, offsets_name=cfg.data.offsets_name,
+        preload=cfg.data.get("preload", False),
     )
 
 
@@ -110,6 +112,16 @@ def _build_loader(ds: EssentialDataset, cfg: DictConfig, shuffle: bool) -> DataL
 
 
 def _infinite(loader: DataLoader):
+    # Guard: an empty loader (micro_batch_size > len(dataset) with drop_last=True)
+    # would otherwise turn `while True: for _ in loader: ...` into a silent busy
+    # loop — pegging one CPU and producing no batches, no logs, no errors.
+    if len(loader) == 0:
+        raise RuntimeError(
+            f"DataLoader yields 0 batches per epoch (dataset size "
+            f"{len(loader.dataset)} < batch_size {loader.batch_size} with "
+            "drop_last=True). Reduce train.micro_batch_size or raise "
+            "subset_frac/limit_clips."
+        )
     while True:
         for batch in loader:
             yield batch
@@ -143,6 +155,18 @@ def main(cfg: DictConfig) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     set_seed(cfg.seed, deterministic=cfg.deterministic)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Resolve precision against the local GPU and harmonize the dataloader
+    # config — both are no-ops when the user already passed sensible values.
+    OmegaConf.set_struct(cfg, False)
+    cfg.train.precision = resolve_precision(cfg.train.precision)
+    if cfg.data.preload and cfg.data.num_workers > 0:
+        print(f"[data] preload=true → forcing num_workers=0 (was "
+              f"{cfg.data.num_workers}); workers add IPC overhead without "
+              "speedup when features live in RAM.")
+        cfg.data.num_workers = 0
+        cfg.data.persistent_workers = False
+    OmegaConf.set_struct(cfg, True)
 
     mean, std = _load_stats(cfg.stats_path)
     text_encoder = _build_text_encoder(cfg)

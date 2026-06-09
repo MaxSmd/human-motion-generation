@@ -24,6 +24,7 @@ mkdir -p slurm/logs
 
 AE_CKPT="${AE_CKPT:?set AE_CKPT to the stage-1 AE checkpoint}"
 GEN_CKPT="${GEN_CKPT:-${1:?set GEN_CKPT env var or pass the gen checkpoint as the first positional arg}}"
+CONFIG_NAME="${CONFIG_NAME:-mardm/gen}"
 if [ -n "${SLURM_SUBMIT_DIR:-}" ]; then
     REPO="${REPO:-${SLURM_SUBMIT_DIR}}"
 else
@@ -53,6 +54,7 @@ enroot start \
         pip install -e . --no-deps --quiet
         python -m spacy download en_core_web_sm --quiet || true
         python -u scripts/evaluate_mardm.py \\
+            --config-name=${CONFIG_NAME} \\
             ae_checkpoint='${AE_CKPT}' \\
             text_encoder.type=qwen3 \\
             +eval.checkpoint='${GEN_CKPT}' \\
