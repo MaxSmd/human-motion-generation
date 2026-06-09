@@ -1,10 +1,13 @@
-"""Generate a LaTeX comparison table (MoMask, MARDM, RMG, MARDM-mini) and render to PDF.
+"""Generate a LaTeX comparison table (MoMask, MARDM, RMG, MARDM paper-M) and render to PDF.
 
 Bold = best per column. Underline = second-best. Diversity uses
 "closer to GT (9.503) is better"; the others use min/max as the arrows indicate.
 
+Output goes to reports/tables/<stem>.tex and .pdf, where <stem> is derived from
+the eval run directory (e.g. ~/rmg-runs/mardm-eval-10132/eval/results.json -> mardm_10132).
+
 Usage:
-    python notebooks/eval_table.py ~/rmg-runs/mardm-eval-latest/eval/results.json
+    python notebooks/eval_table.py ~/rmg-runs/mardm-eval-10132/eval/results.json
 """
 
 from __future__ import annotations
@@ -63,7 +66,7 @@ def load_ours(path: Path):
         m = data[omega]
         rp = m.get("r_precision") or [None]
         rows.append((
-            f"MARDM-mini (ours, $w={omega}$)",
+            f"MARDM paper-M (ours, $w={omega}$)",
             {
                 "FID":           m.get("fid"),
                 "R@1":           rp[0] if rp else None,
@@ -92,7 +95,7 @@ def build_tex(rows):
         body_lines.append(line)
         # divider between baseline rows and our row(s)
         if i == n_baselines - 1 and len(rows) > n_baselines:
-            body_lines.append(r"\midrule")
+            body_lines.append(r"\hline")
 
     # Vanilla LaTeX — no booktabs/multirow/standalone needed (those aren't in
     # BasicTeX by default). `\hline\hline` mimics \toprule/\bottomrule.
@@ -121,15 +124,24 @@ def build_tex(rows):
     return table, doc
 
 
+def _stem_from_results(results_path: Path) -> str:
+    """~/rmg-runs/mardm-eval-10132/eval/results.json -> 'mardm_10132'."""
+    run_dir = results_path.parent.parent.name  # e.g. 'mardm-eval-10132'
+    return run_dir.replace("-eval-", "_").replace("-", "_")
+
+
 def main(results_path: Path) -> None:
     ours = load_ours(results_path)
     rows = list(BASELINES) + ours
     table, doc = build_tex(rows)
 
-    out_dir = results_path.parent
-    tex_path  = out_dir / "comparison.tex"
-    doc_path  = out_dir / "_comparison_doc.tex"
-    pdf_path  = out_dir / "comparison.pdf"
+    repo_root = Path(__file__).resolve().parent.parent
+    out_dir = repo_root / "reports" / "tables"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stem = _stem_from_results(results_path)
+    tex_path  = out_dir / f"{stem}.tex"
+    doc_path  = out_dir / f"_{stem}_doc.tex"
+    pdf_path  = out_dir / f"{stem}.pdf"
 
     tex_path.write_text(table)
     doc_path.write_text(doc)
@@ -156,11 +168,11 @@ def main(results_path: Path) -> None:
         print("\npdflatex failed:\n", e.stdout.decode()[-2000:], file=sys.stderr)
         return
 
-    standalone_pdf = out_dir / "_comparison_doc.pdf"
+    standalone_pdf = out_dir / f"_{stem}_doc.pdf"
     if standalone_pdf.exists():
         standalone_pdf.replace(pdf_path)
     for ext in (".aux", ".log"):
-        leftover = out_dir / ("_comparison_doc" + ext)
+        leftover = out_dir / (f"_{stem}_doc" + ext)
         if leftover.exists():
             leftover.unlink()
     doc_path.unlink(missing_ok=True)
