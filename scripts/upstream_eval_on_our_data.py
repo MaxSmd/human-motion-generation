@@ -20,7 +20,7 @@ Steps:
 
 No spaCy, no our-wrapper text encoding — purely upstream's protocol.
 
-Run via slurm/diagnose_text.sbatch (CPU is fine; the only GPU usage is the
+Run via slurm/upstream_eval.sbatch (CPU is fine; the only GPU usage is the
 Guo eval model forward — already mounted).
 """
 

@@ -41,4 +41,4 @@ tests/test_mardm*.py
 2. Decide on input representation (263-D feature, or one of the T+R / T+P /
    T+R+P encodings via `rmg.representation.build_representation`).
 3. Stand up a smoke training run (200 steps, tiny model) following
-   `slurm/sanity_train.sbatch` as a template.
+   `slurm/rmg_train.sbatch` as a template (`OVERRIDES='train.max_steps=200 …'`).

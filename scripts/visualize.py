@@ -28,7 +28,7 @@ Outputs land under `${output_dir}/viz/`. Both paths go through
 `rmg.representation.forward_kinematics` so the rendered skeleton uses the same
 HumanML3D-convention FK the evaluator expects.
 
-Run via `slurm/visualize.sbatch`; not designed for local CPU use (Qwen3 text
+Run via `slurm/rmg_viz.sbatch`; not designed for local CPU use (Qwen3 text
 encoder is heavy, and MP4 export needs ffmpeg in the container).
 """
 

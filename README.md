@@ -50,17 +50,15 @@ scripts/                Python entry points (Hydra-driven)
                         per-block diff of our 263-D vs upstream's process_file
 
 slurm/                  sbatch templates (12g + 24g partitions; QoS: students_normal)
-  smoke.sbatch          5-min container/import check
-  sanity_train.sbatch   2-min tiny-DiT end-to-end pipeline check
-  sanity_eval.sbatch    decode/eval check on real data (NO training)
+  rmg_train.sbatch      TRAIN — fully configurable via env + OVERRIDES
+  rmg_eval.sbatch       EVAL  — fully configurable via env + OVERRIDES
+  rmg_viz.sbatch        VIZ   — MODE=clip|prompt|compare|samples + env + OVERRIDES
   prep_data.sbatch      full prep: AMASS → joints → packed zip
-  train_rmg_base.sbatch RMG-base (6L/384h, 150k steps, ~3.5d)
-  train_rmg_large.sbatch
-                        RMG-large (24L/1024h, 600k steps)
-  train_ablation.sbatch parameterized by REPRESENTATION env var
-  evaluate.sbatch       CKPT=... sbatch evaluate.sbatch
   init_eval_assets.sbatch
                         one-time text-to-motion submodule + Guo checkpoint setup
+  build_image.sbatch    build the enroot image
+  publish_run.sbatch    copy a finished run to the shared project dir
+  upstream_eval.sbatch  run upstream's exact eval pipeline (cross-check)
 
 containers/             enroot build instructions + Dockerfile + requirements.txt
 external/               git submodules: HumanML3D, text-to-motion
@@ -94,15 +92,18 @@ Once-per-account:
 # 1. Build the container (see containers/BUILD.md — 5 min on a 24g interactive job)
 # 2. Init eval assets (text-to-motion submodule + Guo checkpoint)
 sbatch slurm/init_eval_assets.sbatch
-# 3. Smoke-test
-sbatch slurm/smoke.sbatch
 ```
 
-Then for a training run:
+Then for a training run (everything is configurable via env + `OVERRIDES`):
 
 ```bash
-sbatch slurm/train_rmg_base.sbatch
-# logs land in slurm/logs/rmg-base-<jobid>.{out,err}
+# default RMG-base
+sbatch slurm/rmg_train.sbatch
+# tiny overfit / smoke via overrides
+MODEL_PRESET=dit_base PRESET=rmg_base \
+  OVERRIDES='data.subset_n=16 train.max_steps=15000' \
+  sbatch slurm/rmg_train.sbatch
+# logs land in slurm/logs/rmg-train-<jobid>.{out,err}
 # checkpoints land in $HOME/rmg-runs/<run_name>/checkpoints/
 ```
 
@@ -192,9 +193,9 @@ ln -s /mnt/shared/motion/external/text-to-motion  external/text-to-motion
 # 4. Point at the shared dataset
 mkdir -p external/data
 ln -s /mnt/shared/motion/humanml3d_packed_v3_xflip external/data/humanml3d_packed
-# 5. Smoke test
-sbatch slurm/smoke.sbatch
-sbatch slurm/sanity_train.sbatch   # 2 min end-to-end
+# 5. Smoke test (tiny end-to-end via overrides)
+OVERRIDES='data.subset_n=4 train.max_steps=25 train.micro_batch_size=4 train.grad_accum=1' \
+  sbatch slurm/rmg_train.sbatch
 ```
 
 ---
@@ -217,7 +218,7 @@ on real motions exposed it.
 
 Diagnostic that pins our 263-D output bit-equal to upstream's `process_file`
 (per-block max |Δ| ≈ 1e-6, position round-trip ≈ 0 on the canonical body
-`000021`): `scripts/diagnose_h3d_conversion.py` → `sbatch slurm/diagnose_h3d.sbatch`.
+`000021`): `scripts/diagnose_h3d_conversion.py` (run inside the container).
 
 ### Sanity_eval verdicts to clear before training
 
@@ -233,13 +234,15 @@ To verify:
 ```bash
 rm external/data/humanml3d_packed/humanml3d.zip
 sbatch slurm/prep_data.sbatch                   # ~10 min CPU (raw-pose stage is cached)
-sbatch slurm/sanity_eval.sbatch                 # ~2 min, full 4384-clip split
+# decode/eval sanity on real data via the unified eval script:
+EVAL_SPLIT=test MAX_CLIPS=512 GUIDANCE_SCALES='[6.5]' \
+  OVERRIDES='+eval.evaluator=real' sbatch slurm/rmg_eval.sbatch
 ```
 
 ### Once sanity passes
 
 The existing `rmg-base` checkpoint was trained on L/R-confused data and must
-be discarded. Re-train from scratch (`sbatch slurm/train_rmg_base.sqsh`, ~3.5d).
+be discarded. Re-train from scratch (`sbatch slurm/rmg_train.sbatch`, ~3.5d).
 
 ---
 
@@ -256,9 +259,9 @@ Workflow we'll all follow:
    `configs/train.yaml` top-level pattern.
 4. **Scripts under top-level `scripts/`**, named `train_<method>.py`,
    `evaluate_<method>.py`. Each one is hydra-decorated, single entry point.
-5. **Sbatch under `slurm/`**, named `train_<method>_*.sbatch` and
-   `evaluate_<method>.sbatch`. Copy the existing `train_rmg_base.sbatch`
-   as a template — same partition + QoS + image conventions.
+5. **Sbatch under `slurm/`**. Copy the unified `rmg_train.sbatch` /
+   `rmg_eval.sbatch` / `rmg_viz.sbatch` as templates — same partition + QoS +
+   image conventions, everything configurable via env + `OVERRIDES`.
 6. **Tests under `tests/test_<method>_*.py`**. Use `RandomGuoEvaluator` (in
    `rmg.eval`) for CI-friendly tests that don't need the upstream checkpoint.
 7. **PR into `main`** with a one-paragraph description; another teammate

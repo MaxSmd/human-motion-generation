@@ -8,23 +8,13 @@
 #SBATCH --output=slurm/logs/rmg-eval-%j.out
 #SBATCH --error=slurm/logs/rmg-eval-%j.err
 #
-# Evaluate an RMG checkpoint. Defaults to the full Table 4 / Figure 3a
-# protocol (test split, 8 guidance scales) but every knob is overridable
-# via env var for fast iteration cycles.
+# Unified, fully-configurable EVAL job. Like rmg_train.sbatch: every knob is an
+# env var + OVERRIDES for arbitrary extra Hydra args. RUN_NAME is honoured (so
+# the app can locate + pull the metrics this run writes under RUNS_ROOT/RUN_NAME).
 #
-# Common usages:
-#
-#   # Full protocol (~45 min on 24g)
-#   CKPT=/path sbatch slurm/evaluate.sbatch
-#
-#   # Fast test-split eval (~5 min): 256 clips, single guidance, reduced MM
-#   CKPT=/path MAX_CLIPS=256 GUIDANCE_SCALES='[6.5]' MM_NUM_TEXTS=10 MM_REPEATS=3 \
-#       sbatch slurm/evaluate.sbatch
-#
-#   # Train-subset eval (overfit sanity check on what the model actually saw):
-#   CKPT=/path EVAL_SPLIT=train SUBSET_FRACTION=0.01 SUBSET_SEED=0 \
-#       MAX_CLIPS=128 GUIDANCE_SCALES='[6.5]' MM_NUM_TEXTS=10 MM_REPEATS=3 \
-#       sbatch slurm/evaluate.sbatch
+#   CKPT=/path/to/latest.pt MODEL_PRESET=dit_base PRESET=rmg_base \
+#   EVAL_SPLIT=test MAX_CLIPS=256 GUIDANCE_SCALES='[6.5]' RUN_NAME=eval-myrun \
+#       sbatch slurm/rmg_eval.sbatch
 
 set -euo pipefail
 mkdir -p slurm/logs
@@ -38,10 +28,12 @@ else
 fi
 IMAGE="${IMAGE:-${HOME}/rmg.sqsh}"
 HF_CACHE="${HF_CACHE:-${HOME}/hf-cache}"
-PRESET="${PRESET:-rmg_base}"
+RUNS_ROOT="${RUNS_ROOT:-${HOME}/rmg-runs}"
 MODEL_PRESET="${MODEL_PRESET:-dit_base}"
+PRESET="${PRESET:-rmg_base}"
+TEXT_ENCODER="${TEXT_ENCODER:-qwen3}"
+RUN_NAME="${RUN_NAME:-eval-$(basename "${CKPT}" .pt)-${SLURM_JOB_ID:-$(date +%H%M%S)}}"
 
-# Eval-protocol knobs (all overridable for fast iteration)
 EVAL_SPLIT="${EVAL_SPLIT:-test}"
 MAX_CLIPS="${MAX_CLIPS:--1}"
 GUIDANCE_SCALES="${GUIDANCE_SCALES:-[2.5,3.5,4.5,5.5,6.5,7.5,8.5,9.5]}"
@@ -50,13 +42,15 @@ MM_REPEATS="${MM_REPEATS:-10}"
 SUBSET_FRACTION="${SUBSET_FRACTION:-1.0}"
 SUBSET_SEED="${SUBSET_SEED:-0}"
 NUM_SAMPLE_STEPS="${NUM_SAMPLE_STEPS:-50}"
-USE_EMA="${USE_EMA:-true}"   # set false to eval LIVE weights (EMA lags hard at low step counts)
+USE_EMA="${USE_EMA:-true}"
+OVERRIDES="${OVERRIDES:-}"
 
 enroot start \
     --rw \
     --mount /mnt:mnt \
     --mount /tmp:tmp \
     --env "HF_HOME=${HF_CACHE}" \
+    --env "RMG_RUNS_DIR=${RUNS_ROOT}" \
     --env "PYTHONPATH=${REPO}/src" \
     "${IMAGE}" \
     bash -lc "
@@ -67,7 +61,7 @@ enroot start \
         python -u scripts/evaluate.py \\
             model=${MODEL_PRESET} \\
             train=${PRESET} \\
-            text_encoder.type=qwen3 \\
+            text_encoder.type=${TEXT_ENCODER} \\
             data.subset_fraction=${SUBSET_FRACTION} \\
             data.subset_seed=${SUBSET_SEED} \\
             +eval.checkpoint=${CKPT} \\
@@ -79,5 +73,6 @@ enroot start \
             +eval.mm_repeats=${MM_REPEATS} \\
             +eval.num_sample_steps=${NUM_SAMPLE_STEPS} \\
             +eval.guidance_scales='${GUIDANCE_SCALES}' \\
-            run_name=eval-\$(basename ${CKPT} .pt)-\$(date +%H%M%S)
+            run_name='${RUN_NAME}' \\
+            ${OVERRIDES}
     "

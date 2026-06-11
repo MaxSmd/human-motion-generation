@@ -46,7 +46,7 @@ That's it. From now on every sbatch starts a fresh container from `~/rmg.sqsh`.
 ## Smoke test the saved image
 
 ```bash
-sbatch slurm/smoke.sbatch
+OVERRIDES='data.subset_n=4 train.max_steps=25' sbatch slurm/rmg_train.sbatch
 cat slurm/logs/smoke.out  # path is set inside the sbatch script
 ```
 

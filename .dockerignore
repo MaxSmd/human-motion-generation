@@ -1,0 +1,15 @@
+# Backend build context = repo root. Exclude heavy/irrelevant paths; runs/ and
+# the packed dataset are mounted at runtime, not baked into the image.
+.git
+.venv
+**/__pycache__
+**/*.pyc
+.media
+runs
+external
+frontend/node_modules
+frontend/.next
+node_modules
+*.png
+*.csv
+plan.md
