@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 import torch
 
-from common.eval import (
+from shared.eval import (
     RandomGuoEvaluator,
     diversity,
     fid,

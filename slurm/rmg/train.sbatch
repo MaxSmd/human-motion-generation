@@ -45,7 +45,7 @@ enroot start \
     --mount /tmp:tmp \
     --env "HF_HOME=${HF_CACHE}" \
     --env "WANDB_MODE=${WANDB_MODE}" \
-    --env "RMG_RUNS_DIR=${RUNS_ROOT}" \
+    --env "MGEN_RUNS_DIR=${RUNS_ROOT}" \
     --env "PYTHONPATH=${REPO}/src" \
     "${IMAGE}" \
     bash -lc "

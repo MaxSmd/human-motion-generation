@@ -10,7 +10,6 @@ requires-python = ">=3.10"
 dependencies = [
     "torch>=2.4",
     "numpy",
-    "roma",
     "einops",
     "scipy",
     "h5py",
@@ -29,7 +28,7 @@ dev = ["pytest", "pytest-xdist", "ruff", "mypy"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["common*", "rmg*", "momask*", "mardm*"]
+include = ["shared*", "rmg*", "momask*", "mardm*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -13,10 +13,11 @@ Two ways a config is obtained:
 
 Path defaults come from env vars so the same image runs locally or on the
 cluster:
-    RMG_DATA_ROOT   — packed HumanML3D dir (humanml3d.zip, splits.json, offsets)
-    RMG_RUNS_DIR    — where training runs (checkpoints + samples) live
-    RMG_OFFSETS     — optional direct path to target_offsets.pt (overrides data root)
-    RMG_CHECKPOINT  — optional explicit checkpoint .pt to warm-load for /generate
+    MGEN_DATA_ROOT   — packed HumanML3D dir (humanml3d.zip, splits.json, offsets)
+    MGEN_RUNS_DIR    — where training runs (checkpoints + samples) live
+    MGEN_OFFSETS     — optional direct path to target_offsets.pt (overrides data root)
+    MGEN_CHECKPOINT  — optional explicit checkpoint .pt to warm-load for /generate
+    (legacy `RMG_*` names are still honoured)
 """
 
 from __future__ import annotations
@@ -93,7 +94,7 @@ def load_run_config(run_dir: str | Path) -> DictConfig | None:
 
 
 def data_root(cfg: DictConfig | None = None) -> Path:
-    env = os.environ.get("RMG_DATA_ROOT")
+    env = _env("DATA_ROOT")
     if env:
         return Path(env)
     cfg = cfg or compose_default()
@@ -101,7 +102,7 @@ def data_root(cfg: DictConfig | None = None) -> Path:
 
 
 def runs_dir() -> Path:
-    env = os.environ.get("RMG_RUNS_DIR")
+    env = _env("RUNS_DIR")
     if env:
         return Path(env)
     return REPO / "runs"
@@ -109,7 +110,7 @@ def runs_dir() -> Path:
 
 def offsets_path(cfg: DictConfig | None = None) -> Path:
     """Path to `target_offsets.pt` — RMG_OFFSETS wins, else data_root/offsets_name."""
-    env = os.environ.get("RMG_OFFSETS")
+    env = _env("OFFSETS")
     if env:
         return Path(env)
     cfg = cfg or compose_default()
@@ -119,14 +120,14 @@ def offsets_path(cfg: DictConfig | None = None) -> Path:
 def default_checkpoint() -> Path | None:
     """Checkpoint to warm-load for /generate. RMG_CHECKPOINT wins; otherwise the
     most-recently-modified `latest.pt`/`ckpt-*.pt` under any run in RMG_RUNS_DIR."""
-    env = os.environ.get("RMG_CHECKPOINT")
+    env = _env("CHECKPOINT")
     if env:
         p = Path(env)
         return p if p.exists() else None
     rd = runs_dir()
     if not rd.exists():
         return None
-    ckpts = list(rd.glob("*/checkpoints/*.pt"))
+    ckpts = list(rd.glob("**/checkpoints/*.pt"))
     if not ckpts:
         return None
     return max(ckpts, key=lambda p: p.stat().st_mtime)
@@ -134,32 +135,39 @@ def default_checkpoint() -> Path | None:
 
 # --------------------------------------------------------------------------- cluster
 #
-# Cluster mode turns the backend into a SLURM control plane (see cluster-plan.md).
+# Cluster mode turns the backend into a SLURM control plane.
 # Everything is driven over the user's own `~/.ssh/config` host alias, multiplexed
 # through one ControlMaster opened for the app session. Defaults match the user's
 # layout: alias `head`, project ~/riemann-motion-generation, runs <project>/runs
 # (split into per-task subdirs train/ eval/ viz/).
 
 
+def _env(name: str, default: str | None = None) -> str | None:
+    """Read `MGEN_<name>`, falling back to the legacy `RMG_<name>`, then `default`.
+    The control plane is model-agnostic, so its env vars use the neutral `MGEN_`
+    prefix; `RMG_` is still honoured for back-compat."""
+    return os.environ.get(f"MGEN_{name}", os.environ.get(f"RMG_{name}", default))
+
+
 def _env_bool(name: str, default: bool) -> bool:
-    v = os.environ.get(name)
+    v = _env(name)
     if v is None:
         return default
     return v.strip().lower() in ("1", "true", "yes", "on")
 
 
 def cluster_mode() -> bool:
-    return _env_bool("RMG_CLUSTER_MODE", True)
+    return _env_bool("CLUSTER_MODE", True)
 
 
 def cluster_host() -> str:
-    return os.environ.get("RMG_CLUSTER_HOST", "head")
+    return _env("CLUSTER_HOST", "head")
 
 
 def cluster_model() -> str:
     """Active model namespace under the runs root: `runs/<model>/<kind>/<run>`.
     Default `rmg`; the momask/mardm merge will make this per-submission."""
-    return os.environ.get("RMG_CLUSTER_MODEL", "rmg")
+    return _env("CLUSTER_MODEL", "rmg")
 
 
 RUN_KINDS = ("train", "eval", "viz")
@@ -169,7 +177,7 @@ def cluster_runs_dir() -> str:
     """Remote runs root, holding per-task subdirs `train/`, `eval/`, `viz/`
     (shell-expanded on the cluster). Defaults to `<project>/runs` so all run data
     lives inside the repo checkout rather than scattered in `$HOME`."""
-    env = os.environ.get("RMG_CLUSTER_RUNS")
+    env = _env("CLUSTER_RUNS")
     if env:
         return env
     return f"{cluster_project_dir()}/runs"
@@ -177,21 +185,21 @@ def cluster_runs_dir() -> str:
 
 def cluster_project_dir() -> str:
     """Remote git project dir (holds slurm/*.sbatch). Default ~/riemann-motion-generation."""
-    return os.environ.get("RMG_CLUSTER_PROJECT", "~/riemann-motion-generation")
+    return _env("CLUSTER_PROJECT", "~/riemann-motion-generation")
 
 
 def ssh_control_path() -> str:
     """ControlMaster socket for the app session. Kept short (macOS sun_path limit)."""
-    return os.environ.get("RMG_SSH_CONTROL_PATH", str(Path.home() / ".rmg-cm.sock"))
+    return _env("SSH_CONTROL_PATH", str(Path.home() / ".mgen-cm.sock"))
 
 
 def ssh_extra_opts() -> list[str]:
     """Extra `-o Key=Val` style tokens from RMG_SSH_OPTS (space-separated)."""
-    raw = os.environ.get("RMG_SSH_OPTS", "").strip()
+    raw = (_env("SSH_OPTS", "") or "").strip()
     return raw.split() if raw else []
 
 
 def jobs_state_path() -> Path:
     """Where the job registry is persisted so jobs survive a backend restart."""
-    env = os.environ.get("RMG_JOBS_STATE")
+    env = _env("JOBS_STATE")
     return Path(env) if env else (REPO / ".media" / "jobs.json")

@@ -5,6 +5,10 @@ it resident. The representation/skeleton are cheap and shared; each checkpoint
 gets its own lazily-built bundle (model + EMA-applied weights + sampler + text
 encoder), reconstructed from that run's `config.json` so the dims always match
 the weights.
+
+This in-process inference path is rmg-specific (it builds rmg's sampler +
+representation); other models are driven via the cluster control plane until a
+model-pluggable inference path is added.
 """
 
 from __future__ import annotations
@@ -20,7 +24,7 @@ from rmg.flow import RiemannianEulerSampler, SamplerCfg, WrappedGaussianPrior
 from rmg.models import DiTConfig, Qwen3EmbeddingEncoder, RandomTextEncoder, RMGDiT
 from rmg.models.text_encoder import TextEncoder
 from rmg.representation import Skeleton, build_representation
-from common.utils import EMA, load_checkpoint
+from shared.utils import EMA, load_checkpoint
 
 from . import config as cfgmod
 

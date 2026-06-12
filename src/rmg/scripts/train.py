@@ -51,7 +51,7 @@ from rmg.representation import (
     Skeleton,
     build_representation,
 )
-from common.utils import (
+from shared.utils import (
     EMA,
     Logger,
     LoggerConfig,

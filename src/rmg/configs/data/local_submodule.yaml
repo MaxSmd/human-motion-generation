@@ -6,7 +6,7 @@
 
 defaults: []
 
-root: ${oc.env:RMG_DATA_ROOT,${hydra:runtime.cwd}/external/data/humanml3d_packed}
+root: ${oc.env:MGEN_DATA_ROOT,${oc.env:RMG_DATA_ROOT,${hydra:runtime.cwd}/external/data/humanml3d_packed}}
 layout: submodule_zip       # how the dataset class interprets `root`
 zip_name: humanml3d.zip
 splits_name: splits.json

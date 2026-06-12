@@ -11,7 +11,7 @@ import pytest
 import torch
 from torch import nn
 
-from common.utils import (
+from shared.utils import (
     EMA,
     Logger,
     LoggerConfig,

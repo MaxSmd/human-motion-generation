@@ -9,13 +9,13 @@ stays uniform):
     from mardm.training   import MARDMTrainerCfg
     from mardm.tasks      import generation as mardm_generation
 
-Shared, model-agnostic code lives in `common` (don't duplicate it):
+Shared, model-agnostic code lives in `shared` (don't duplicate it):
 
-    from common.eval   import RealGuoEvaluator, fid, r_precision, ...
-    from common.utils  import EMA, Logger, save_checkpoint, ...
+    from shared.eval   import RealGuoEvaluator, fid, r_precision, ...
+    from shared.utils  import EMA, Logger, save_checkpoint, ...
 
 The HumanML3D loader (`rmg.data`) bakes in rmg's representation; build your
-own dataset/encoding for this model, reusing `common` where you can
+own dataset/encoding for this model, reusing `shared` where you can
 
 If you find yourself copy-pasting from `rmg/`, lift the shared piece into
 `rmg/` (or a new `common/` package) instead.

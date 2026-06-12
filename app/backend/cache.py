@@ -20,7 +20,7 @@ from .config import REPO
 
 
 def media_dir() -> Path:
-    d = Path(os.environ.get("RMG_MEDIA_DIR", REPO / ".media"))
+    d = Path(os.environ.get("MGEN_MEDIA_DIR", os.environ.get("RMG_MEDIA_DIR", REPO / ".media")))
     d.mkdir(parents=True, exist_ok=True)
     return d
 

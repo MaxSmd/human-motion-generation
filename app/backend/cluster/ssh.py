@@ -39,7 +39,7 @@ _MASTER_TTL = 30.0
 # over one reused connection. Each command is fast over the warm master, so
 # serializing (default 1) costs little and keeps us gentle on the login node.
 # (Override via RMG_SSH_MAX_SESSIONS only if you know the node allows more.)
-_session_sem = threading.BoundedSemaphore(int(os.environ.get("RMG_SSH_MAX_SESSIONS", "1")))
+_session_sem = threading.BoundedSemaphore(int(os.environ.get("MGEN_SSH_MAX_SESSIONS", os.environ.get("RMG_SSH_MAX_SESSIONS", "1"))))
 _MUX_ERR = ("disabling multiplexing", "control socket", "session request failed",
             "multiplexing", "session open refused")
 

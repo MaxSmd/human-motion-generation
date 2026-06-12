@@ -17,7 +17,7 @@ defaults:
   - _self_
 
 run_name: rmg-${model.name}-${now:%Y%m%d-%H%M%S}
-output_dir: ${oc.env:RMG_RUNS_DIR,${hydra:runtime.cwd}/runs}/${run_name}
+output_dir: ${oc.env:MGEN_RUNS_DIR,${oc.env:RMG_RUNS_DIR,${hydra:runtime.cwd}/runs}}/${run_name}
 seed: 0
 deterministic: false
 

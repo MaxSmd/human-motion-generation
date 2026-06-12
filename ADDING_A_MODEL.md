@@ -29,11 +29,14 @@ src/<model>/
 
 ## 3. Reuse shared code — don't fork it
 
-Data loading, the Guo evaluator + metrics, and training utilities are shared.
-Today they live in the `rmg` package; they move to `src/common/` as the second
-and third models land. **Import them, don't copy.** If you need a new dataloader
-mode / metric / text encoder, add it to the shared package in one PR — don't
-fork the file into your package.
+The Guo evaluator + metrics and training utilities are shared, in `src/shared/`
+(`shared.eval`, `shared.utils`) — **import them, don't copy.** The HumanML3D
+loader (`rmg.data`) bakes in rmg's representation, so it's not generic yet: build
+your own dataset/encoding, reusing `shared` where you can. New shared metric or
+utility? Add it to `src/shared/` in one PR — don't fork.
+
+Model-specific deps go in a `[project.optional-dependencies]` group named after
+your model; install with `pip install -e '.[<model>]'`.
 
 ## 4. Cluster jobs — `slurm/<model>/`
 

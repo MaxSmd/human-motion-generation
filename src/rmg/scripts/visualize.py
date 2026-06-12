@@ -67,7 +67,7 @@ from rmg.representation import (  # noqa: E402
     forward_kinematics,
 )
 from rmg.representation.tplusr import decode as tplusr_decode  # noqa: E402
-from common.utils import EMA, load_checkpoint, set_seed  # noqa: E402
+from shared.utils import EMA, load_checkpoint, set_seed  # noqa: E402
 
 
 # HumanML3D 22-joint kinematic chains (same as upstream's t2m_kinematic_chain).

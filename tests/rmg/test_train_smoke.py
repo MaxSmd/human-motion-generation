@@ -28,7 +28,7 @@ from rmg.flow import (
 )
 from rmg.models import DiTConfig, RandomTextEncoder, RMGDiT
 from rmg.representation import NUM_JOINTS
-from common.utils import (
+from shared.utils import (
     EMA,
     TrainState,
     build_scheduler,

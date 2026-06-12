@@ -11,10 +11,11 @@ container, and one web + cluster control plane. Adding a model:
 
 ```
 src/
+  shared/               model-agnostic: eval (Guo evaluator + metrics) · utils
   rmg/                  Riemannian flow matching on (R³ × S³^22)
     configs/            Hydra configs (data / model / representation / train + train.yaml)
     scripts/            entry points: train · evaluate · visualize
-    data/ eval/ flow/ manifolds/ models/ representation/ tasks/ utils/
+    data/ flow/ manifolds/ models/ representation/
   momask/  mardm/       other models (placeholders — see ADDING_A_MODEL.md)
 
 app/
@@ -94,7 +95,7 @@ The only **shared** cluster storage is the data mount under
 image, and all run outputs under `<project>/runs/`.
 
 ```bash
-export RMG_DATA_ROOT=/mnt/projects/drl4cvb/data/humanml3d_packed   # shared dataset
+export MGEN_DATA_ROOT=/mnt/projects/drl4cvb/data/humanml3d_packed  # shared dataset (legacy RMG_DATA_ROOT honoured)
 export IMAGE=$HOME/rmg.sqsh                                        # your image
 ```
 

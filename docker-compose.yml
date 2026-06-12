@@ -16,7 +16,7 @@
 # work from the container, run the backend as a host process instead (see
 # server/README.md) and keep only the frontend in compose.
 #
-# To run WITHOUT the cluster (local files only), set RMG_CLUSTER_MODE: "0".
+# To run WITHOUT the cluster (local files only), set MGEN_CLUSTER_MODE: "0".
 
 services:
   backend:
@@ -28,14 +28,14 @@ services:
     ports:
       - "8000:8000"
     environment:
-      RMG_CLUSTER_MODE: "1"
-      RMG_CLUSTER_HOST: head
-      RMG_CLUSTER_PROJECT: ~/riemann-motion-generation
-      RMG_SSH_CONTROL_PATH: /tmp/rmg-cm.sock   # writable inside the container
-      RMG_RUNS_DIR: /data/runs
-      RMG_DATA_ROOT: /data/humanml3d_packed
-      RMG_MEDIA_DIR: /data/media
-      RMG_JOBS_STATE: /data/media/jobs.json
+      MGEN_CLUSTER_MODE: "1"
+      MGEN_CLUSTER_HOST: head
+      MGEN_CLUSTER_PROJECT: ~/riemann-motion-generation
+      MGEN_SSH_CONTROL_PATH: /tmp/mgen-cm.sock   # writable inside the container
+      MGEN_RUNS_DIR: /data/runs
+      MGEN_DATA_ROOT: /data/humanml3d_packed
+      MGEN_MEDIA_DIR: /data/media
+      MGEN_JOBS_STATE: /data/media/jobs.json
     volumes:
       # Your SSH config + keys + known_hosts → cluster auth (read-only).
       - ${HOME}/.ssh:/root/.ssh:ro

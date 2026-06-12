@@ -58,7 +58,7 @@ enroot start \
     --mount /mnt:mnt \
     --mount /tmp:tmp \
     --env "HF_HOME=${HF_CACHE}" \
-    --env "RMG_RUNS_DIR=${RUNS_ROOT}" \
+    --env "MGEN_RUNS_DIR=${RUNS_ROOT}" \
     --env "PYTHONPATH=${REPO}/src" \
     "${IMAGE}" \
     bash -lc "
