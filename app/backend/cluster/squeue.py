@@ -10,19 +10,19 @@ from . import ssh
 # field order must match the parser below
 _FMT = "%i|%j|%T|%M|%l|%D|%R"
 
-# Run names are unique across the per-task subdirs, so a run can be located by
-# probing train/ eval/ viz/ in turn.
+# Run names are unique across the per-model / per-task subdirs, so a run can be
+# located by probing every <model>/{train,eval,viz} dir (model wildcarded).
 _RUN_KINDS = ("train", "eval", "viz")
 
 
 def resolve_run_dir(run: str) -> str:
-    """Abs path of a run dir, probing the per-task subdirs (train/eval/viz).
-    Falls back to `<base>/<run>` if not found anywhere (keeps errors legible)."""
+    """Abs path of a run dir, probing `<model>/{train,eval,viz}` (model
+    wildcarded). Falls back to `<base>/<run>` if not found (keeps errors legible)."""
     base = ssh.abs_remote(cfgmod.cluster_runs_dir())
     script = (
         f"base={shlex.quote(base)}; run={shlex.quote(run)}; "
-        'for k in train eval viz; do '
-        'if [ -d "$base/$k/$run" ]; then printf %s "$base/$k/$run"; exit 0; fi; '
+        'for d in "$base"/*/train "$base"/*/eval "$base"/*/viz; do '
+        'if [ -d "$d/$run" ]; then printf %s "$d/$run"; exit 0; fi; '
         'done; printf %s "$base/$run"'
     )
     return ssh.run(script, timeout=15, check=False).stdout.strip()
@@ -67,31 +67,33 @@ def list_runs() -> list[dict]:
     """Runs under each per-task subdir of the runs root, flagged with what they
     contain and tagged with their task `kind` (train/eval/viz)."""
     base = shlex.quote(ssh.abs_remote(cfgmod.cluster_runs_dir()))
-    # For each run dir under train/ eval/ viz/: kind, name, has checkpoints/samples/viz/metrics.
+    # For each run dir under <model>/{train,eval,viz}: model, kind, name, flags.
     script = (
         f'base={base}; '
+        'for mdir in "$base"/*/; do model="$(basename "$mdir")"; '
         'for k in train eval viz; do '
-        'cd "$base/$k" 2>/dev/null || continue; '
+        'cd "$mdir/$k" 2>/dev/null || continue; '
         'for d in */; do d="${d%/}"; [ -d "$d" ] || continue; '
         '[ -d "$d/checkpoints" ] && c=1 || c=0; '
         '[ -d "$d/samples" ] && s=1 || s=0; '
         '[ -d "$d/viz" ] && v=1 || v=0; '
         '[ -f "$d/metrics.csv" ] && m=1 || m=0; '
-        'echo "$k|$d|$c|$s|$v|$m"; done; done'
+        'echo "$model|$k|$d|$c|$s|$v|$m"; done; done; done'
     )
     res = ssh.run(script, timeout=20, check=False)
     out = []
     for line in res.stdout.splitlines():
         p = line.split("|")
-        if len(p) != 6:
+        if len(p) != 7:
             continue
         out.append({
-            "kind": p[0],
-            "run": p[1],
-            "has_checkpoints": p[2] == "1",
-            "has_samples": p[3] == "1",
-            "has_viz": p[4] == "1",
-            "has_metrics": p[5] == "1",
+            "model": p[0],
+            "kind": p[1],
+            "run": p[2],
+            "has_checkpoints": p[3] == "1",
+            "has_samples": p[4] == "1",
+            "has_viz": p[5] == "1",
+            "has_metrics": p[6] == "1",
         })
     return out
 
@@ -101,7 +103,7 @@ def list_checkpoints(run: str) -> list[str]:
     subdir is wildcarded since checkpoints only ever live under train runs."""
     runs = shlex.quote(ssh.abs_remote(cfgmod.cluster_runs_dir()))
     res = ssh.run(
-        f"ls -1 {runs}/*/{shlex.quote(run)}/checkpoints/*.pt 2>/dev/null",
+        f"ls -1 {runs}/*/*/{shlex.quote(run)}/checkpoints/*.pt 2>/dev/null",
         timeout=15, check=False,
     )
     files = [l.strip() for l in res.stdout.splitlines() if l.strip()]

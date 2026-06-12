@@ -26,7 +26,7 @@ else
 fi
 IMAGE="${IMAGE:-${HOME}/rmg.sqsh}"
 HF_CACHE="${HF_CACHE:-${HOME}/hf-cache}"
-RUNS_ROOT="${RUNS_ROOT:-${REPO}/runs/viz}"
+RUNS_ROOT="${RUNS_ROOT:-${REPO}/runs/rmg/viz}"
 
 MODE="${MODE:-clip}"
 CLIPS="${CLIPS:-000021,000019,000022,000026}"
@@ -66,7 +66,7 @@ enroot start \
         cd ${REPO}
         pip install -e . --no-deps --quiet
         if [ '${MODE}' = 'prompt' ]; then
-            python -u scripts/visualize.py \\
+            python -u -m rmg.scripts.visualize \\
                 model=${MODEL_PRESET} train=${PRESET} text_encoder.type=${TEXT_ENCODER} \\
                 run_name='${RUN_NAME}' \\
                 +viz.mode=prompt +viz.checkpoint=${CKPT} +viz.use_ema=${USE_EMA} \\
@@ -74,7 +74,7 @@ enroot start \
                 +viz.num_frames=${NUM_FRAMES} +viz.num_sample_steps=${NUM_STEPS} \\
                 +viz.guidance_scale=${GUIDANCE} ${OVERRIDES}
         elif [ '${MODE}' = 'compare' ]; then
-            python -u scripts/visualize.py \\
+            python -u -m rmg.scripts.visualize \\
                 model=${MODEL_PRESET} train=${PRESET} text_encoder.type=${TEXT_ENCODER} \\
                 run_name='${RUN_NAME}' \\
                 +viz.mode=compare +viz.checkpoint=${CKPT} +viz.use_ema=${USE_EMA} \\
@@ -83,12 +83,12 @@ enroot start \
                 \"+viz.clips='${CLIPS}'\" \\
                 +viz.num_sample_steps=${NUM_STEPS} +viz.guidance_scale=${GUIDANCE} ${OVERRIDES}
         elif [ '${MODE}' = 'samples' ]; then
-            python -u scripts/visualize.py \\
+            python -u -m rmg.scripts.visualize \\
                 model=${MODEL_PRESET} train=${PRESET} text_encoder.type=${TEXT_ENCODER} \\
                 run_name='${RUN_NAME}' \\
                 +viz.mode=samples \"+viz.samples_file='${SAMPLES_FILE}'\" ${OVERRIDES}
         else
-            python -u scripts/visualize.py \\
+            python -u -m rmg.scripts.visualize \\
                 model=${MODEL_PRESET} train=${PRESET} text_encoder.type=${TEXT_ENCODER} \\
                 run_name='${RUN_NAME}' \\
                 +viz.mode=clip \"+viz.clips='${CLIPS}'\" ${OVERRIDES}

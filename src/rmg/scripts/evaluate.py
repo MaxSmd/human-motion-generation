@@ -10,7 +10,7 @@ Pipeline:
   6. Optionally sweep classifier-free guidance ω ∈ [2.5, 9.5] (paper Fig. 3).
 
 Run example:
-    python scripts/evaluate.py \\
+    python -m rmg.scripts.evaluate \\
         +model=dit_base \\
         +train=rmg_base \\
         eval.checkpoint=runs/rmg-base-foo/checkpoints/latest.pt \\

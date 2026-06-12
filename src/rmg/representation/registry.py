@@ -259,6 +259,6 @@ def build_representation(name: str, num_joints: int = NUM_JOINTS, **kwargs) -> R
         raise ValueError(
             f"unknown representation {name!r} — available: {sorted(_REGISTRY)} "
             f"(dT/dR ablations are config stubs only; see "
-            f"configs/representation/{{dt_plus_r,t_plus_dr}}.yaml)"
+            f"src/rmg/configs/representation/{{dt_plus_r,t_plus_dr}}.yaml)"
         )
     return _REGISTRY[name](num_joints=num_joints, **kwargs)

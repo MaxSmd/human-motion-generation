@@ -3,7 +3,7 @@
 `visualize.py` dumps a `<clip>.npy` next to every rendered GIF; the job poller
 rsyncs both into `media/jobs/<job>/`. These are kilobytes, so we compute cheap
 smoothness/trajectory series locally (no model, no animation). Jitter uses the
-same `‖Δ³x‖` jerk measure as `scripts/plot_jitter.py`.
+same `‖Δ³x‖` jerk measure as `src/rmg/scripts/plot_jitter.py`.
 """
 
 from __future__ import annotations

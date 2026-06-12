@@ -21,7 +21,7 @@ def fetch_metrics(run: str, max_points: int = 1500) -> dict:
     runs = shlex.quote(ssh.abs_remote(cfgmod.cluster_runs_dir()))
     # Wildcard the task subdir (train/eval/viz) — run names are unique.
     res = ssh.run(
-        f"cat {runs}/*/{shlex.quote(run)}/metrics.csv 2>/dev/null", timeout=25, check=False
+        f"cat {runs}/*/*/{shlex.quote(run)}/metrics.csv 2>/dev/null", timeout=25, check=False
     )
     if not res.ok or not res.stdout.strip():
         raise FileNotFoundError(f"no metrics.csv for run {run!r}")
@@ -55,7 +55,7 @@ def fetch_run_info(run: str) -> dict:
     Duration ≈ newest-artifact mtime − config.json mtime (the trainer writes
     config.json at startup and checkpoints throughout). One SSH round-trip."""
     runs = shlex.quote(ssh.abs_remote(cfgmod.cluster_runs_dir()))
-    rdir = f"{runs}/*/{shlex.quote(run)}"  # task subdir wildcarded
+    rdir = f"{runs}/*/*/{shlex.quote(run)}"  # model + task subdir wildcarded
     script = (
         f"cd {rdir} 2>/dev/null || exit 3; "
         'echo "===CONFIG==="; cat config.json 2>/dev/null; '

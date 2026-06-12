@@ -3,7 +3,7 @@
 Single warm process. Endpoints render motion to a media file on disk (cached by
 a hash of their inputs) and return its `/media/...` URL. See `plan.md` §2.
 
-Run:  uvicorn server.app:app --host 0.0.0.0 --port 8000
+Run:  uvicorn backend.app:app --app-dir app --host 0.0.0.0 --port 8000
 """
 
 from __future__ import annotations

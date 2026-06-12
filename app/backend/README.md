@@ -52,7 +52,7 @@ keep the frontend in compose (or `npm run dev`):
 ```bash
 # backend on the host
 pip install -e . && pip install -r server/requirements.txt
-RMG_CLUSTER_MODE=1 uvicorn server.app:app --reload --port 8000
+RMG_CLUSTER_MODE=1 uvicorn backend.app:app --app-dir app --reload --port 8000
 
 # frontend
 cd frontend && npm install && npm run dev   # http://localhost:3000

@@ -1,12 +1,12 @@
 """RMG training entry point — Hydra-driven, single-GPU + grad-accum design.
 
 Usage (local smoke):
-    python scripts/train.py +model=dit_base +train=rmg_base \\
+    python -m rmg.scripts.train +model=dit_base +train=rmg_base \\
         train.max_steps=20 train.micro_batch_size=4 train.grad_accum=2 \\
         text_encoder.type=random run_name=local-smoke
 
 Usage (cluster, full RMG-base):
-    python scripts/train.py +model=dit_base +train=rmg_base \\
+    python -m rmg.scripts.train +model=dit_base +train=rmg_base \\
         text_encoder.type=qwen3 +data=cluster_mounted
 
 The training loop:

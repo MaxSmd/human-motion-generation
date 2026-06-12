@@ -31,7 +31,7 @@ else
 fi
 IMAGE="${IMAGE:-${HOME}/rmg.sqsh}"
 HF_CACHE="${HF_CACHE:-${HOME}/hf-cache}"
-RUNS_ROOT="${RUNS_ROOT:-${REPO}/runs/train}"
+RUNS_ROOT="${RUNS_ROOT:-${REPO}/runs/rmg/train}"
 MODEL_PRESET="${MODEL_PRESET:-dit_base}"
 PRESET="${PRESET:-rmg_base}"
 TEXT_ENCODER="${TEXT_ENCODER:-qwen3}"
@@ -52,7 +52,7 @@ enroot start \
         set -euo pipefail
         cd ${REPO}
         pip install -e . --no-deps --quiet
-        python scripts/train.py \\
+        python -m rmg.scripts.train \\
             model=${MODEL_PRESET} \\
             train=${PRESET} \\
             text_encoder.type=${TEXT_ENCODER} \\

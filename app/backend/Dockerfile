@@ -1,7 +1,7 @@
 # RMG backend (FastAPI). Build context is the REPO ROOT so we can install the
-# `rmg` package from src/ and read configs/.
+# `rmg` package from src/ (configs live in src/rmg/configs).
 #
-#   docker build -f server/Dockerfile -t rmg-backend .
+#   docker build -f app/backend/Dockerfile -t rmg-backend .
 #
 # Default installs CPU torch wheels (laptop-friendly). For a GPU host, override:
 #   --build-arg TORCH_INDEX_URL=https://download.pytorch.org/whl/cu121
@@ -26,11 +26,10 @@ RUN pip install --index-url ${TORCH_INDEX_URL} torch
 
 COPY pyproject.toml ./
 COPY src ./src
-COPY configs ./configs
-COPY server ./server
+COPY app/backend ./backend
 
 # Editable install of the rmg package + backend-only extras.
-RUN pip install -e . && pip install -r server/requirements.txt
+RUN pip install -e . && pip install -r backend/requirements.txt
 
 # Where runs/ (checkpoints + samples), the packed dataset, and rendered media
 # live inside the container. Override via compose volumes / env.
@@ -39,4 +38,4 @@ ENV RMG_RUNS_DIR=/data/runs \
     RMG_MEDIA_DIR=/data/media
 
 EXPOSE 8000
-CMD ["uvicorn", "server.app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "backend.app:app", "--host", "0.0.0.0", "--port", "8000"]

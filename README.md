@@ -8,9 +8,11 @@ Single repo, three reproductions, one shared data + eval pipeline:
 | `src/momask/`  | MoMask: Generative Masked Modeling of 3D Human Motions (Guo+ 2024)     | *open*   | placeholder |
 | `src/mardm/`   | MARDM                                                                  | *open*   | placeholder |
 
-Common infrastructure (data loading, evaluator wrapper, metrics, training-loop
-utilities, container, slurm) is shared via the `rmg` package and the
-top-level `scripts/`, `configs/`, `slurm/`, `containers/`.
+Common infrastructure is shared across models: model-agnostic data tooling in
+top-level `scripts/`, cluster plumbing in `slurm/` + `containers/`, and the web
+control plane in `app/`. Shared library code (data, evaluator, metrics) lives in
+the `rmg` package today and will be hoisted into `src/common/` with the
+momask/mardm merge.
 
 > [!IMPORTANT]
 > **The packed dataset is currently broken — do not train anything yet.**
@@ -23,7 +25,9 @@ top-level `scripts/`, `configs/`, `slurm/`, `containers/`.
 ```
 src/
   rmg/                  Riemannian flow matching on (R³ × S³^22) — paper main result
-    data/               HumanML3D packed dataset (shared with momask/mardm)
+    configs/            Hydra configs: data/ model/ representation/ train/ + train.yaml
+    scripts/            entry points: train · evaluate · sanity_eval · visualize · plot_*
+    data/               HumanML3D packed dataset (shared; → src/common/ on merge)
     eval/               Guo et al. evaluator wrapper + FID/R@k/Diversity/MM-Dist
     flow/               flow matching trainer, sampler, prior, geodesic interp
     manifolds/          R^d, S^d, pre-shape, ProductManifold
@@ -34,20 +38,14 @@ src/
   momask/               placeholder — see src/momask/README.md
   mardm/                placeholder — see src/mardm/README.md
 
-configs/                Hydra configs (rmg-specific today; add momask/, mardm/ as you go)
-  data/                 local_submodule.yaml | cluster_mounted.yaml
-  model/                dit_base.yaml | dit_large.yaml
-  representation/       t_plus_r.yaml | t_plus_p.yaml | t_plus_r_plus_p.yaml | (dt/dr stubs)
-  train/                rmg_base.yaml | rmg_large.yaml
-  train.yaml            top-level composition
+app/                    web control plane
+  backend/              SLURM control plane + in-process rmg inference (uvicorn backend.app:app)
+  frontend/             Next.js UI
 
-scripts/                Python entry points (Hydra-driven)
-  train.py              RMG training
-  evaluate.py           RMG eval with CFG sweep
-  sanity_eval.py        decode + eval pipeline check on REAL data (no model needed)
+scripts/                model-agnostic data tooling (shared across models)
   prepare_humanml3d.py  AMASS → packed dataset (two stages)
-  diagnose_h3d_conversion.py
-                        per-block diff of our 263-D vs upstream's process_file
+  build_synthetic_dataset.py   tiny synthetic packed dataset for tests
+  diagnose_h3d_conversion.py / diagnose_text_pairing.py   dataset diagnostics
 
 slurm/                  sbatch templates (12g + 24g partitions; QoS: students_normal)
   rmg_train.sbatch      TRAIN — fully configurable via env + OVERRIDES
@@ -58,6 +56,7 @@ slurm/                  sbatch templates (12g + 24g partitions; QoS: students_no
   ensure_eval_assets.sh text-to-motion submodule + Guo checkpoint; auto-run
                         (idempotent) by rmg_eval.sbatch on the first eval
 
+docs/                   plan.md + design notes
 containers/             enroot build instructions + Dockerfile + requirements.txt
 external/               git submodules: HumanML3D, text-to-motion
 tests/                  pytest suite — manifolds, representation, flow, eval, models
@@ -77,7 +76,7 @@ automatically.
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 pytest                                          # manifold + representation + flow tests
-python scripts/train.py model=dit_base train=rmg_base \
+python -m rmg.scripts.train model=dit_base train=rmg_base \
     train.max_steps=20 train.micro_batch_size=4 train.grad_accum=2 \
     text_encoder.type=random run_name=local-smoke
 ```
@@ -104,7 +103,7 @@ MODEL_PRESET=dit_base PRESET=rmg_base \
   OVERRIDES='data.subset_n=16 train.max_steps=15000' \
   sbatch slurm/rmg_train.sbatch
 # logs land in slurm/logs/rmg-train-<jobid>.{out,err}
-# checkpoints land in <project>/runs/train/<run_name>/checkpoints/
+# checkpoints land in <project>/runs/rmg/train/<run_name>/checkpoints/
 ```
 
 ---
@@ -145,7 +144,7 @@ per-user.**
 | **`humanml3d_packed/` (Stage 2 output, the zip)** | shared, RW | one person re-packs, everyone reads — see Data status |
 | `~/rmg.sqsh` container image               | shared, RO copy | symlink your `$HOME/rmg.sqsh` to a shared copy |
 | HF cache (`~/.cache/huggingface`)          | shared, RW      | Qwen3 weights, sentencepiece tokenizers; safe to share |
-| `<project>/runs/{train,eval,viz}/`         | **per-user**    | write-heavy, large, per-experiment |
+| `<project>/runs/<model>/{train,eval,viz}/`         | **per-user**    | write-heavy, large, per-experiment |
 | `slurm/logs/`                              | **per-user** (committed empty) | per-user job output |
 | wandb / tensorboard outputs                | **per-user**    | one wandb run per training job |
 
@@ -159,7 +158,7 @@ The shared mount has **one writer per artifact at a time**. Concretely:
   (we won't for a while). Coordinate over Slack first.
 - **`humanml3d_packed/`**: this *will* change while we fix decode bugs.
   Convention: name the dir with a date/version suffix
-  (`humanml3d_packed_v3_xflip/`) and update `configs/data/cluster_mounted.yaml`
+  (`humanml3d_packed_v3_xflip/`) and update `src/rmg/configs/data/cluster_mounted.yaml`
   in a single commit when a new version goes live. Don't overwrite the
   current dir in-place — concurrent eval/training jobs will read garbage.
 - **Container image**: same versioning. `rmg-2026-05-25.sqsh` not `rmg.sqsh`.
@@ -170,7 +169,7 @@ Set these in your `~/.bashrc` on the cluster:
 
 ```bash
 export RMG_DATA_ROOT=/mnt/shared/motion/humanml3d_packed_v3_xflip
-export RMG_RUNS_DIR=$HOME/riemann-motion-generation/runs/train
+export RMG_RUNS_DIR=$HOME/riemann-motion-generation/runs/rmg/train
 export HF_HOME=/mnt/shared/motion/hf-cache
 export IMAGE=/mnt/shared/motion/rmg-2026-05-25.sqsh    # or ~/rmg.sqsh if you built your own
 ```
@@ -253,12 +252,12 @@ Workflow we'll all follow:
 1. **Open a feature branch** named `<method>/<short-desc>`, e.g.
    `momask/vq-stage1`. Don't push to `main`.
 2. **Code lives under your package**: `src/<method>/`. Keep it self-contained.
-   Pull anything you need from `rmg`; don't reach into the other method's
-   internals.
-3. **Configs under `configs/<method>/`**, hydra-composable. Mirror the
+   Pull shared code from `src/common/` (or `rmg` until the common/ extraction
+   lands); don't reach into another method's internals.
+3. **Configs under `src/<method>/configs/`**, hydra-composable. Mirror rmg's
    `configs/train.yaml` top-level pattern.
-4. **Scripts under top-level `scripts/`**, named `train_<method>.py`,
-   `evaluate_<method>.py`. Each one is hydra-decorated, single entry point.
+4. **Entry points under `src/<method>/scripts/`** (`train.py`, `evaluate.py`, …),
+   hydra-decorated; run as `python -m <method>.scripts.train`.
 5. **Sbatch under `slurm/`**. Copy the unified `rmg_train.sbatch` /
    `rmg_eval.sbatch` / `rmg_viz.sbatch` as templates — same partition + QoS +
    image conventions, everything configurable via env + `OVERRIDES`.

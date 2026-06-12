@@ -1,6 +1,6 @@
 """Ground-truth clip access for the GT browser.
 
-Small, dependency-light reimplementations of the bits of `scripts/visualize.py`
+Small, dependency-light reimplementations of the bits of `src/rmg/scripts/visualize.py`
 that read the packed dataset, so the backend doesn't import the Hydra CLI
 script. Reads clips straight out of `humanml3d.zip`.
 """

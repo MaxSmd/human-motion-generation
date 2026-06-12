@@ -292,7 +292,7 @@ class JobManager:
         if not job.run_name:
             job.state, job.error = "failed", "no run_name to pull"
             return
-        remote = f"{ssh.abs_remote(cfgmod.cluster_runs_dir())}/viz/{job.run_name}/viz/"
+        remote = f"{ssh.abs_remote(cfgmod.cluster_runs_dir())}/{cfgmod.cluster_model()}/viz/{job.run_name}/viz/"
         local = cache.media_dir() / "jobs" / job.id
         local.mkdir(parents=True, exist_ok=True)
         try:

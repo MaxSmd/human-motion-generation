@@ -1,6 +1,6 @@
 """In-process motion rendering: (joints) → media file on disk.
 
-Refactored out of `scripts/visualize.py::_render` so the backend can render
+Refactored out of `src/rmg/scripts/visualize.py::_render` so the backend can render
 without the Hydra/CLI wrapper. Renders (T, 22, 3) joint positions to an MP4
 (when a system ffmpeg is available) or a GIF (Pillow, always available), and
 always dumps the raw joints as `.npy` next to the media for re-render/debug.

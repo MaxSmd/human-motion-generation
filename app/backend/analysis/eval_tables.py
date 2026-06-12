@@ -2,7 +2,7 @@
 
 `evaluate.py` writes `<run>/eval/results.json` as `{omega: {fid, r_precision:[r1,
 r2,r3], mm_dist, diversity, diversity_real, multimodality}}`. Eval runs live
-under the `eval/` subdir of the runs root (`<project>/runs/eval`).
+under `<project>/runs/<model>/eval/<run>` (all models share this layout).
 
 `comparison()` picks each run's best-FID guidance and emits normalized rows + a
 copy-ready booktabs LaTeX `tabular` (best per column bolded).
@@ -16,6 +16,7 @@ import shlex
 
 from .. import config as cfgmod
 from ..cluster import ssh
+from ..cluster.squeue import resolve_run_dir
 
 # An eval run writes results.json incrementally (one ω at a time, overwriting),
 # so a fetch can catch it truncated. Each top-level entry is `"<ω>": { …flat… }`
@@ -49,28 +50,21 @@ COLUMNS = [
 ]
 
 
-def _eval_roots() -> list[str]:
-    base = ssh.abs_remote(cfgmod.cluster_runs_dir())
-    return [f"{base}/eval"]
-
-
 def list_eval_runs() -> list[dict]:
-    """Runs that have an eval/results.json, across both runs roots."""
+    """Runs that have an eval/results.json, across every model's eval/ subdir."""
+    base = shlex.quote(ssh.abs_remote(cfgmod.cluster_runs_dir()))
+    r = ssh.run(f"ls -1 {base}/*/eval/*/eval/results.json 2>/dev/null", check=False)
     out: list[dict] = []
     seen: set[str] = set()
-    for root in _eval_roots():
-        r = ssh.run(
-            f"ls -1 {shlex.quote(root)}/*/eval/results.json 2>/dev/null", check=False
-        )
-        for line in r.stdout.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            run = line.split("/")[-3]
-            if run in seen:
-                continue
-            seen.add(run)
-            out.append({"run": run, "path": line})
+    for line in r.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        run = line.split("/")[-3]
+        if run in seen:
+            continue
+        seen.add(run)
+        out.append({"run": run, "path": line})
     return sorted(out, key=lambda d: d["run"])
 
 
@@ -80,21 +74,18 @@ def fetch_results(run: str) -> dict:
     Distinguishes a genuine miss (`cat` exit 1) from an SSH-transport error
     (exit 255) so a transient blip under load isn't reported as "file missing";
     transport errors get one rebuild-and-retry."""
+    p = f"{resolve_run_dir(run)}/eval/results.json"
     last_err: Exception | None = None
-    for attempt in range(2):
-        transport_error = False
-        for root in _eval_roots():
-            p = f"{root}/{run}/eval/results.json"
-            r = ssh.run(f"cat {shlex.quote(p)}", check=False)  # no 2>/dev/null: keep the exit code meaningful
-            if r.returncode == 0 and r.stdout.strip():
-                raw = _parse_results(r.stdout)
-                return {float(k): _flatten(v) for k, v in raw.items()}
-            if r.returncode == 255:  # SSH transport error, not "no such file"
-                transport_error = True
-                last_err = ssh.SSHError(255, p, r.stderr)
-        if not transport_error:
-            break  # every root said "no such file" → genuine miss
-        ssh.ensure_master(force=True)  # rebuild the master, then retry once
+    for _ in range(2):
+        r = ssh.run(f"cat {shlex.quote(p)}", check=False)  # no 2>/dev/null: keep the exit code meaningful
+        if r.returncode == 0 and r.stdout.strip():
+            raw = _parse_results(r.stdout)
+            return {float(k): _flatten(v) for k, v in raw.items()}
+        if r.returncode == 255:  # SSH transport error, not "no such file"
+            last_err = ssh.SSHError(255, p, r.stderr)
+            ssh.ensure_master(force=True)  # rebuild the master, then retry once
+            continue
+        break  # genuine miss
     if last_err:
         raise last_err
     raise FileNotFoundError(f"no eval/results.json for run {run!r}")

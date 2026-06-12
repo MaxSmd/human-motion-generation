@@ -18,7 +18,7 @@ If they don't match, there is no point training further — the bug is in the
 eval/decode path, not in the model. Fix this *before* committing more GPU hours.
 
 Run example:
-    python scripts/sanity_eval.py \\
+    python -m rmg.scripts.sanity_eval \\
         +eval.evaluator=real \\
         +eval.max_clips=-1
 """

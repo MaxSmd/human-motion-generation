@@ -22,7 +22,7 @@ services:
   backend:
     build:
       context: .
-      dockerfile: server/Dockerfile
+      dockerfile: app/backend/Dockerfile
       args:
         TORCH_INDEX_URL: https://download.pytorch.org/whl/cpu
     ports:
@@ -30,7 +30,6 @@ services:
     environment:
       RMG_CLUSTER_MODE: "1"
       RMG_CLUSTER_HOST: head
-      RMG_CLUSTER_RUNS: ~/rmg-runs
       RMG_CLUSTER_PROJECT: ~/riemann-motion-generation
       RMG_SSH_CONTROL_PATH: /tmp/rmg-cm.sock   # writable inside the container
       RMG_RUNS_DIR: /data/runs
@@ -54,7 +53,7 @@ services:
 
   frontend:
     build:
-      context: ./frontend
+      context: ./app/frontend
       dockerfile: Dockerfile
       args:
         # Baked at build time — must be a URL the BROWSER can reach.

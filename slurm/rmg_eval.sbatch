@@ -28,7 +28,7 @@ else
 fi
 IMAGE="${IMAGE:-${HOME}/rmg.sqsh}"
 HF_CACHE="${HF_CACHE:-${HOME}/hf-cache}"
-RUNS_ROOT="${RUNS_ROOT:-${REPO}/runs/eval}"
+RUNS_ROOT="${RUNS_ROOT:-${REPO}/runs/rmg/eval}"
 MODEL_PRESET="${MODEL_PRESET:-dit_base}"
 PRESET="${PRESET:-rmg_base}"
 TEXT_ENCODER="${TEXT_ENCODER:-qwen3}"
@@ -63,7 +63,7 @@ enroot start \
         cd ${REPO}
         pip install -e . --no-deps --quiet
         python -m spacy download en_core_web_sm --quiet || true
-        python -u scripts/evaluate.py \\
+        python -u -m rmg.scripts.evaluate \\
             model=${MODEL_PRESET} \\
             train=${PRESET} \\
             text_encoder.type=${TEXT_ENCODER} \\

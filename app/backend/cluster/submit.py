@@ -34,8 +34,8 @@ def _run_name(kind: str, tag: str = "") -> str:
 
 
 def _runs_root(kind: str) -> str:
-    """Per-task runs dir on the cluster, e.g. `<project>/runs/train`."""
-    return f"{ssh.abs_remote(cfgmod.cluster_runs_dir())}/{kind}"
+    """Per-model, per-task runs dir on the cluster, e.g. `<project>/runs/rmg/train`."""
+    return f"{ssh.abs_remote(cfgmod.cluster_runs_dir())}/{cfgmod.cluster_model()}/{kind}"
 
 
 def render_command(

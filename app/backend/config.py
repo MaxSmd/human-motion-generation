@@ -27,8 +27,19 @@ from pathlib import Path
 
 from omegaconf import DictConfig, OmegaConf
 
-REPO = Path(__file__).resolve().parent.parent
-CONFIGS = REPO / "configs"
+def _find_repo_root() -> Path:
+    """Repo root = the dir holding `src/rmg/configs`. Located by marker, not a
+    fixed parent depth, so it works both in-repo (app/backend/) and in the Docker
+    image (backend flattened to /app/backend, root /app)."""
+    here = Path(__file__).resolve()
+    for d in (here.parent, *here.parents):
+        if (d / "src" / "rmg" / "configs").is_dir():
+            return d
+    return here.parents[2]
+
+
+REPO = _find_repo_root()
+CONFIGS = REPO / "src" / "rmg" / "configs"
 
 
 def _register_resolvers() -> None:
@@ -56,7 +67,7 @@ def compose_default(
     train: str = "rmg_base",
     representation: str = "t_plus_r",
 ) -> DictConfig:
-    """Compose the same config Hydra would for `scripts/train.py` defaults."""
+    """Compose the same config Hydra would for `rmg.scripts.train` defaults."""
     _register_resolvers()
     cfg = OmegaConf.create({})
     cfg.data = _load_leaf(CONFIGS / "data" / f"{data}.yaml")
@@ -143,6 +154,12 @@ def cluster_mode() -> bool:
 
 def cluster_host() -> str:
     return os.environ.get("RMG_CLUSTER_HOST", "head")
+
+
+def cluster_model() -> str:
+    """Active model namespace under the runs root: `runs/<model>/<kind>/<run>`.
+    Default `rmg`; the momask/mardm merge will make this per-submission."""
+    return os.environ.get("RMG_CLUSTER_MODEL", "rmg")
 
 
 RUN_KINDS = ("train", "eval", "viz")
