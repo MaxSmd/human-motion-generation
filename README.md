@@ -54,11 +54,9 @@ slurm/                  sbatch templates (12g + 24g partitions; QoS: students_no
   rmg_eval.sbatch       EVAL  — fully configurable via env + OVERRIDES
   rmg_viz.sbatch        VIZ   — MODE=clip|prompt|compare|samples + env + OVERRIDES
   prep_data.sbatch      full prep: AMASS → joints → packed zip
-  init_eval_assets.sbatch
-                        one-time text-to-motion submodule + Guo checkpoint setup
   build_image.sbatch    build the enroot image
-  publish_run.sbatch    copy a finished run to the shared project dir
-  upstream_eval.sbatch  run upstream's exact eval pipeline (cross-check)
+  ensure_eval_assets.sh text-to-motion submodule + Guo checkpoint; auto-run
+                        (idempotent) by rmg_eval.sbatch on the first eval
 
 containers/             enroot build instructions + Dockerfile + requirements.txt
 external/               git submodules: HumanML3D, text-to-motion
@@ -90,8 +88,10 @@ Once-per-account:
 
 ```bash
 # 1. Build the container (see containers/BUILD.md — 5 min on a 24g interactive job)
-# 2. Init eval assets (text-to-motion submodule + Guo checkpoint)
-sbatch slurm/init_eval_assets.sbatch
+# 2. Eval assets (text-to-motion submodule + Guo checkpoint) are set up
+#    automatically by rmg_eval.sbatch on the first eval. To pre-stage the
+#    one-time clone on a network/memory-capable node:
+REPO=$PWD sbatch --partition=data --time=00:30:00 --wrap 'bash slurm/ensure_eval_assets.sh'
 ```
 
 Then for a training run (everything is configurable via env + `OVERRIDES`):
@@ -187,7 +187,7 @@ ssh head
 ln -s /mnt/shared/motion/rmg-2026-05-25.sqsh ~/rmg.sqsh
 # 2. Clone the repo to your home
 git clone <repo-url> ~/motion-reproductions && cd ~/motion-reproductions
-# 3. Symlink eval assets so init_eval_assets.sbatch isn't needed
+# 3. Symlink eval assets so the one-time clone isn't needed
 ln -s /mnt/shared/motion/external/HumanML3D       external/HumanML3D
 ln -s /mnt/shared/motion/external/text-to-motion  external/text-to-motion
 # 4. Point at the shared dataset

@@ -45,6 +45,11 @@ NUM_SAMPLE_STEPS="${NUM_SAMPLE_STEPS:-50}"
 USE_EMA="${USE_EMA:-true}"
 OVERRIDES="${OVERRIDES:-}"
 
+# Make sure the Guo evaluator assets (text-to-motion submodule + finest.tar)
+# are in place before the container starts. Fast no-op once set up; the
+# first run does the one-time clone (best on a data node — see the script).
+bash "${REPO}/slurm/ensure_eval_assets.sh"
+
 enroot start \
     --rw \
     --mount /mnt:mnt \
