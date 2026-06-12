@@ -159,7 +159,7 @@ def _ik_quaternions_from_positions(
         "IK is only needed for the AMASS preprocess path. The RMG → H3D path "
         "uses the model's per-joint quaternions directly. See "
         "`tplusr_to_h3d_features_with_quats` for the in-model conversion, and "
-        "`scripts/prepare_humanml3d.py` for the upstream IK that turns raw "
+        "`shared.data.prepare_humanml3d` for the upstream IK that turns raw "
         "joint positions into the dataset's quaternions."
     )
 

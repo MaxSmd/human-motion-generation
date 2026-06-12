@@ -40,12 +40,12 @@ from ..manifolds import (
     Sphere,
     joints_to_preshape,
 )
-from .humanml3d_io import (
+from shared.geometry.humanml3d_io import (
     _features_from_positions_and_quats,
     _canonicalize_first_frame,
     quat_mul,
 )
-from .skeleton import NUM_JOINTS, Skeleton, forward_kinematics
+from shared.geometry.skeleton import NUM_JOINTS, Skeleton, forward_kinematics
 from .tplusr import normalize_quaternions
 
 
@@ -120,8 +120,8 @@ class TRRepresentation(Representation):
         # with the Guo evaluator's training distribution. Our hand-written
         # reimplementation diverges from upstream by ~110% on cont6d because
         # upstream re-runs IK with `smooth_forward=True` *inside* the feature
-        # extractor — see src/rmg/representation/humanml3d_upstream.py.
-        from .humanml3d_upstream import tplusr_to_h3d_features_upstream
+        # extractor — see shared/geometry/humanml3d_upstream.py.
+        from shared.geometry.humanml3d_upstream import tplusr_to_h3d_features_upstream
         return tplusr_to_h3d_features_upstream(translation, quats, skeleton)
 
 
@@ -148,7 +148,7 @@ class TPRepresentation(Representation):
         return torch.zeros(self.ambient_dim, dtype=dtype)
 
     def prior_mu_from_skeleton(self, skeleton: Skeleton, dtype: torch.dtype = torch.float32) -> Tensor:
-        from .skeleton import t_pose_joints
+        from shared.geometry.skeleton import t_pose_joints
         J = t_pose_joints(skeleton).to(dtype)             # (J, 3)
         pshape = joints_to_preshape(J).reshape(-1)         # (J*3,)
         rest_T = torch.zeros(3, dtype=dtype)
@@ -166,7 +166,7 @@ class TPRepresentation(Representation):
         # joint configuration; we restore scale using the canonical skeleton's
         # T-pose Frobenius norm. Then build identity quaternions and run the
         # standard §D.3 pipeline.
-        from .skeleton import t_pose_joints
+        from shared.geometry.skeleton import t_pose_joints
         T = flat.shape[0]
         translation = flat[:, :3]
         pshape = flat[:, 3:].reshape(T, self.num_joints, 3)         # (T, J, 3)
@@ -213,7 +213,7 @@ class TRPRepresentation(Representation):
                          + [torch.zeros(3 * self.num_joints, dtype=dtype)], dim=-1)
 
     def prior_mu_from_skeleton(self, skeleton: Skeleton, dtype: torch.dtype = torch.float32) -> Tensor:
-        from .skeleton import t_pose_joints
+        from shared.geometry.skeleton import t_pose_joints
         rest_T = torch.zeros(3, dtype=dtype)
         rest_q = torch.tensor([1.0, 0.0, 0.0, 0.0], dtype=dtype)
         J = t_pose_joints(skeleton).to(dtype)
@@ -233,7 +233,7 @@ class TRPRepresentation(Representation):
         translation = flat[:, :3]
         quats = flat[:, 3 : 3 + 4 * self.num_joints].reshape(T, self.num_joints, 4)
         if self.decode_via == "rotation":
-            from .humanml3d_upstream import tplusr_to_h3d_features_upstream
+            from shared.geometry.humanml3d_upstream import tplusr_to_h3d_features_upstream
             return tplusr_to_h3d_features_upstream(translation, quats, skeleton)
         elif self.decode_via == "preshape":
             tp_repr = TPRepresentation(num_joints=self.num_joints)

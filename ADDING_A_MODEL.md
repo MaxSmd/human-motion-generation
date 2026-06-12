@@ -29,11 +29,18 @@ src/<model>/
 
 ## 3. Reuse shared code — don't fork it
 
-The Guo evaluator + metrics and training utilities are shared, in `src/shared/`
-(`shared.eval`, `shared.utils`) — **import them, don't copy.** The HumanML3D
-loader (`rmg.data`) bakes in rmg's representation, so it's not generic yet: build
-your own dataset/encoding, reusing `shared` where you can. New shared metric or
-utility? Add it to `src/shared/` in one PR — don't fork.
+`src/shared/` holds everything model-agnostic — **import it, don't copy:**
+- `shared.data` — the HumanML3D pack pipeline (`prepare_humanml3d`) and dataset
+  machinery (`mirror_motion`, `select_clip_ids`, `read_clip`, `random_crop`,
+  `pad_batch`).
+- `shared.geometry` — SMPL skeleton + `forward_kinematics` + the 263-D HumanML3D
+  feature conversion (`tplusr_to_h3d_features_upstream`). Compose `shared.data`
+  with your own *encode*: `{translation, quats}` → `forward_kinematics` → 263-D
+  (rmg instead encodes to its manifold).
+- `shared.eval` — Guo evaluator + FID/R@k/Diversity/MM-Dist.
+- `shared.utils` — EMA, checkpointing, logging, seeding, scheduler.
+
+New shared metric / dataloader util? Add it to `src/shared/` in one PR — don't fork.
 
 Model-specific deps go in a `[project.optional-dependencies]` group named after
 your model; install with `pip install -e '.[<model>]'`.
@@ -41,10 +48,9 @@ your model; install with `pip install -e '.[<model>]'`.
 ## 4. Cluster jobs — `slurm/<model>/`
 
 Copy `slurm/rmg/{train,eval,viz}.sbatch` into `slurm/<model>/` and swap the
-`python -m rmg.scripts.*` calls for yours. Keep the same partition / QoS / image
-conventions; everything stays env + `OVERRIDES` configurable. Shared jobs
-(`build_image.sbatch`, `prep_data.sbatch`, `ensure_eval_assets.sh`) stay at the
-`slurm/` top level — reuse them, don't duplicate.
+`python -m rmg.scripts.*` calls for yours. The shared jobs at the `slurm/` top
+level — `prep_data.sbatch` (builds the shared packed dataset), `build_image.sbatch`,
+`ensure_eval_assets.sh` — are reused as-is; don't duplicate them.
 
 ## 5. Runs — `runs/<model>/{train,eval,viz}/`
 

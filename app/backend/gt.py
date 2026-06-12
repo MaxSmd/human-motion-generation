@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from rmg.representation import Skeleton, forward_kinematics
+from shared.geometry import Skeleton, forward_kinematics
 
 
 def subset_train_ids(

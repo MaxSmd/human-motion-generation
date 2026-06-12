@@ -15,12 +15,8 @@ import pytest
 import torch
 from torch.utils.data import DataLoader
 
-from rmg.data import (
-    LR_PAIRS,
-    HumanML3DDataset,
-    collate,
-    mirror_motion,
-)
+from rmg.data import HumanML3DDataset, collate
+from shared.data import LR_PAIRS, mirror_motion
 from rmg.representation import NUM_JOINTS, decode
 
 

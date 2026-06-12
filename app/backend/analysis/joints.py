@@ -15,7 +15,7 @@ import numpy as np
 from .. import cache
 
 # HumanML3D foot joints (L_Ankle, L_Foot, R_Ankle, R_Foot) — matches
-# rmg.representation.skeleton.FOOT_CONTACT_IDX.
+# shared.geometry.FOOT_CONTACT_IDX.
 FOOT_IDX = (7, 10, 8, 11)
 CONTACT_THRESHOLD = 0.05  # metres above ground counted as "planted"
 

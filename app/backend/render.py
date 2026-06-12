@@ -24,7 +24,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 
-from rmg.representation import Skeleton, forward_kinematics  # noqa: E402
+from shared.geometry import Skeleton, forward_kinematics  # noqa: E402
 from rmg.representation.tplusr import decode as tplusr_decode  # noqa: E402
 
 # HumanML3D 22-joint kinematic chains (upstream's t2m_kinematic_chain).

@@ -1,4 +1,8 @@
-"""Build the packed RMG dataset from AMASS + HumanML3D.
+"""Build the shared HumanML3D packed dataset from AMASS + HumanML3D.
+
+Model-agnostic: each clip is stored as (root translation, per-joint quaternions,
+texts) — the general intermediate every model loads, deriving its own features
+(263-D HumanML3D, an rmg manifold encoding, …) at load time.
 
 Produces, under `--output-dir`:
     humanml3d.zip       # one <clip_id>.pt per HumanML3D clip
@@ -10,10 +14,11 @@ Two stages, each runnable independently. Run `--help` for usage:
 
     raw-pose  : AMASS .npz → joint positions .npy (per AMASS file)
                 Mirrors `external/HumanML3D/raw_pose_processing.ipynb`.
-    pack      : .npy joints → IK quaternions → T+R clips → packed zip
-                Mirrors `external/HumanML3D/motion_representation.ipynb`,
-                but stops *before* the 263-D feature extraction; we keep
-                (translation, quaternions) so the network sees raw T+R.
+    pack      : .npy joints → IK quaternions → packed zip of
+                (translation, per-joint quaternions, texts). Mirrors
+                `external/HumanML3D/motion_representation.ipynb` but stops before
+                263-D feature extraction, keeping the lossless quaternion form
+                so any model can derive its own features on load.
 
 This script imports `external/HumanML3D/common/skeleton.py::Skeleton` for IK
 and FK so the produced quaternions are bit-comparable with the upstream

@@ -254,7 +254,7 @@ def test_ric_round_trip_recovers_canonical_joints() -> None:
     # The canonical-frame joints (what was actually encoded) come from running
     # the same canonicalization that `tplusr_to_h3d_features_with_quats` applies
     # internally. We re-derive them here for the comparison.
-    from rmg.representation.humanml3d_io import _canonicalize_first_frame
+    from shared.geometry.humanml3d_io import _canonicalize_first_frame
     canon_joints, _ = _canonicalize_first_frame(forward_kinematics(sk, quats, trans))
     canon_joints = canon_joints[:-1]  # the feature drops the last frame
 

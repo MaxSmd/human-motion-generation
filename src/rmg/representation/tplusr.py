@@ -16,7 +16,7 @@ import torch
 from torch import Tensor
 
 from ..manifolds.sphere import quat_continuity, quat_to_upper_hemisphere
-from .skeleton import NUM_JOINTS
+from shared.geometry.skeleton import NUM_JOINTS
 
 
 @dataclass

@@ -11,24 +11,28 @@ container, and one web + cluster control plane. Adding a model:
 
 ```
 src/
-  shared/               model-agnostic: eval (Guo evaluator + metrics) · utils
+  shared/               model-agnostic, shared by every model:
+    data/               HumanML3D pack (prepare_humanml3d) + load/mirror/subset/crop/pad
+    geometry/           SMPL skeleton + forward kinematics + 263-D feature conversion
+    eval/               Guo evaluator + FID/R@k/Diversity/MM-Dist
+    utils/              EMA · checkpointing · logging · seeding · scheduler
   rmg/                  Riemannian flow matching on (R³ × S³^22)
     configs/            Hydra configs (data / model / representation / train + train.yaml)
     scripts/            entry points: train · evaluate · visualize
-    data/ flow/ manifolds/ models/ representation/
+    data/               packed-clip reader + manifold encoding (composes shared.data)
+    flow/ manifolds/ models/ representation/   (rmg manifold reps; geometry → shared)
   momask/  mardm/       other models (placeholders — see ADDING_A_MODEL.md)
 
 app/
   backend/              FastAPI: SLURM control plane + in-process rmg inference
   frontend/             Next.js UI
 
-scripts/                shared data tooling — prepare_humanml3d.py (AMASS → packed)
 slurm/
-  rmg/                  per-model jobs: train.sbatch · eval.sbatch · viz.sbatch
-  build_image.sbatch    prep_data.sbatch    ensure_eval_assets.sh    (shared)
+  rmg/                  per-model jobs: train · eval · viz
+  prep_data.sbatch    build_image.sbatch    ensure_eval_assets.sh    (shared)
 containers/             enroot image: Dockerfile + requirements.txt
 external/               git submodules: HumanML3D, text-to-motion
-tests/rmg/              pytest suite (per model)
+tests/{rmg,shared}/     pytest suite
 runs/<model>/{train,eval,viz}/   run outputs (gitignored)
 ```
 

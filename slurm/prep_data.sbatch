@@ -56,7 +56,7 @@ enroot start \
 
         echo
         echo '=== Stage 1: AMASS .npz -> joints .npy (SMPL+H FK on GPU) ==='
-        python scripts/prepare_humanml3d.py raw-pose \\
+        python -m shared.data.prepare_humanml3d raw-pose \\
             --amass-root external/data/amass_data \\
             --body-models external/data/body_models \\
             --out-dir ${JOINTS_DIR} \\
@@ -64,7 +64,7 @@ enroot start \
 
         echo
         echo '=== Stage 2: joints + index.csv + texts -> packed humanml3d.zip ==='
-        python scripts/prepare_humanml3d.py pack \\
+        python -m shared.data.prepare_humanml3d pack \\
             --joints-root ${JOINTS_DIR} \\
             --humanml3d-repo external/HumanML3D \\
             --output-dir external/data/humanml3d_packed

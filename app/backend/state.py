@@ -23,7 +23,8 @@ from torch import Tensor
 from rmg.flow import RiemannianEulerSampler, SamplerCfg, WrappedGaussianPrior
 from rmg.models import DiTConfig, Qwen3EmbeddingEncoder, RandomTextEncoder, RMGDiT
 from rmg.models.text_encoder import TextEncoder
-from rmg.representation import Skeleton, build_representation
+from shared.geometry import Skeleton
+from rmg.representation import build_representation
 from shared.utils import EMA, load_checkpoint
 
 from . import config as cfgmod
