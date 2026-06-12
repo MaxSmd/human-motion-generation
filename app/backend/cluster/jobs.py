@@ -301,14 +301,51 @@ class JobManager:
             job.state, job.error = "failed", f"rsync: {e}"
             return
 
+        # The viz job writes a manifest.json mapping each rendered file to its
+        # TRUE caption / clip id / kind. Read it so the viewer labels clips from
+        # data, not from filename guessing — this is what keeps GT vs PRED tiles
+        # aligned with the captions they were actually conditioned on.
+        meta: dict[str, dict] = {}
+        manifest_path = local / "manifest.json"
+        if manifest_path.exists():
+            try:
+                for e in json.loads(manifest_path.read_text()):
+                    f = e.get("file")
+                    if f:
+                        meta[f] = e
+            except (ValueError, OSError):
+                pass
+
+        # Kind order so compare GT/PRED of the same clip sit next to each other:
+        # sort by (clip_id, kind-rank), gt before pred. Files without manifest
+        # metadata fall back to stem sorting.
+        _KIND_RANK = {"gt": 0, "pred": 1}
+        media_files = [*local.glob("*.gif"), *local.glob("*.mp4")]
+
+        def _sort_key(m):
+            e = meta.get(m.name, {})
+            step = e.get("step")
+            return (
+                int(step) if isinstance(step, int) else -1,  # numeric, not lexical
+                str(e.get("clip_id") or m.stem),
+                _KIND_RANK.get(e.get("kind"), 9),
+                m.name,
+            )
+
         outputs = []
-        media_files = sorted([*local.glob("*.gif"), *local.glob("*.mp4")])
-        for m in media_files:
+        for m in sorted(media_files, key=_sort_key):
             npy = m.with_suffix(".npy")
+            e = meta.get(m.name, {})
             outputs.append({
                 "media_url": f"/media/jobs/{job.id}/{m.name}",
                 "npy_url": f"/media/jobs/{job.id}/{npy.name}" if npy.exists() else None,
-                "caption": m.stem,
+                # caption = the real text (or stem fallback); label/kind/clip_id
+                # let the UI render a proper GT/PRED badge + id + caption.
+                "caption": e.get("caption") or m.stem,
+                "label": m.stem,
+                "kind": e.get("kind"),
+                "clip_id": e.get("clip_id"),
+                "step": e.get("step"),
             })
         job.outputs = outputs
         job.state = "done" if outputs else "failed"

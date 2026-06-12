@@ -108,3 +108,29 @@ def list_checkpoints(run: str) -> list[str]:
     )
     files = [l.strip() for l in res.stdout.splitlines() if l.strip()]
     return sorted(files, reverse=True)
+
+
+def list_sample_steps(run: str) -> list[dict]:
+    """Saved sample dumps for a run → [{step, path}] (step-sorted). Lets the
+    Visualize tab show *which* steps exist so the user renders a chosen few
+    instead of every step-*.pt (a full dir blew up into far too many GIFs)."""
+    rundir = resolve_run_dir(run)
+    # rundir is backend-resolved; keep the `step-*.pt` glob UNQUOTED so the
+    # remote shell expands it (quoting the `*` would match nothing — the bug
+    # that bit us on the runs/log listings).
+    res = ssh.run(
+        f"ls -1 {shlex.quote(rundir)}/samples/step-*.pt 2>/dev/null",
+        timeout=15, check=False,
+    )
+    out = []
+    for line in res.stdout.splitlines():
+        path = line.strip()
+        if not path:
+            continue
+        stem = path.rsplit("/", 1)[-1].rsplit(".", 1)[0]   # step-000000500
+        try:
+            step = int(stem.split("-")[1])
+        except (IndexError, ValueError):
+            continue
+        out.append({"step": step, "path": path})
+    return sorted(out, key=lambda d: d["step"])

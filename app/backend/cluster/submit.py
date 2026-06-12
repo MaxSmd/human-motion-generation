@@ -98,7 +98,18 @@ def build_viz(params: dict) -> tuple[str, dict[str, str], str, str]:
         })
     elif mode == "samples":
         run = params["run"]
-        env["SAMPLES_FILE"] = params.get("samples_file") or f"{resolve_run_dir(run)}/samples"
+        steps = params.get("steps")
+        if params.get("samples_file"):
+            env["SAMPLES_FILE"] = params["samples_file"]
+        elif steps:
+            # Render only the chosen steps (comma-separated explicit .pt paths) so
+            # a run with dozens of dumps doesn't balloon into hundreds of GIFs.
+            rundir = resolve_run_dir(run)
+            env["SAMPLES_FILE"] = ",".join(
+                f"{rundir}/samples/step-{int(s):09d}.pt" for s in steps
+            )
+        else:
+            env["SAMPLES_FILE"] = f"{resolve_run_dir(run)}/samples"
     else:
         raise ValueError(f"unknown viz mode {mode!r}")
     if params.get("overrides"):
@@ -124,6 +135,8 @@ def build_train(params: dict) -> tuple[str, dict[str, str], str, str]:
         ("data.subset_fraction", params.get("subset_fraction")),
         ("data.subset_seed", params.get("subset_seed")),
         ("train.max_steps", params.get("max_steps")),
+        ("train.sample_every", params.get("sample_every")),
+        ("train.ckpt_every", params.get("ckpt_every")),
         ("train.optimizer.lr", params.get("lr")),
         ("train.guidance_scale", params.get("guidance")),
         ("train.precision", params.get("precision")),

@@ -35,6 +35,7 @@ encoder is heavy, and MP4 export needs ffmpeg in the container).
 from __future__ import annotations
 
 import io
+import json
 import sys
 import zipfile
 from pathlib import Path
@@ -136,6 +137,20 @@ def _render(joints: np.ndarray, save_path: Path, title: str, fps: int) -> None:
     ani.save(str(gif_path), writer=PillowWriter(fps=fps))
     plt.close(fig)
     print(f"[visualize] wrote {gif_path}  (+ joints at {npy_path.name})", flush=True)
+    return gif_path
+
+
+def _write_manifest(out_dir: Path, entries: list[dict]) -> None:
+    """Write a sidecar `manifest.json` describing every rendered file so the
+    app can label each clip with its TRUE caption / clip id / kind instead of
+    guessing from the filename. This is what keeps the viewer aligned: the
+    backend reads this verbatim rather than parsing stems. Each entry is
+    `{file, kind, clip_id, caption, step}` (clip_id/step optional)."""
+    if not entries:
+        return
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "manifest.json").write_text(json.dumps(entries, indent=2))
+    print(f"[visualize] wrote manifest.json ({len(entries)} entries)", flush=True)
 
 
 def _subset_train_ids(
@@ -329,6 +344,7 @@ def main(cfg: DictConfig) -> None:
     if cfg.viz.mode == "clip":
         # ---- Real packed clips → FK → render ----
         clip_ids = [c.strip() for c in str(cfg.viz.clips).split(",") if c.strip()]
+        manifest: list[dict] = []
         for cid in clip_ids:
             try:
                 translation, quats, caption = _load_real_clip(data_root, cid)
@@ -336,8 +352,10 @@ def main(cfg: DictConfig) -> None:
                 print(f"[visualize] clip {cid!r} not in packed zip — skipping", flush=True)
                 continue
             joints = forward_kinematics(skel, quats, translation).numpy()
-            _render(joints, out_dir / f"real-{cid}.mp4",
-                    title=f"[{cid}] {caption[:60]}", fps=int(cfg.viz.fps))
+            gif = _render(joints, out_dir / f"real-{cid}.mp4",
+                          title=f"[{cid}] {caption[:60]}", fps=int(cfg.viz.fps))
+            manifest.append({"file": gif.name, "kind": "gt", "clip_id": cid, "caption": caption})
+        _write_manifest(out_dir, manifest)
         return
 
     if cfg.viz.mode == "prompt":
@@ -361,14 +379,17 @@ def main(cfg: DictConfig) -> None:
                 model, shape=(len(prompts), int(cfg.viz.num_frames)), cond=cond,
             )                                                # (B, T, ambient_dim)
 
+        manifest = []
         for i, prompt in enumerate(prompts):
             tpr = tplusr_decode(samples[i])
             joints = forward_kinematics(
                 skel, tpr.quaternions.float(), tpr.translation.float()
             ).cpu().numpy()
             safe = "".join(c if c.isalnum() else "_" for c in prompt)[:48]
-            _render(joints, out_dir / f"gen-{i:02d}-{safe}.mp4",
-                    title=prompt[:60], fps=int(cfg.viz.fps))
+            gif = _render(joints, out_dir / f"gen-{i:02d}-{safe}.mp4",
+                          title=prompt[:60], fps=int(cfg.viz.fps))
+            manifest.append({"file": gif.name, "kind": "pred", "caption": prompt})
+        _write_manifest(out_dir, manifest)
         return
 
     if cfg.viz.mode == "compare":
@@ -401,6 +422,7 @@ def main(cfg: DictConfig) -> None:
         model = _build_model(cfg, representation, device)
         sampler = _build_sampler(cfg, representation, skel)
 
+        manifest = []
         for cid in clip_ids:
             try:
                 translation, quats, caption = _load_real_clip(data_root, cid)
@@ -422,8 +444,9 @@ def main(cfg: DictConfig) -> None:
 
             # GT (cropped to n_frames).
             gt_joints = forward_kinematics(skel, quats, translation).numpy()
-            _render(gt_joints, out_dir / f"real-{cid}.mp4",
-                    title=f"GT [{cid}] {caption[:55]}", fps=int(cfg.viz.fps))
+            gt_gif = _render(gt_joints, out_dir / f"real-{cid}.mp4",
+                             title=f"GT [{cid}] {caption[:55]}", fps=int(cfg.viz.fps))
+            manifest.append({"file": gt_gif.name, "kind": "gt", "clip_id": cid, "caption": caption})
 
             # Prediction: same caption, matched (capped) length.
             print(f"[visualize] compare {cid}: sampling {n_frames} frames for "
@@ -435,8 +458,10 @@ def main(cfg: DictConfig) -> None:
             pred_joints = forward_kinematics(
                 skel, tpr.quaternions.float(), tpr.translation.float()
             ).cpu().numpy()
-            _render(pred_joints, out_dir / f"gen-{cid}.mp4",
-                    title=f"PRED [{cid}] {caption[:55]}", fps=int(cfg.viz.fps))
+            pred_gif = _render(pred_joints, out_dir / f"gen-{cid}.mp4",
+                               title=f"PRED [{cid}] {caption[:55]}", fps=int(cfg.viz.fps))
+            manifest.append({"file": pred_gif.name, "kind": "pred", "clip_id": cid, "caption": caption})
+        _write_manifest(out_dir, manifest)
         return
 
     if cfg.viz.mode == "samples":
@@ -470,6 +495,7 @@ def main(cfg: DictConfig) -> None:
                 f"mode=samples: no .pt files resolved from {cfg.viz.samples_file!r}"
             )
         print(f"[visualize] rendering {len(files)} sample dump(s)", flush=True)
+        manifest = []
         for p in files:
             if not p.exists():
                 print(f"[visualize] samples file {p} not found — skipping", flush=True)
@@ -478,6 +504,10 @@ def main(cfg: DictConfig) -> None:
             texts = blob["texts"]
             samples = blob["samples"]                     # (B, T, ambient_dim)
             step_tag = p.stem                             # e.g. "step-000000500"
+            try:
+                step = int(step_tag.split("-")[1])
+            except (IndexError, ValueError):
+                step = None
             print(f"[visualize] {step_tag}: {samples.shape[0]} prompts, "
                   f"{samples.shape[1]} frames", flush=True)
             for i, text in enumerate(texts):
@@ -486,8 +516,10 @@ def main(cfg: DictConfig) -> None:
                     skel, tpr.quaternions.float(), tpr.translation.float()
                 ).cpu().numpy()
                 safe = "".join(c if c.isalnum() else "_" for c in text)[:40]
-                _render(joints, out_dir / f"{step_tag}-{i:02d}-{safe}.mp4",
-                        title=f"[{step_tag}] {text[:55]}", fps=int(cfg.viz.fps))
+                gif = _render(joints, out_dir / f"{step_tag}-{i:02d}-{safe}.mp4",
+                              title=f"[{step_tag}] {text[:55]}", fps=int(cfg.viz.fps))
+                manifest.append({"file": gif.name, "kind": "sample", "caption": text, "step": step})
+        _write_manifest(out_dir, manifest)
         return
 
     raise ValueError(f"unknown viz.mode {cfg.viz.mode!r}")

@@ -105,7 +105,13 @@ function Queue({ squeue, onChange }) {
 
 // ─────────────────────────────────────────────────────────── our jobs + local queue
 
+const RECENT_N = 3;
+
 function Jobs({ jobs, onChange }) {
+  // Keep only the most-recent jobs visible by default (the list grew unwieldy);
+  // toggle off to see the full history. `jobs` arrives newest-first.
+  const [recentOnly, setRecentOnly] = useState(true);
+
   if (jobs.length === 0) {
     return (
       <div className="surface px-6 py-10 text-center">
@@ -114,18 +120,36 @@ function Jobs({ jobs, onChange }) {
     );
   }
   const queued = jobs.filter((j) => j.state === "queued").length;
+  // Always keep live jobs visible; only collapse the older finished ones.
+  const active = jobs.filter((j) => ACTIVE.has(j.state));
+  const rest = jobs.filter((j) => !ACTIVE.has(j.state));
+  const shown = recentOnly ? [...active, ...rest.slice(0, RECENT_N)] : jobs;
+  const hidden = jobs.length - shown.length;
+
   return (
     <div className="surface p-5">
-      <div className="label mb-3">launched jobs · {jobs.length}{queued ? ` · ${queued} queued` : ""}</div>
-      <div className="space-y-2">
-        {jobs.map((j) => <JobRow key={j.id} job={j} onChange={onChange} />)}
+      <div className="mb-3 flex items-center justify-between">
+        <span className="label">launched jobs · {jobs.length}{queued ? ` · ${queued} queued` : ""}</span>
+        <label className="flex items-center gap-1.5 text-[11px] text-slate-400">
+          <input type="checkbox" checked={recentOnly} onChange={(e) => setRecentOnly(e.target.checked)} />
+          recent only (≤{RECENT_N})
+        </label>
       </div>
+      <div className="space-y-2">
+        {shown.map((j) => <JobRow key={j.id} job={j} onChange={onChange} />)}
+      </div>
+      {hidden > 0 && (
+        <button onClick={() => setRecentOnly(false)} className="mt-3 w-full rounded border border-dashed border-[var(--hairline)] py-1.5 text-[11px] text-slate-400 hover:border-[var(--signal)] hover:text-[var(--signal)]">
+          show {hidden} older job{hidden === 1 ? "" : "s"}
+        </button>
+      )}
     </div>
   );
 }
 
 function JobRow({ job, onChange }) {
   const [open, setOpen] = useState(false);
+  const [meta, setMeta] = useState(false);
   const [log, setLog] = useState(null);
   const [loading, setLoading] = useState(false);
   const preRef = useRef(null);
@@ -159,6 +183,9 @@ function JobRow({ job, onChange }) {
         <span className="truncate font-mono text-[var(--muted)]">{job.run_name}</span>
         {job.error && <span className="text-rose-300">{job.error}</span>}
         <span className="ml-auto flex items-center gap-2">
+          <button onClick={() => setMeta((m) => !m)} className={`rounded border px-2 py-0.5 text-[10px] transition ${meta ? "border-[var(--signal)] text-[var(--signal)]" : "border-[var(--hairline-strong)] text-slate-300 hover:border-[var(--signal)]"}`}>
+            {meta ? "hide info" : "info"}
+          </button>
           {job.slurm_id && (
             <button onClick={() => setOpen((o) => !o)} className={`rounded border px-2 py-0.5 text-[10px] transition ${open ? "border-[var(--signal)] text-[var(--signal)]" : "border-[var(--hairline-strong)] text-slate-300 hover:border-[var(--signal)]"}`}>
               {open ? "hide log" : "log"}
@@ -169,6 +196,7 @@ function JobRow({ job, onChange }) {
           )}
         </span>
       </div>
+      {meta && <JobMeta job={job} />}
       {job.outputs?.length > 0 && (
         <div className="mt-2 flex gap-2 overflow-x-auto">
           {job.outputs.map((o, i) => (
@@ -192,4 +220,43 @@ function JobRow({ job, onChange }) {
       )}
     </div>
   );
+}
+
+// What the job was actually submitted to do: the resolved params + the exact
+// remote command. Lets you audit a job from the Cluster tab without reading the
+// log (e.g. which checkpoint / clips / guidance it ran with).
+function JobMeta({ job }) {
+  const params = Object.entries(job.params || {}).filter(
+    ([, v]) => v !== null && v !== undefined && v !== "" && !(Array.isArray(v) && v.length === 0)
+  );
+  return (
+    <div className="mt-2 space-y-2 rounded border border-[var(--hairline)] bg-ink p-2.5 text-[11px]">
+      <div className="flex flex-wrap gap-x-4 gap-y-1 text-[var(--muted)]">
+        <span>kind <span className="font-mono text-slate-300">{job.kind}{job.mode ? `/${job.mode}` : ""}</span></span>
+        {job.run_name && <span>run <span className="font-mono text-slate-300">{job.run_name}</span></span>}
+        {job.job_name && <span>name <span className="font-mono text-slate-300">{job.job_name}</span></span>}
+        {job.submitted_at ? <span>at <span className="font-mono text-slate-300">{new Date(job.submitted_at * 1000).toLocaleString()}</span></span> : null}
+      </div>
+      {params.length > 0 && (
+        <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 font-mono text-slate-400 sm:grid-cols-3">
+          {params.map(([k, v]) => (
+            <div key={k} className="truncate" title={`${k}=${fmt(v)}`}>
+              <span className="text-[var(--muted)]">{k}</span> {fmt(v)}
+            </div>
+          ))}
+        </div>
+      )}
+      {job.command && (
+        <div>
+          <div className="label mb-1">submit command</div>
+          <pre className="overflow-x-auto rounded border border-[var(--hairline)] bg-black p-2 text-[10px] leading-relaxed text-[var(--signal)]">{job.command}</pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function fmt(v) {
+  if (Array.isArray(v)) return `[${v.join(",")}]`;
+  return String(v);
 }

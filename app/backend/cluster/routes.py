@@ -11,6 +11,7 @@ from .. import config as cfgmod
 from ..analysis import curves as curvesmod
 from ..analysis import eval_tables
 from ..analysis import joints as jointsmod
+from . import gtbrowse
 from . import jobs as jobsmod
 from . import squeue as squeuemod
 from . import ssh, status, submit
@@ -58,6 +59,29 @@ def cluster_checkpoints(run: str) -> list[str]:
     return squeuemod.list_checkpoints(run)
 
 
+@router.get("/run-sample-steps")
+def cluster_run_sample_steps(run: str) -> list[dict]:
+    """Saved sample steps for a run → [{step, path}], so the Visualize tab can
+    let the user pick which steps to render instead of the whole directory."""
+    _require_online()
+    return squeuemod.list_sample_steps(run)
+
+
+@router.get("/gt-clips")
+def cluster_gt_clips(
+    split: str = "train",
+    subset_fraction: float = 0.01,
+    subset_seed: int = 0,
+    limit: int = 60,
+) -> list[dict]:
+    """Available GT clips (id + assigned caption) for the Visualize tab dropdown.
+    Train split is narrowed to the model's subset; cached, SSH-light."""
+    _require_online()
+    return gtbrowse.gt_clips(
+        split, subset_fraction=subset_fraction, subset_seed=subset_seed, limit=limit
+    )
+
+
 @router.post("/cancel/{slurm_id}")
 def cluster_cancel(slurm_id: str) -> dict:
     _require_online()
@@ -85,6 +109,7 @@ class VizRequest(BaseModel):
     subset_seed: int = 0
     run: str | None = None
     samples_file: str | None = None
+    steps: list[int] | None = None   # mode=samples: render only these steps
 
 
 class TrainRequest(BaseModel):
@@ -93,6 +118,8 @@ class TrainRequest(BaseModel):
     representation: str | None = None
     run_name: str | None = None
     max_steps: int | None = None
+    sample_every: int | None = None   # steps between periodic sample dumps
+    ckpt_every: int | None = None     # steps between checkpoint saves
     subset_n: int | None = None
     subset_fraction: float | None = None
     subset_seed: int | None = None

@@ -188,6 +188,18 @@ def cluster_project_dir() -> str:
     return _env("CLUSTER_PROJECT", "~/riemann-motion-generation")
 
 
+def cluster_humanml3d_dir() -> str:
+    """Remote HumanML3D submodule dir holding the PERSISTENT split lists + caption
+    archive (`train.txt`, `val.txt`, `test.txt`, `texts.zip`). The packed dataset
+    zip may only be mounted during jobs, but this checkout is always present — so
+    it's what the GT-clip browser reads to list available clips + their captions
+    without launching a GPU job. Override with MGEN_CLUSTER_HUMANML3D."""
+    env = _env("CLUSTER_HUMANML3D")
+    if env:
+        return env
+    return f"{cluster_project_dir()}/external/HumanML3D/HumanML3D"
+
+
 def ssh_control_path() -> str:
     """ControlMaster socket for the app session. Kept short (macOS sun_path limit)."""
     return _env("SSH_CONTROL_PATH", str(Path.home() / ".mgen-cm.sock"))

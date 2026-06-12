@@ -29,7 +29,7 @@ export default function ModelTab() {
 }
 
 function Train() {
-  const [form, setForm] = useState({ model_preset: "dit_base", train_preset: "rmg_base", subset_n: 16, max_steps: 15000, overrides: "" });
+  const [form, setForm] = useState({ model_preset: "dit_base", train_preset: "rmg_base", subset_n: 16, max_steps: 15000, sample_every: 1000, ckpt_every: 5000, overrides: "" });
   const [preview, setPreview] = useState(null);
   const [pErr, setPErr] = useState(null);
   const { job, error, submitting, run } = useVizJob(api.submitTrain);
@@ -49,6 +49,8 @@ function Train() {
           <Field label="train preset"><select className="field-input" value={form.train_preset} onChange={set("train_preset")}><option>rmg_base</option><option>rmg_large</option></select></Field>
           <Field label="subset_n"><input type="number" className="field-input" value={form.subset_n} onChange={set("subset_n")} /></Field>
           <Field label="max_steps"><input type="number" className="field-input" value={form.max_steps} onChange={set("max_steps")} /></Field>
+          <Field label="sample_every (steps/sample)"><input type="number" className="field-input" value={form.sample_every} onChange={set("sample_every")} /></Field>
+          <Field label="ckpt_every (steps/save)"><input type="number" className="field-input" value={form.ckpt_every} onChange={set("ckpt_every")} /></Field>
         </div>
         <Field label="extra overrides (hydra, space-sep)">
           <input className="field-input" placeholder="train.optimizer.lr=1e-4 train.precision=bf16" value={form.overrides} onChange={set("overrides")} />
@@ -68,21 +70,34 @@ function Train() {
   );
 }
 
+// The full guidance sweep (matches eval.sbatch's default GUIDANCE_SCALES) — one
+// eval job evaluates every ω, so Analysis can plot the FID/R-precision curve.
+const ALL_GUIDANCE_SCALES = "[2.5,3.5,4.5,5.5,6.5,7.5,8.5,9.5]";
+
 function Evaluate() {
   const [form, setForm] = useState({ max_clips: 256, guidance_scales: "[6.5]" });
+  const [allScales, setAllScales] = useState(false);
   const [checkpoint, setCheckpoint] = useState("");
   const [presets, setPresets] = useState(null); // model/train preset from the run config
   const { job, error, submitting, run } = useVizJob(api.submitEval);
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.type === "number" ? Number(e.target.value) : e.target.value }));
 
+  const guidance_scales = allScales ? ALL_GUIDANCE_SCALES : form.guidance_scales;
+
   return (
     <div className="grid gap-5 lg:grid-cols-2">
-      <form className="surface space-y-4 p-6" onSubmit={(e) => { e.preventDefault(); run({ ...form, checkpoint, model_preset: presets?.model_preset, train_preset: presets?.train_preset }); }}>
+      <form className="surface space-y-4 p-6" onSubmit={(e) => { e.preventDefault(); run({ ...form, guidance_scales, checkpoint, model_preset: presets?.model_preset, train_preset: presets?.train_preset }); }}>
         <RemoteCheckpointPicker value={checkpoint} onChange={setCheckpoint} onConfig={setPresets} />
         <div className="grid grid-cols-2 gap-3">
           <Field label="max_clips"><input type="number" className="field-input" value={form.max_clips} onChange={set("max_clips")} /></Field>
-          <Field label="guidance_scales"><input className="field-input" value={form.guidance_scales} onChange={set("guidance_scales")} /></Field>
+          <Field label="guidance_scales">
+            <input className="field-input disabled:opacity-50" value={guidance_scales} onChange={set("guidance_scales")} disabled={allScales} />
+          </Field>
         </div>
+        <label className="flex items-center gap-2 text-[12px] text-slate-300">
+          <input type="checkbox" checked={allScales} onChange={(e) => setAllScales(e.target.checked)} />
+          all guidance scales <span className="font-mono text-[11px] text-[var(--muted)]">{ALL_GUIDANCE_SCALES}</span>
+        </label>
         <button type="submit" className="btn-signal w-full" disabled={submitting || !checkpoint}>
           {submitting ? "SUBMITTING…" : "▶  LAUNCH EVAL"}
         </button>

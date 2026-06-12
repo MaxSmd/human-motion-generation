@@ -54,6 +54,12 @@ export const api = {
   clusterRuns: () => req("/cluster/runs"),
   clusterCheckpoints: (run) => req(`/cluster/checkpoints?run=${encodeURIComponent(run)}`),
   clusterCancel: (slurmId) => req(`/cluster/cancel/${slurmId}`, { method: "POST" }),
+  clusterGtClips: ({ split = "train", subset_fraction = 0.01, subset_seed = 0, limit = 60 } = {}) =>
+    req(
+      `/cluster/gt-clips?split=${encodeURIComponent(split)}&subset_fraction=${subset_fraction}` +
+        `&subset_seed=${subset_seed}&limit=${limit}`
+    ),
+  runSampleSteps: (run) => req(`/cluster/run-sample-steps?run=${encodeURIComponent(run)}`),
 
   jobs: () => req("/cluster/jobs"),
   queue: () => req("/cluster/queue"),

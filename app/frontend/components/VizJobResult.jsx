@@ -62,20 +62,48 @@ export default function VizJobResult({ job, error, submitting, emptyHint }) {
       )}
 
       {!busy && outputs.length > 0 && (
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-          {outputs.map((o, i) => (
-            <figure key={i} className="overflow-hidden rounded-lg border border-[var(--hairline)] bg-black">
-              {o.media_url.toLowerCase().endsWith(".mp4") ? (
-                <video src={mediaUrl(o.media_url)} className="w-full" controls autoPlay loop muted />
-              ) : (
-                <img src={mediaUrl(o.media_url)} alt={o.caption} className="w-full" />
-              )}
-              <figcaption className="px-2 py-1.5 text-[11px] text-slate-400">{o.caption}</figcaption>
-            </figure>
-          ))}
+        // Compare renders GT+PRED of the SAME clip back-to-back (backend sorts
+        // them that way), so a 2-col grid pairs each clip's GT and PRED on one
+        // row. Other modes use the wider responsive grid.
+        <div className={`grid gap-3 ${job?.mode === "compare" ? "sm:grid-cols-2" : "sm:grid-cols-2 xl:grid-cols-3"}`}>
+          {outputs.map((o, i) => <Tile key={i} o={o} />)}
         </div>
       )}
     </div>
+  );
+}
+
+const KIND_META = {
+  gt: { label: "GT", color: "var(--muted)" },
+  pred: { label: "PRED", color: "var(--signal)" },
+  sample: { label: "SAMPLE", color: "var(--accent2)" },
+};
+
+// One rendered clip: the media + a caption block that surfaces the TRUE text
+// (and GT/PRED badge + clip id) the backend read from the job manifest, so the
+// label always matches what the clip was conditioned on.
+function Tile({ o }) {
+  const k = KIND_META[o.kind];
+  return (
+    <figure className="overflow-hidden rounded-lg border border-[var(--hairline)] bg-black">
+      {o.media_url.toLowerCase().endsWith(".mp4") ? (
+        <video src={mediaUrl(o.media_url)} className="w-full" controls autoPlay loop muted />
+      ) : (
+        <img src={mediaUrl(o.media_url)} alt={o.caption} className="w-full" />
+      )}
+      <figcaption className="space-y-1 px-2 py-1.5">
+        <div className="flex items-center gap-1.5 text-[10px]">
+          {k && (
+            <span className="rounded px-1.5 py-0.5 font-mono font-medium" style={{ color: k.color, border: `1px solid ${k.color}` }}>
+              {k.label}
+            </span>
+          )}
+          {o.clip_id && <span className="font-mono text-slate-300">{o.clip_id}</span>}
+          {o.step != null && <span className="font-mono text-[var(--muted)]">step {o.step}</span>}
+        </div>
+        <div className="text-[11px] leading-snug text-slate-400">{o.caption}</div>
+      </figcaption>
+    </figure>
   );
 }
 
