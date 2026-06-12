@@ -7,6 +7,9 @@ import GTBrowserTab from "@/components/GTBrowserTab";
 import TrainingViewerTab from "@/components/TrainingViewerTab";
 import ConstraintsTab from "@/components/ConstraintsTab";
 import ClusterTab from "@/components/ClusterTab";
+import VisualizeTab from "@/components/VisualizeTab";
+import ModelTab from "@/components/ModelTab";
+import AnalysisTab from "@/components/AnalysisTab";
 import ClusterGate from "@/components/ClusterGate";
 
 export default function Home() {
@@ -14,6 +17,7 @@ export default function Home() {
   const [checkpoints, setCheckpoints] = useState([]);
   const [connError, setConnError] = useState(null);
   const [clusterStatus, setClusterStatus] = useState(null);
+  const [queue, setQueue] = useState(null);
 
   useEffect(() => {
     api.health().then(setHealth).catch((e) => setConnError(e.message));
@@ -24,22 +28,31 @@ export default function Home() {
 
   useEffect(() => {
     if (!clusterMode) return;
-    const poll = () => api.clusterStatus().then(setClusterStatus).catch(() => {});
+    const poll = () => {
+      api.clusterStatus().then(setClusterStatus).catch(() => {});
+      api.queue().then(setQueue).catch(() => {}); // local, no SSH
+    };
     poll();
     const t = setInterval(poll, 5000);
     return () => clearInterval(t);
   }, [clusterMode]);
 
   const tabs = useMemo(() => {
-    const base = [
+    if (clusterMode)
+      return [
+        { id: "cluster", n: "00", label: "Cluster", sub: "jobs · squeue" },
+        { id: "generate", n: "01", label: "Generate", sub: "text → motion" },
+        { id: "visualize", n: "02", label: "Visualize", sub: "GT · compare · samples" },
+        { id: "model", n: "03", label: "Model", sub: "train · eval" },
+        { id: "analysis", n: "04", label: "Analysis", sub: "metrics · plots" },
+        { id: "constraints", n: "05", label: "Constraints", sub: "pins · limits", soon: true },
+      ];
+    return [
       { id: "generate", n: "01", label: "Generate", sub: "text → motion" },
       { id: "gt", n: "02", label: "Ground Truth", sub: "dataset browser" },
       { id: "training", n: "03", label: "Training", sub: "sample scrubber" },
       { id: "constraints", n: "04", label: "Constraints", sub: "pins · limits", soon: true },
     ];
-    if (clusterMode)
-      base.unshift({ id: "cluster", n: "00", label: "Cluster", sub: "jobs · squeue" });
-    return base;
   }, [clusterMode]);
 
   const [tab, setTab] = useState("generate");
@@ -49,7 +62,7 @@ export default function Home() {
 
   const panel = (
     <>
-      <nav className="mb-8 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
+      <nav className="mb-8 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
         {tabs.map((t) => {
           const active = tab === t.id;
           return (
@@ -84,9 +97,12 @@ export default function Home() {
 
       <div key={tab} className="animate-fade-up">
         {tab === "cluster" && <ClusterTab status={clusterStatus} />}
-        {tab === "generate" && <GenerateTab checkpoints={checkpoints} />}
-        {tab === "gt" && <GTBrowserTab />}
-        {tab === "training" && <TrainingViewerTab />}
+        {tab === "generate" && <GenerateTab checkpoints={checkpoints} clusterMode={clusterMode} />}
+        {tab === "visualize" && <VisualizeTab />}
+        {tab === "model" && <ModelTab />}
+        {tab === "analysis" && <AnalysisTab />}
+        {tab === "gt" && <GTBrowserTab clusterMode={clusterMode} />}
+        {tab === "training" && <TrainingViewerTab clusterMode={clusterMode} />}
         {tab === "constraints" && <ConstraintsTab />}
       </div>
     </>
@@ -107,7 +123,7 @@ export default function Home() {
               scrub training samples, and launch viz / train / eval jobs.
             </p>
           </div>
-          <Telemetry health={health} error={connError} cluster={clusterStatus} clusterMode={clusterMode} />
+          <Telemetry health={health} error={connError} cluster={clusterStatus} clusterMode={clusterMode} queue={queue} />
         </header>
 
         {clusterMode ? <ClusterGate>{panel}</ClusterGate> : panel}
@@ -116,7 +132,21 @@ export default function Home() {
   );
 }
 
-function Telemetry({ health, error, cluster, clusterMode }) {
+function Telemetry({ health, error, cluster, clusterMode, queue }) {
+  const active = queue?.active;
+  const jobLabel = active
+    ? `${active.kind}${active.mode ? `/${active.mode}` : ""} · ${active.state}`
+    : queue?.queued
+    ? "queued"
+    : "idle";
+  const jobColor = active
+    ? active.state === "running"
+      ? "var(--signal)"
+      : "var(--amber)"
+    : queue?.queued
+    ? "var(--amber)"
+    : "var(--muted)";
+
   const rows = error
     ? [["link", "OFFLINE", "var(--amber)"]]
     : health
@@ -127,15 +157,24 @@ function Telemetry({ health, error, cluster, clusterMode }) {
         clusterMode && cluster?.latency_ms != null
           ? ["latency", `${cluster.latency_ms} ms`, "var(--signal)"]
           : ["repr", health.representation, "var(--signal)"],
-        ["host", clusterMode ? health.cluster_host : health.media_format, "var(--signal)"],
+        ...(clusterMode
+          ? [
+              ["job", jobLabel, jobColor],
+              ...(queue?.queued ? [["queue", `${queue.queued} waiting`, "var(--amber)"]] : []),
+            ]
+          : [["host", health.media_format, "var(--signal)"]]),
       ]
     : [["link", "connecting…", "var(--muted)"]];
 
+  const busy = !!(active || queue?.queued);
   return (
     <div className="surface min-w-[230px] animate-fade-up p-4">
       <div className="label mb-3 flex items-center gap-2">
-        <span className="dot animate-pulse-soft" style={{ color: error ? "var(--amber)" : "var(--signal)" }} />
-        telemetry
+        <span
+          className={`dot ${busy || error ? "animate-pulse-soft" : ""}`}
+          style={{ color: error ? "var(--amber)" : busy ? "var(--amber)" : "var(--signal)" }}
+        />
+        telemetry{busy ? " · busy" : ""}
       </div>
       <dl className="space-y-1.5">
         {rows.map(([k, v, c]) => (

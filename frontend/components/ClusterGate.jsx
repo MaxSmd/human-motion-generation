@@ -1,9 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 
 const POLL_MS = 4000;
+const GRACE = 2; // consecutive non-online probes tolerated before blocking
 
 const COPY = {
   vpn_down: {
@@ -27,13 +28,27 @@ const COPY = {
 export default function ClusterGate({ children }) {
   const [status, setStatus] = useState(null);
   const [checking, setChecking] = useState(false);
+  const [blocked, setBlocked] = useState(false); // stable-offline (past the grace window)
+  const failsRef = useRef(0);
+  const everOnlineRef = useRef(false);
 
   const poll = useCallback(async () => {
     setChecking(true);
     try {
-      setStatus(await api.clusterStatus());
+      const s = await api.clusterStatus();
+      setStatus(s);
+      if (s.state === "online") {
+        failsRef.current = 0;
+        everOnlineRef.current = true;
+        setBlocked(false);
+      } else {
+        failsRef.current += 1;
+        if (failsRef.current >= GRACE) setBlocked(true);
+      }
     } catch (e) {
       setStatus({ state: "vpn_down", detail: e.message });
+      failsRef.current += 1;
+      if (failsRef.current >= GRACE) setBlocked(true);
     } finally {
       setChecking(false);
     }
@@ -45,7 +60,10 @@ export default function ClusterGate({ children }) {
     return () => clearInterval(t);
   }, [poll]);
 
-  if (status?.state === "online") return children;
+  // Render the app while online, or during a brief blip after we've been online
+  // (a status poll can transiently queue behind a media rsync on the single SSH
+  // connection — don't slam the gate shut for that).
+  if (status?.state === "online" || (everOnlineRef.current && !blocked)) return children;
 
   const key = status?.state || "connecting";
   const copy = COPY[key] || COPY.connecting;

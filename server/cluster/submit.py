@@ -21,6 +21,7 @@ import shlex
 
 from .. import config as cfgmod
 from . import ssh
+from .squeue import resolve_run_dir
 
 JOB_PREFIX = "rmgui"
 
@@ -32,8 +33,9 @@ def _run_name(kind: str, tag: str = "") -> str:
     return f"{JOB_PREFIX}-{suffix}-{secrets.token_hex(4)}"
 
 
-def _runs_root() -> str:
-    return ssh.abs_remote(cfgmod.cluster_runs_dir())
+def _runs_root(kind: str) -> str:
+    """Per-task runs dir on the cluster, e.g. `<project>/runs/train`."""
+    return f"{ssh.abs_remote(cfgmod.cluster_runs_dir())}/{kind}"
 
 
 def render_command(
@@ -73,7 +75,7 @@ def _overrides(pairs: list[tuple[str, object]], extra: str | None) -> str:
 def build_viz(params: dict) -> tuple[str, dict[str, str], str, str]:
     mode = params.get("mode", "clip")
     run_name = _run_name("viz", mode)
-    env: dict[str, str] = {"MODE": mode, "RUN_NAME": run_name, "RUNS_ROOT": _runs_root()}
+    env: dict[str, str] = {"MODE": mode, "RUN_NAME": run_name, "RUNS_ROOT": _runs_root("viz")}
     if mode == "clip":
         env["CLIPS"] = params["clips"]
     elif mode == "prompt":
@@ -96,7 +98,7 @@ def build_viz(params: dict) -> tuple[str, dict[str, str], str, str]:
         })
     elif mode == "samples":
         run = params["run"]
-        env["SAMPLES_FILE"] = params.get("samples_file") or f"{_runs_root()}/{run}/samples"
+        env["SAMPLES_FILE"] = params.get("samples_file") or f"{resolve_run_dir(run)}/samples"
     else:
         raise ValueError(f"unknown viz mode {mode!r}")
     if params.get("overrides"):
@@ -113,7 +115,7 @@ def build_train(params: dict) -> tuple[str, dict[str, str], str, str]:
     run_name = params.get("run_name") or _run_name("train", params.get("train_preset", "rmg_base"))
     env: dict[str, str] = {
         "RUN_NAME": run_name,
-        "RUNS_ROOT": _runs_root(),
+        "RUNS_ROOT": _runs_root("train"),
         "MODEL_PRESET": params.get("model_preset", "dit_base"),
         "PRESET": params.get("train_preset", "rmg_base"),
     }
@@ -140,7 +142,7 @@ def build_eval(params: dict) -> tuple[str, dict[str, str], str, str]:
     env: dict[str, str] = {
         "CKPT": params["checkpoint"],
         "RUN_NAME": run_name,
-        "RUNS_ROOT": _runs_root(),
+        "RUNS_ROOT": _runs_root("eval"),
         "MODEL_PRESET": params.get("model_preset", "dit_base"),
         "PRESET": params.get("train_preset", "rmg_base"),
     }

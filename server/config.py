@@ -126,7 +126,8 @@ def default_checkpoint() -> Path | None:
 # Cluster mode turns the backend into a SLURM control plane (see cluster-plan.md).
 # Everything is driven over the user's own `~/.ssh/config` host alias, multiplexed
 # through one ControlMaster opened for the app session. Defaults match the user's
-# layout: alias `head`, project ~/riemann-motion-generation, runs ~/rmg-runs.
+# layout: alias `head`, project ~/riemann-motion-generation, runs <project>/runs
+# (split into per-task subdirs train/ eval/ viz/).
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -144,9 +145,17 @@ def cluster_host() -> str:
     return os.environ.get("RMG_CLUSTER_HOST", "head")
 
 
+RUN_KINDS = ("train", "eval", "viz")
+
+
 def cluster_runs_dir() -> str:
-    """Remote runs root (shell-expanded on the cluster). Default `~/rmg-runs`."""
-    return os.environ.get("RMG_CLUSTER_RUNS", "~/rmg-runs")
+    """Remote runs root, holding per-task subdirs `train/`, `eval/`, `viz/`
+    (shell-expanded on the cluster). Defaults to `<project>/runs` so all run data
+    lives inside the repo checkout rather than scattered in `$HOME`."""
+    env = os.environ.get("RMG_CLUSTER_RUNS")
+    if env:
+        return env
+    return f"{cluster_project_dir()}/runs"
 
 
 def cluster_project_dir() -> str:

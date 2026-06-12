@@ -69,7 +69,7 @@ cd frontend && npm install && npm run dev   # http://localhost:3000
 | `RMG_MEDIA_DIR`  | where rendered clips are written/served              | `<repo>/.media`                          |
 | `RMG_CLUSTER_MODE` | `1` = SLURM control plane, `0` = local files       | `1`                                      |
 | `RMG_CLUSTER_HOST` | SSH alias for the head node (`~/.ssh/config`)      | `head`                                   |
-| `RMG_CLUSTER_RUNS` | remote runs dir                                    | `~/rmg-runs`                             |
+| `RMG_CLUSTER_RUNS` | remote runs root (holds train/ eval/ viz/ subdirs) | `<project>/runs`                         |
 | `RMG_CLUSTER_PROJECT` | remote git project (holds `slurm/*.sbatch`)     | `~/riemann-motion-generation`            |
 | `RMG_SSH_CONTROL_PATH` | ControlMaster socket for the app session       | `~/.rmg-cm.sock`                         |
 

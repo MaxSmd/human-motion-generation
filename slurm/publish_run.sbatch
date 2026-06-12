@@ -8,7 +8,7 @@
 #SBATCH --output=slurm/logs/publish-%j.out
 #SBATCH --error=slurm/logs/publish-%j.err
 #
-# Copy a finished run from ~/rmg-runs/<run> to the shared project dir.
+# Copy a finished run from <project>/runs/<kind>/<run> to the shared project dir.
 # Runs on a compute node because the head has a 200 MB file-size ulimit
 # that breaks rsync on the checkpoint files.
 #
@@ -22,7 +22,7 @@ set -euo pipefail
 mkdir -p slurm/logs
 
 RUN="${RUN:?set RUN=<run-name>, e.g. RUN=rmg-base-v1}"
-SRC="${SRC:-${HOME}/rmg-runs/${RUN}}"
+SRC="${SRC:-$(ls -d "${HOME}/riemann-motion-generation/runs/"*/"${RUN}" 2>/dev/null | head -1 || true)}"
 DEST="${DEST:-/mnt/projects/drl4cvb/human-motion-representation/rmg/runs}"
 
 test -d "${SRC}" || { echo "no such run: ${SRC}"; exit 1; }

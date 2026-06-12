@@ -104,7 +104,7 @@ MODEL_PRESET=dit_base PRESET=rmg_base \
   OVERRIDES='data.subset_n=16 train.max_steps=15000' \
   sbatch slurm/rmg_train.sbatch
 # logs land in slurm/logs/rmg-train-<jobid>.{out,err}
-# checkpoints land in $HOME/rmg-runs/<run_name>/checkpoints/
+# checkpoints land in <project>/runs/train/<run_name>/checkpoints/
 ```
 
 ---
@@ -145,7 +145,7 @@ per-user.**
 | **`humanml3d_packed/` (Stage 2 output, the zip)** | shared, RW | one person re-packs, everyone reads — see Data status |
 | `~/rmg.sqsh` container image               | shared, RO copy | symlink your `$HOME/rmg.sqsh` to a shared copy |
 | HF cache (`~/.cache/huggingface`)          | shared, RW      | Qwen3 weights, sentencepiece tokenizers; safe to share |
-| `~/rmg-runs/` checkpoints + samples        | **per-user**    | write-heavy, large, per-experiment |
+| `<project>/runs/{train,eval,viz}/`         | **per-user**    | write-heavy, large, per-experiment |
 | `slurm/logs/`                              | **per-user** (committed empty) | per-user job output |
 | wandb / tensorboard outputs                | **per-user**    | one wandb run per training job |
 
@@ -170,7 +170,7 @@ Set these in your `~/.bashrc` on the cluster:
 
 ```bash
 export RMG_DATA_ROOT=/mnt/shared/motion/humanml3d_packed_v3_xflip
-export RMG_RUNS_DIR=$HOME/rmg-runs
+export RMG_RUNS_DIR=$HOME/riemann-motion-generation/runs/train
 export HF_HOME=/mnt/shared/motion/hf-cache
 export IMAGE=/mnt/shared/motion/rmg-2026-05-25.sqsh    # or ~/rmg.sqsh if you built your own
 ```

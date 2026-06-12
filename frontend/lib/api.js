@@ -56,12 +56,23 @@ export const api = {
   clusterCancel: (slurmId) => req(`/cluster/cancel/${slurmId}`, { method: "POST" }),
 
   jobs: () => req("/cluster/jobs"),
+  queue: () => req("/cluster/queue"),
   job: (id) => req(`/cluster/jobs/${id}`),
   jobLog: (id, lines = 200) => req(`/cluster/jobs/${id}/log?lines=${lines}`),
+  cancelJob: (id) => req(`/cluster/jobs/${id}/cancel`, { method: "POST" }),
   submitViz: (body) => post("/cluster/jobs/viz", body),
   submitTrain: (body) => post("/cluster/jobs/train", body),
   previewTrain: (body) => post("/cluster/jobs/train/preview", body),
   submitEval: (body) => post("/cluster/jobs/eval", body),
+
+  evalRuns: () => req("/cluster/eval-runs"),
+  evalResults: (run) => req(`/cluster/eval/${encodeURIComponent(run)}`),
+  analysisTable: (runs) =>
+    req(`/cluster/analysis/table?runs=${encodeURIComponent(runs.join(","))}`),
+  runMetrics: (run) => req(`/cluster/metrics?run=${encodeURIComponent(run)}`),
+  runInfo: (run) => req(`/cluster/run-info?run=${encodeURIComponent(run)}`),
+  analysisNpy: (job, name) =>
+    req(`/cluster/analysis/npy?job=${encodeURIComponent(job)}&name=${encodeURIComponent(name)}`),
 };
 
 function post(path, body) {

@@ -26,7 +26,7 @@ else
 fi
 IMAGE="${IMAGE:-${HOME}/rmg.sqsh}"
 HF_CACHE="${HF_CACHE:-${HOME}/hf-cache}"
-RUNS_ROOT="${RUNS_ROOT:-${HOME}/rmg-runs}"
+RUNS_ROOT="${RUNS_ROOT:-${REPO}/runs/viz}"
 
 MODE="${MODE:-clip}"
 CLIPS="${CLIPS:-000021,000019,000022,000026}"

@@ -13,13 +13,35 @@ user input.
 
 from __future__ import annotations
 
+import os
 import shlex
 import subprocess
+import threading
+import time
 from dataclasses import dataclass
 
 from .. import config as cfgmod
 
 CONTROL_PERSIST = "300"  # seconds the master lingers after last use
+
+# The shared ControlMaster is opened exactly once, serialized by this lock, so
+# concurrent requests (status polling + parallel eval fetches) never race to
+# create it (which yields "ControlSocket already exists, disabling multiplexing"
+# and stray direct connections that hang). All other calls only *attach*
+# (ControlMaster=no), so they multiplex over the one master.
+_master_lock = threading.Lock()
+_master_ok_until = 0.0  # monotonic-ish skip window to avoid an `-O check` per call
+_MASTER_TTL = 30.0
+
+# Serialize sessions over the single master. The head node refuses concurrent
+# sessions on a connection AND rate-limits bursts of new connections
+# (MaxStartups / fail2ban), so the only safe pattern is one-command-at-a-time
+# over one reused connection. Each command is fast over the warm master, so
+# serializing (default 1) costs little and keeps us gentle on the login node.
+# (Override via RMG_SSH_MAX_SESSIONS only if you know the node allows more.)
+_session_sem = threading.BoundedSemaphore(int(os.environ.get("RMG_SSH_MAX_SESSIONS", "1")))
+_MUX_ERR = ("disabling multiplexing", "control socket", "session request failed",
+            "multiplexing", "session open refused")
 
 
 class SSHError(RuntimeError):
@@ -41,15 +63,64 @@ class Result:
         return self.returncode == 0
 
 
-def _base_opts() -> list[str]:
-    """Shared `-o` options for ssh and rsync's `-e` transport."""
+def _mux_opts() -> list[str]:
+    """`-o` options for attach-only ssh/rsync. ControlMaster=no → never try to
+    *create* the master (only `ensure_master` does that, under the lock); just
+    attach to the existing socket if present, else connect directly."""
     return [
         "-o", "BatchMode=yes",
-        "-o", "ControlMaster=auto",
+        "-o", "ControlMaster=no",
         "-o", f"ControlPath={cfgmod.ssh_control_path()}",
-        "-o", f"ControlPersist={CONTROL_PERSIST}",
         *cfgmod.ssh_extra_opts(),
     ]
+
+
+def _control_check() -> bool:
+    try:
+        r = subprocess.run(
+            ["ssh", "-o", f"ControlPath={cfgmod.ssh_control_path()}", "-O", "check",
+             cfgmod.cluster_host()],
+            capture_output=True, text=True, timeout=6,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def ensure_master(force: bool = False, connect_timeout: int = 8) -> None:
+    """Make sure the shared ControlMaster is up. Serialized so concurrent callers
+    don't race to create it. Cheap: skips re-checking within a short TTL."""
+    global _master_ok_until
+    with _master_lock:
+        now = time.time()
+        if not force and now < _master_ok_until:
+            return
+        if not force and _control_check():
+            _master_ok_until = now + _MASTER_TTL
+            return
+        cp = cfgmod.ssh_control_path()
+        # A dead master can leave the socket file behind → new clients see it and
+        # "disable multiplexing". Remove it before (re)opening.
+        try:
+            if os.path.exists(cp):
+                os.unlink(cp)
+        except OSError:
+            pass
+        argv = [
+            "ssh", "-M", "-N", "-f",
+            "-o", "BatchMode=yes",
+            "-o", "ControlMaster=yes",
+            "-o", f"ControlPath={cp}",
+            "-o", f"ControlPersist={CONTROL_PERSIST}",
+            "-o", f"ConnectTimeout={connect_timeout}",
+            *cfgmod.ssh_extra_opts(),
+            cfgmod.cluster_host(),
+        ]
+        try:
+            subprocess.run(argv, capture_output=True, text=True, timeout=connect_timeout + 12)
+        except subprocess.TimeoutExpired:
+            pass
+        _master_ok_until = (time.time() + _MASTER_TTL) if _control_check() else 0.0
 
 
 def run(
@@ -68,19 +139,20 @@ def run(
     """
     host = cfgmod.cluster_host()
     payload = f"bash -lc {shlex.quote(remote_cmd)}" if login_shell else remote_cmd
-    argv = [
-        "ssh",
-        *_base_opts(),
-        "-o", f"ConnectTimeout={connect_timeout}",
-        host,
-        payload,
-    ]
+
+    def _once() -> subprocess.CompletedProcess:
+        argv = ["ssh", *_mux_opts(), "-o", f"ConnectTimeout={connect_timeout}", host, payload]
+        with _session_sem:
+            return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+
+    ensure_master(connect_timeout=connect_timeout)
     try:
-        proc = subprocess.run(
-            argv, capture_output=True, text=True, timeout=timeout
-        )
+        proc = _once()
+        if proc.returncode == 255 and any(e in proc.stderr.lower() for e in _MUX_ERR):
+            ensure_master(force=True, connect_timeout=connect_timeout)  # stale master → rebuild
+            proc = _once()
     except subprocess.TimeoutExpired as e:
-        raise SSHError(124, " ".join(argv), f"timed out after {timeout}s") from e
+        raise SSHError(124, payload, f"timed out after {timeout}s") from e
     res = Result(proc.returncode, proc.stdout, proc.stderr)
     if check and not res.ok:
         raise SSHError(res.returncode, remote_cmd, res.stderr)
@@ -100,7 +172,8 @@ def rsync_pull(
     may contain a trailing `/` to copy directory contents.
     """
     host = cfgmod.cluster_host()
-    transport = "ssh " + " ".join(shlex.quote(o) for o in _base_opts())
+    ensure_master()
+    transport = "ssh " + " ".join(shlex.quote(o) for o in _mux_opts())
     argv = [
         "rsync",
         *flags,
@@ -109,7 +182,8 @@ def rsync_pull(
         local_dir,
     ]
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        with _session_sem:
+            proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired as e:
         raise SSHError(124, " ".join(argv), f"rsync timed out after {timeout}s") from e
     res = Result(proc.returncode, proc.stdout, proc.stderr)
@@ -148,11 +222,18 @@ def abs_remote(path: str) -> str:
 
 def close_master() -> None:
     """Tear down the shared ControlMaster (best-effort; called on shutdown)."""
-    host = cfgmod.cluster_host()
+    global _master_ok_until
+    _master_ok_until = 0.0
+    cp = cfgmod.ssh_control_path()
     try:
         subprocess.run(
-            ["ssh", "-o", f"ControlPath={cfgmod.ssh_control_path()}", "-O", "exit", host],
+            ["ssh", "-o", f"ControlPath={cp}", "-O", "exit", cfgmod.cluster_host()],
             capture_output=True, text=True, timeout=5,
         )
     except Exception:
+        pass
+    try:
+        if os.path.exists(cp):
+            os.unlink(cp)
+    except OSError:
         pass

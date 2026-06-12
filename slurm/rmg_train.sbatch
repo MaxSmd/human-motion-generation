@@ -31,7 +31,7 @@ else
 fi
 IMAGE="${IMAGE:-${HOME}/rmg.sqsh}"
 HF_CACHE="${HF_CACHE:-${HOME}/hf-cache}"
-RUNS_ROOT="${RUNS_ROOT:-${HOME}/rmg-runs}"
+RUNS_ROOT="${RUNS_ROOT:-${REPO}/runs/train}"
 MODEL_PRESET="${MODEL_PRESET:-dit_base}"
 PRESET="${PRESET:-rmg_base}"
 TEXT_ENCODER="${TEXT_ENCODER:-qwen3}"

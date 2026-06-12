@@ -8,6 +8,9 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from .. import config as cfgmod
+from ..analysis import curves as curvesmod
+from ..analysis import eval_tables
+from ..analysis import joints as jointsmod
 from . import jobs as jobsmod
 from . import squeue as squeuemod
 from . import ssh, status, submit
@@ -32,7 +35,9 @@ def _require_online() -> None:
 
 @router.get("/status")
 def cluster_status() -> dict:
-    return status.probe(force=True).to_dict()
+    # Cached (≈5 s TTL): the gate + page + cluster tab all poll this, so a forced
+    # probe per request would hammer SSH. The TTL keeps it to ~one probe / 5 s.
+    return status.probe().to_dict()
 
 
 @router.get("/squeue")
@@ -112,11 +117,17 @@ class EvalRequest(BaseModel):
     overrides: str | None = None
 
 
+@router.get("/queue")
+def queue_summary() -> dict:
+    """Cheap, SSH-free busy/queue snapshot for the global indicator (telemetry)."""
+    return jobsmod.get_manager().summary()
+
+
 @router.post("/jobs/viz")
 def submit_viz(req: VizRequest) -> dict:
     _require_online()
     try:
-        job = jobsmod.get_manager().submit("viz", submit.build_viz, req.model_dump())
+        job = jobsmod.get_manager().enqueue("viz", req.model_dump())
     except (KeyError, ValueError) as e:
         raise HTTPException(400, str(e)) from e
     return job.to_dict()
@@ -136,7 +147,7 @@ def preview_train(req: TrainRequest) -> dict:
 def submit_train(req: TrainRequest) -> dict:
     _require_online()
     try:
-        job = jobsmod.get_manager().submit("train", submit.build_train, req.model_dump())
+        job = jobsmod.get_manager().enqueue("train", req.model_dump())
     except (KeyError, ValueError) as e:
         raise HTTPException(400, str(e)) from e
     return job.to_dict()
@@ -146,7 +157,7 @@ def submit_train(req: TrainRequest) -> dict:
 def submit_eval(req: EvalRequest) -> dict:
     _require_online()
     try:
-        job = jobsmod.get_manager().submit("eval", submit.build_eval, req.model_dump())
+        job = jobsmod.get_manager().enqueue("eval", req.model_dump())
     except (KeyError, ValueError) as e:
         raise HTTPException(400, str(e)) from e
     return job.to_dict()
@@ -165,10 +176,82 @@ def get_job(job_id: str) -> dict:
     return job.to_dict()
 
 
+@router.post("/jobs/{job_id}/cancel")
+def cancel_job(job_id: str) -> dict:
+    """Cancel one of our jobs — drops it from the local queue if not yet started,
+    or scancels it if it's on the cluster."""
+    ok = jobsmod.get_manager().cancel(job_id)
+    if not ok:
+        raise HTTPException(404, f"no cancellable job {job_id}")
+    return {"cancelled": job_id}
+
+
 @router.get("/jobs/{job_id}/log")
-def job_log(job_id: str, lines: int = 200) -> dict:
+def job_log(job_id: str, lines: int = 300) -> dict:
     _require_online()
     job = jobsmod.get_manager().get(job_id)
     if not job:
         raise HTTPException(404, f"no job {job_id}")
     return {"job_id": job_id, "log": jobsmod.get_manager().log_tail(job_id, lines)}
+
+
+# --------------------------------------------------------------------------- eval / analysis
+
+
+@router.get("/eval-runs")
+def eval_runs() -> list[dict]:
+    """Runs that have eval/results.json (across both runs roots)."""
+    _require_online()
+    return eval_tables.list_eval_runs()
+
+
+@router.get("/eval/{run}")
+def eval_results(run: str) -> dict:
+    """Full per-guidance metrics for one run."""
+    _require_online()
+    try:
+        per = eval_tables.fetch_results(run)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+    # JSON keys must be strings.
+    return {"run": run, "results": {str(k): v for k, v in per.items()}}
+
+
+@router.get("/analysis/table")
+def analysis_table(runs: str) -> dict:
+    """Run-comparison rows + a copy-ready LaTeX tabular. `runs` = comma-separated."""
+    _require_online()
+    run_list = [r.strip() for r in runs.split(",") if r.strip()]
+    if not run_list:
+        raise HTTPException(400, "pass ?runs=a,b,c")
+    return eval_tables.comparison(run_list)
+
+
+@router.get("/metrics")
+def run_metrics(run: str) -> dict:
+    """Parsed training-curve data from a run's metrics.csv."""
+    _require_online()
+    try:
+        return curvesmod.fetch_metrics(run)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+
+
+@router.get("/run-info")
+def run_info(run: str) -> dict:
+    """A run's saved config.json + approx wall-clock duration."""
+    _require_online()
+    try:
+        return curvesmod.fetch_run_info(run)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+
+
+@router.get("/analysis/npy")
+def analysis_npy(job: str, name: str) -> dict:
+    """Trajectory/jitter/speed/foot-height series from a pulled job .npy (local)."""
+    _require_mode()
+    try:
+        return jointsmod.analyze(jointsmod.resolve_npy(job, name))
+    except (FileNotFoundError, ValueError) as e:
+        raise HTTPException(404, str(e)) from e
