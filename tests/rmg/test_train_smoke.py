@@ -1,6 +1,6 @@
 """End-to-end smoke training test.
 
-Runs a tiny version of `scripts/train.py`'s loop against a synthetic packed
+Runs a tiny version of `rmg.scripts.train`'s loop against a synthetic packed
 dataset for 5 outer steps, saves a checkpoint, then resumes and runs 3 more
 steps. Verifies:
     - the loop runs to completion without errors
@@ -28,7 +28,7 @@ from rmg.flow import (
 )
 from rmg.models import DiTConfig, RandomTextEncoder, RMGDiT
 from rmg.representation import NUM_JOINTS
-from rmg.utils import (
+from common.utils import (
     EMA,
     TrainState,
     build_scheduler,
@@ -68,7 +68,7 @@ def _build_synthetic_data(root: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Tiny driver that mirrors scripts/train.py's training step
+# Tiny driver that mirrors rmg.scripts.train's training step
 # ---------------------------------------------------------------------------
 
 

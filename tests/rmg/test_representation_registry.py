@@ -61,6 +61,18 @@ def _identity_quats(T: int) -> torch.Tensor:
     return q
 
 
+def _articulated_quats(T: int, seed: int = 0) -> torch.Tensor:
+    """Small non-degenerate per-joint rotations. A perfectly rigid (all-identity)
+    body makes upstream `process_file` hit an arccos singularity in the
+    rotation-invariant features; real motion never does, so the H3D-feature
+    test uses an articulated body."""
+    g = torch.Generator().manual_seed(seed)
+    axis = torch.randn(T, NUM_JOINTS, 3, generator=g)
+    axis = axis / axis.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+    angle = 0.3 * torch.rand(T, NUM_JOINTS, 1, generator=g)
+    return torch.cat([torch.cos(angle / 2), axis * torch.sin(angle / 2)], dim=-1)
+
+
 def _trans(T: int) -> torch.Tensor:
     t = torch.zeros(T, 3, dtype=torch.float32)
     t[:, 0] = torch.linspace(0.0, 0.5, T)
@@ -104,7 +116,7 @@ def test_tr_ambient_and_encode() -> None:
 def test_tr_to_h3d_shape() -> None:
     rep = TRRepresentation()
     sk = _toy_skeleton()
-    flat = rep.encode_clip(_trans(20), _identity_quats(20), skeleton=sk)
+    flat = rep.encode_clip(_trans(20), _articulated_quats(20), skeleton=sk)
     feat = rep.to_h3d_features(flat, sk)
     assert feat.shape == (19, H3D_FEATURE_DIM)
     assert torch.isfinite(feat).all()

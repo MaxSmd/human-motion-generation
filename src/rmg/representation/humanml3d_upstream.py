@@ -7,7 +7,7 @@ contrast, runs IK with `smooth_forward=True` (Gaussian-smooths the forward axis
 over 20 frames) *inside* the feature extractor — this changes the per-frame
 root quaternion, which propagates through the IK chain into *every* joint's
 local quaternion. The result is that our cont6d differs from upstream's by
-~100% (verified with `scripts/diagnose_h3d_conversion.py`), and the Guo et al.
+~100% (verified bit-equal against upstream's `process_file`), and the Guo et al.
 evaluator (trained on the upstream features) treats our 263-D vectors as
 nonsense — diversity-on-real comes out at ~4 instead of the paper's ~9.5.
 

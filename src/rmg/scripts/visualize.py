@@ -28,7 +28,7 @@ Outputs land under `${output_dir}/viz/`. Both paths go through
 `rmg.representation.forward_kinematics` so the rendered skeleton uses the same
 HumanML3D-convention FK the evaluator expects.
 
-Run via `slurm/rmg_viz.sbatch`; not designed for local CPU use (Qwen3 text
+Run via `slurm/rmg/viz.sbatch`; not designed for local CPU use (Qwen3 text
 encoder is heavy, and MP4 export needs ffmpeg in the container).
 """
 
@@ -67,7 +67,7 @@ from rmg.representation import (  # noqa: E402
     forward_kinematics,
 )
 from rmg.representation.tplusr import decode as tplusr_decode  # noqa: E402
-from rmg.utils import EMA, load_checkpoint, set_seed  # noqa: E402
+from common.utils import EMA, load_checkpoint, set_seed  # noqa: E402
 
 
 # HumanML3D 22-joint kinematic chains (same as upstream's t2m_kinematic_chain).

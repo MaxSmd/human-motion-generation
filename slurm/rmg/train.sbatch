@@ -10,7 +10,7 @@
 #SBATCH --error=slurm/logs/rmg-train-%j.err
 #
 # Unified, fully-configurable TRAIN job (one of three scripts the interactive
-# app drives; the others are rmg_eval.sbatch + rmg_viz.sbatch). Everything is an
+# app drives; the others are rmg/eval.sbatch + rmg/viz.sbatch). Everything is an
 # env var, and OVERRIDES carries arbitrary extra Hydra args (space-separated,
 # simple key=value tokens), so any training config is reachable without editing
 # this file. SBATCH resources (partition/time/gres) are overridden by the
@@ -18,7 +18,7 @@
 #
 #   MODEL_PRESET=dit_base PRESET=rmg_base RUN_NAME=my-run \
 #   OVERRIDES='data.subset_n=8 train.max_steps=15000 train.lr=1e-4' \
-#       sbatch slurm/rmg_train.sbatch
+#       sbatch slurm/rmg/train.sbatch
 
 set -euo pipefail
 mkdir -p slurm/logs

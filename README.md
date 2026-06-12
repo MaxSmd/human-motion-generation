@@ -1,22 +1,9 @@
 # Motion-generation reproductions on HumanML3D
 
-Single repo, three reproductions, one shared data + eval pipeline:
-
-| Package        | Paper                                                                 | Owner    | Status |
-|----------------|------------------------------------------------------------------------|----------|--------|
-| `src/rmg/`     | Riemannian Motion Generation (Miao, Huang, Li 2026)                    | Julian   | code complete, retrain pending data fixes |
-| `src/momask/`  | MoMask: Generative Masked Modeling of 3D Human Motions (Guo+ 2024)     | *open*   | placeholder |
-| `src/mardm/`   | MARDM                                                                  | *open*   | placeholder |
-
-Common infrastructure is shared across models: model-agnostic data tooling in
-top-level `scripts/`, cluster plumbing in `slurm/` + `containers/`, and the web
-control plane in `app/`. Shared library code (data, evaluator, metrics) lives in
-the `rmg` package today and will be hoisted into `src/common/` with the
-momask/mardm merge.
-
-> [!IMPORTANT]
-> **The packed dataset is currently broken — do not train anything yet.**
-> See [Data status](#data-status) below.
+Several motion-generation reproductions in one repo — `rmg` today, `momask` and
+`mardm` next — sharing one HumanML3D data pipeline, one Guo evaluator, one
+container, and one web + cluster control plane. Adding a model:
+[`ADDING_A_MODEL.md`](ADDING_A_MODEL.md).
 
 ---
 
@@ -24,283 +11,107 @@ momask/mardm merge.
 
 ```
 src/
-  rmg/                  Riemannian flow matching on (R³ × S³^22) — paper main result
-    configs/            Hydra configs: data/ model/ representation/ train/ + train.yaml
-    scripts/            entry points: train · evaluate · sanity_eval · visualize · plot_*
-    data/               HumanML3D packed dataset (shared; → src/common/ on merge)
-    eval/               Guo et al. evaluator wrapper + FID/R@k/Diversity/MM-Dist
-    flow/               flow matching trainer, sampler, prior, geodesic interp
-    manifolds/          R^d, S^d, pre-shape, ProductManifold
-    models/             DiT, conditioning, text encoders (random + Qwen3)
-    representation/     T+R / T+P / T+R+P encodings + 263-D conversion
-    tasks/              generation, ssl, recognition stubs
-    utils/              EMA, logger, seeding, checkpointing, scheduler
-  momask/               placeholder — see src/momask/README.md
-  mardm/                placeholder — see src/mardm/README.md
+  rmg/                  Riemannian flow matching on (R³ × S³^22)
+    configs/            Hydra configs (data / model / representation / train + train.yaml)
+    scripts/            entry points: train · evaluate · visualize
+    data/ eval/ flow/ manifolds/ models/ representation/ tasks/ utils/
+  momask/  mardm/       other models (placeholders — see ADDING_A_MODEL.md)
 
-app/                    web control plane
-  backend/              SLURM control plane + in-process rmg inference (uvicorn backend.app:app)
+app/
+  backend/              FastAPI: SLURM control plane + in-process rmg inference
   frontend/             Next.js UI
 
-scripts/                model-agnostic data tooling (shared across models)
-  prepare_humanml3d.py  AMASS → packed dataset (two stages)
-  build_synthetic_dataset.py   tiny synthetic packed dataset for tests
-  diagnose_h3d_conversion.py / diagnose_text_pairing.py   dataset diagnostics
-
-slurm/                  sbatch templates (12g + 24g partitions; QoS: students_normal)
-  rmg_train.sbatch      TRAIN — fully configurable via env + OVERRIDES
-  rmg_eval.sbatch       EVAL  — fully configurable via env + OVERRIDES
-  rmg_viz.sbatch        VIZ   — MODE=clip|prompt|compare|samples + env + OVERRIDES
-  prep_data.sbatch      full prep: AMASS → joints → packed zip
-  build_image.sbatch    build the enroot image
-  ensure_eval_assets.sh text-to-motion submodule + Guo checkpoint; auto-run
-                        (idempotent) by rmg_eval.sbatch on the first eval
-
-docs/                   plan.md + design notes
-containers/             enroot build instructions + Dockerfile + requirements.txt
+scripts/                shared data tooling — prepare_humanml3d.py (AMASS → packed)
+slurm/
+  rmg/                  per-model jobs: train.sbatch · eval.sbatch · viz.sbatch
+  build_image.sbatch    prep_data.sbatch    ensure_eval_assets.sh    (shared)
+containers/             enroot image: Dockerfile + requirements.txt
 external/               git submodules: HumanML3D, text-to-motion
-tests/                  pytest suite — manifolds, representation, flow, eval, models
+tests/rmg/              pytest suite (per model)
+runs/<model>/{train,eval,viz}/   run outputs (gitignored)
 ```
 
-Each package is independently importable: `import rmg`, `import momask`,
-`import mardm`. The package-finder in `pyproject.toml` picks all three up
-automatically.
+Each model package is independently importable (`import rmg`); `pyproject.toml`
+picks them up automatically.
 
 ---
 
-## Quickstart
-
-### Local (CPU, tests + smoke runs only)
+## Quickstart (local)
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
-pytest                                          # manifold + representation + flow tests
+pytest
+# tiny CPU smoke run
 python -m rmg.scripts.train model=dit_base train=rmg_base \
     train.max_steps=20 train.micro_batch_size=4 train.grad_accum=2 \
     text_encoder.type=random run_name=local-smoke
 ```
 
-### Cluster (TUM head node, enroot + slurm)
-
-Once-per-account:
+The web app (cluster control plane + inference):
 
 ```bash
-# 1. Build the container (see containers/BUILD.md — 5 min on a 24g interactive job)
-# 2. Eval assets (text-to-motion submodule + Guo checkpoint) are set up
-#    automatically by rmg_eval.sbatch on the first eval. To pre-stage the
-#    one-time clone on a network/memory-capable node:
-REPO=$PWD sbatch --partition=data --time=00:30:00 --wrap 'bash slurm/ensure_eval_assets.sh'
+RMG_CLUSTER_MODE=1 uvicorn backend.app:app --app-dir app --reload --port 8000
+# or full stack (backend + frontend):
+docker compose up --build
 ```
 
-Then for a training run (everything is configurable via env + `OVERRIDES`):
+---
+
+## Cluster
+
+### Build the environment / container
+
+The training+eval environment is a single enroot image (PyTorch + our deps).
+Build it once on an interactive 24g job — or just `sbatch slurm/build_image.sbatch`:
 
 ```bash
-# default RMG-base
-sbatch slurm/rmg_train.sbatch
-# tiny overfit / smoke via overrides
+enroot import -o /tmp/base.sqsh 'docker://pytorch/pytorch:2.9.0-cuda13.0-cudnn9-devel'
+enroot create --name rmg /tmp/base.sqsh
+enroot start --root --rw --mount /mnt:mnt rmg   # then: pip install -r containers/requirements.txt
+enroot export -o ~/rmg.sqsh rmg
+```
+
+Every sbatch starts a fresh container from `~/rmg.sqsh`. Change `containers/requirements.txt`
+→ rebuild the image; never `pip install` inside an sbatch.
+
+### Run jobs
+
+```bash
+sbatch slurm/rmg/train.sbatch                       # default RMG-base
 MODEL_PRESET=dit_base PRESET=rmg_base \
   OVERRIDES='data.subset_n=16 train.max_steps=15000' \
-  sbatch slurm/rmg_train.sbatch
-# logs land in slurm/logs/rmg-train-<jobid>.{out,err}
-# checkpoints land in <project>/runs/rmg/train/<run_name>/checkpoints/
+  sbatch slurm/rmg/train.sbatch                     # everything is env + OVERRIDES
+sbatch slurm/rmg/eval.sbatch                        # Guo eval assets bootstrap on first run
+# logs → slurm/logs/ ; outputs → <project>/runs/rmg/{train,eval,viz}/<run>/
 ```
 
----
+### Storage
 
-## Container build
-
-See `containers/BUILD.md` for the full enroot build recipe. Short version:
-
-1. Open an interactive 24g job.
-2. `enroot import` upstream `pytorch/pytorch:2.9.0-cuda13.0-cudnn9-devel`.
-3. `enroot create --name rmg` from it.
-4. `enroot start --root --rw --mount /mnt:mnt ... rmg`, then `pip install -r containers/requirements.txt`.
-5. `enroot export --output ~/rmg.sqsh rmg`.
-
-Every sbatch starts a fresh container from `~/<USER>/rmg.sqsh`. If you change
-`requirements.txt`, rebuild the image; do **not** `pip install` inside an
-sbatch (it bloats every job and races with file locks).
-
-The image is ~6 GB built. **One person should build it and put it on the
-shared mount once** — see below for how to share.
-
----
-
-## Cluster mounts: per-user vs shared
-
-The cluster gives each of us a per-user `/mnt/home/<user>/` mount, and there's
-a shared mount `/mnt/projects/drl4cvb/human-motion/`. Default rule: **anything that's expensive to produce and identical
-across users goes on the shared mount, read-only; everything else stays
-per-user.**
-
-| Artifact                                  | Where           | Why |
-|-------------------------------------------|-----------------|-----|
-| AMASS raw `.npz` files                    | shared, RO      | ~40 GB, never changes after download |
-| SMPL+H + DMPL body models (`*.npz`)        | shared, RO      | licensed, identical for everyone |
-| `external/HumanML3D` submodule clone       | shared, RO      | static; saves 14k+ inode quota per user |
-| `external/text-to-motion` + Guo checkpoint | shared, RO      | static; ~600 MB checkpoint |
-| `joints_cache/` (Stage 1 output, ~30min GPU) | shared, RW    | one person runs it, everyone reads |
-| **`humanml3d_packed/` (Stage 2 output, the zip)** | shared, RW | one person re-packs, everyone reads — see Data status |
-| `~/rmg.sqsh` container image               | shared, RO copy | symlink your `$HOME/rmg.sqsh` to a shared copy |
-| HF cache (`~/.cache/huggingface`)          | shared, RW      | Qwen3 weights, sentencepiece tokenizers; safe to share |
-| `<project>/runs/<model>/{train,eval,viz}/`         | **per-user**    | write-heavy, large, per-experiment |
-| `slurm/logs/`                              | **per-user** (committed empty) | per-user job output |
-| wandb / tensorboard outputs                | **per-user**    | one wandb run per training job |
-
-### Coordination rule
-
-The shared mount has **one writer per artifact at a time**. Concretely:
-
-- **AMASS / body models / submodules / Guo checkpoint**: write *once*, then
-  `chmod -R a-w` so nobody can accidentally clobber.
-- **`joints_cache/`**: only re-run Stage 1 if you've changed `stage_raw_pose`
-  (we won't for a while). Coordinate over Slack first.
-- **`humanml3d_packed/`**: this *will* change while we fix decode bugs.
-  Convention: name the dir with a date/version suffix
-  (`humanml3d_packed_v3_xflip/`) and update `src/rmg/configs/data/cluster_mounted.yaml`
-  in a single commit when a new version goes live. Don't overwrite the
-  current dir in-place — concurrent eval/training jobs will read garbage.
-- **Container image**: same versioning. `rmg-2026-05-25.sqsh` not `rmg.sqsh`.
-
-### Env vars
-
-Set these in your `~/.bashrc` on the cluster:
+The only **shared** cluster storage is the data mount under
+`/mnt/projects/drl4cvb/data/` — `humanml3d/`, `text-to-motion/`, and the packed
+`data/`. Everything else is **per-user**: your repo clone, your `~/rmg.sqsh`
+image, and all run outputs under `<project>/runs/`.
 
 ```bash
-export RMG_DATA_ROOT=/mnt/shared/motion/humanml3d_packed_v3_xflip
-export RMG_RUNS_DIR=$HOME/riemann-motion-generation/runs/rmg/train
-export HF_HOME=/mnt/shared/motion/hf-cache
-export IMAGE=/mnt/shared/motion/rmg-2026-05-25.sqsh    # or ~/rmg.sqsh if you built your own
+export RMG_DATA_ROOT=/mnt/projects/drl4cvb/data/humanml3d_packed   # shared dataset
+export IMAGE=$HOME/rmg.sqsh                                        # your image
 ```
-
-The sbatch scripts honor these; if a user wants to point at a private dataset
-build for a specific experiment, they override `RMG_DATA_ROOT` for that job
-only.
-
-### Bootstrap for a new teammate
-
-```bash
-ssh head
-# 1. Use the shared container instead of building your own
-ln -s /mnt/shared/motion/rmg-2026-05-25.sqsh ~/rmg.sqsh
-# 2. Clone the repo to your home
-git clone <repo-url> ~/motion-reproductions && cd ~/motion-reproductions
-# 3. Symlink eval assets so the one-time clone isn't needed
-ln -s /mnt/shared/motion/external/HumanML3D       external/HumanML3D
-ln -s /mnt/shared/motion/external/text-to-motion  external/text-to-motion
-# 4. Point at the shared dataset
-mkdir -p external/data
-ln -s /mnt/shared/motion/humanml3d_packed_v3_xflip external/data/humanml3d_packed
-# 5. Smoke test (tiny end-to-end via overrides)
-OVERRIDES='data.subset_n=4 train.max_steps=25 train.micro_batch_size=4 train.grad_accum=1' \
-  sbatch slurm/rmg_train.sbatch
-```
-
----
-
-## <a id="data-status"></a>Data status
-
-Before training anything new, run `sanity_eval` and confirm the numbers below.
-The pipeline had five upstream-incompatibilities that took several rounds of
-debugging to find; everything below was wrong silently and only `sanity_eval`
-on real motions exposed it.
-
-| Fix | Where | Effect on `diversity_real / R@3` |
-|-----|-------|----------------------------------|
-| FK uses upstream's *per-chain* rotation convention (reset `R = root_quat` at the start of each kinematic chain in `T2M_KINEMATIC_CHAINS`, not propagate by kinematic parent). Wrong propagation drifts arms by 10+ cm; head and lower body stay correct, which is why every unit test passed. | `src/rmg/representation/skeleton.py::forward_kinematics` | `4.6 / 0.27 → 9.32 / 0.34` |
-| Prep applies upstream's X-flip (`data[..., 0] *= -1`) and the five subset pre-trims (`Eyes_Japan_Dataset`, `MPI_HDM05`, `TotalCapture`, `MPI_Limits`, `Transitions_mocap`). Without the X-flip, IK assigns L/R rotations to the wrong side. | `scripts/prepare_humanml3d.py::stage_pack` | small move on R@k |
-| Prep rescales root translation by `scale_rt = tgt_leg_len / src_leg_len` (upstream's `uniform_skeleton` does this). Without it, XZ velocity features are on each subject's own scale. | `stage_pack` | not measurable on sanity, kept on principle |
-| Text encoder uses HumanML3D's *pre-tagged* tokens from `texts.zip` (`<caption>#<word/POS ...>#<start>#<end>`) instead of re-tagging with spaCy. The Guo POS vocabulary includes 5 custom `*_VIP` tags (`Loc_VIP`, `Body_VIP`, etc.) that spaCy never produces. | `sanity_eval.py` + `RealGuoEvaluator.encode_text_from_tokens` | `R@1 0.19 → 0.32` |
-| Pair only whole-clip captions (`start = end = 0`) with the full motion; sub-clip captions describe a portion and would otherwise be paired with the wrong motion. | `sanity_eval._load_pretagged_text_lookup(whole_clip_only=True)` | ~4% of captions filtered |
-| Prep generates mirrored `M`-prefixed clips (upstream `swap_left_right`: L/R joint-index swap). HumanML3D's test split is 4384 clips (half regular, half mirrored); without the mirrors we evaluate on half the data and R@k undershoots. | `stage_pack` | *being verified* |
-
-Diagnostic that pins our 263-D output bit-equal to upstream's `process_file`
-(per-block max |Δ| ≈ 1e-6, position round-trip ≈ 0 on the canonical body
-`000021`): `scripts/diagnose_h3d_conversion.py` (run inside the container).
-
-### Sanity_eval verdicts to clear before training
-
-| Metric           | Paper GT | Threshold |
-|------------------|----------|-----------|
-| `diversity_real` | 9.503    | within ±1.5 |
-| `R@3`            | 0.797    | within ±0.10 |
-| `MM-Dist`        | 2.974    | within ±1.0 |
-| `FID(real, real)`| 0.002    | < 0.5 (sample-noise floor on 2110 clips) |
-
-To verify:
-
-```bash
-rm external/data/humanml3d_packed/humanml3d.zip
-sbatch slurm/prep_data.sbatch                   # ~10 min CPU (raw-pose stage is cached)
-# decode/eval sanity on real data via the unified eval script:
-EVAL_SPLIT=test MAX_CLIPS=512 GUIDANCE_SCALES='[6.5]' \
-  OVERRIDES='+eval.evaluator=real' sbatch slurm/rmg_eval.sbatch
-```
-
-### Once sanity passes
-
-The existing `rmg-base` checkpoint was trained on L/R-confused data and must
-be discarded. Re-train from scratch (`sbatch slurm/rmg_train.sbatch`, ~3.5d).
-
----
-
-## Adding a new method
-
-Workflow we'll all follow:
-
-1. **Open a feature branch** named `<method>/<short-desc>`, e.g.
-   `momask/vq-stage1`. Don't push to `main`.
-2. **Code lives under your package**: `src/<method>/`. Keep it self-contained.
-   Pull shared code from `src/common/` (or `rmg` until the common/ extraction
-   lands); don't reach into another method's internals.
-3. **Configs under `src/<method>/configs/`**, hydra-composable. Mirror rmg's
-   `configs/train.yaml` top-level pattern.
-4. **Entry points under `src/<method>/scripts/`** (`train.py`, `evaluate.py`, …),
-   hydra-decorated; run as `python -m <method>.scripts.train`.
-5. **Sbatch under `slurm/`**. Copy the unified `rmg_train.sbatch` /
-   `rmg_eval.sbatch` / `rmg_viz.sbatch` as templates — same partition + QoS +
-   image conventions, everything configurable via env + `OVERRIDES`.
-6. **Tests under `tests/test_<method>_*.py`**. Use `RandomGuoEvaluator` (in
-   `rmg.eval`) for CI-friendly tests that don't need the upstream checkpoint.
-7. **PR into `main`** with a one-paragraph description; another teammate
-   reviews. Until we have a CI runner, the reviewer runs `pytest` locally
-   before merging.
-
-### Shared changes
-
-If your method needs a new dataloader mode, a new metric, a new text encoder,
-etc. — **add it to `rmg/` and import from there**, don't fork the file into
-your package. Coordinate the change (one PR, all three of us reading it).
 
 ---
 
 ## Common pitfalls
 
 - **`weights_only=False`** is required when loading our packed `.pt` blobs
-  (they're a `dict[str, Tensor | list[str]]`, which torch ≥2.6 rejects under
-  strict mode). Safe because we produce these files ourselves.
-- **`nn.MultiheadAttention` doesn't always dispatch to flash/SDPA.**
-  For speed-critical paths use `F.scaled_dot_product_attention` directly.
-- **`wandb_mode=offline` by default**; cluster egress isn't always available.
-  Override with `WANDB_MODE=online sbatch ...` when you've confirmed.
-- **Don't `pip install` inside an sbatch.** Rebuild the container instead;
-  see `containers/BUILD.md`.
-- **`mirror_augment=True` is train-only.** Always pass `False` for eval splits
-  — our dataset class respects this when `split != "train"` but be explicit.
+  (`dict[str, Tensor | list[str]]`, which torch ≥2.6 rejects under strict mode).
+  Safe because we produce these files ourselves.
+- **`nn.MultiheadAttention` doesn't always dispatch to flash/SDPA.** For
+  speed-critical paths use `F.scaled_dot_product_attention` directly.
+- **`WANDB_MODE=offline` by default**; cluster egress isn't always available.
+  Override with `WANDB_MODE=online sbatch ...` once confirmed.
+- **Don't `pip install` inside an sbatch** — rebuild the container instead.
+- **`mirror_augment=True` is train-only.** Pass `False` for eval splits (the
+  dataset respects this when `split != "train"`, but be explicit).
 - **HumanML3D L/R variable naming is swapped** (`l_hip, r_hip, sdr_r, sdr_l =
-  [2, 1, 17, 16]` — `l_hip` holds index 2 which is the R_Hip). If you write
-  any new code that touches these, copy upstream's variable names verbatim
-  and keep them confined.
-
----
-
-## Contact / process
-
-- **Pipeline / data / shared infra changes**: ping the team channel before
-  merging. We don't want to push two prep changes that both touch the packed
-  dataset on the same day.
-- **Method-internal changes** (model architecture, hyperparams, etc.): merge
-  freely on your branch + PR.
-- **Cluster outages / quota issues**: post to the channel; whoever's free
-  triages.
+  [2, 1, 17, 16]` — `l_hip` holds index 2, the R_Hip). If you touch these, copy
+  upstream's variable names verbatim and keep them confined.

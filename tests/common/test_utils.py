@@ -11,7 +11,7 @@ import pytest
 import torch
 from torch import nn
 
-from rmg.utils import (
+from common.utils import (
     EMA,
     Logger,
     LoggerConfig,

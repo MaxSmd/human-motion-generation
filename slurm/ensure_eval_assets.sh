@@ -10,7 +10,7 @@
 # does the heavy submodule clone + checkpoint placement.
 #
 # Used two ways:
-#   - run by slurm/rmg_eval.sbatch on startup (auto-setup, host side)
+#   - run by slurm/rmg/eval.sbatch on startup (auto-setup, host side)
 #   - by hand if the first-time clone needs a network/memory-capable node:
 #       REPO=$PWD sbatch --partition=data --time=00:30:00 \
 #           --wrap 'bash slurm/ensure_eval_assets.sh'

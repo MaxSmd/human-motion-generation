@@ -20,7 +20,7 @@ from rmg.flow import RiemannianEulerSampler, SamplerCfg, WrappedGaussianPrior
 from rmg.models import DiTConfig, Qwen3EmbeddingEncoder, RandomTextEncoder, RMGDiT
 from rmg.models.text_encoder import TextEncoder
 from rmg.representation import Skeleton, build_representation
-from rmg.utils import EMA, load_checkpoint
+from common.utils import EMA, load_checkpoint
 
 from . import config as cfgmod
 

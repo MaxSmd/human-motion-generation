@@ -35,7 +35,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from rmg.data import HumanML3DDataset, collate
-from rmg.eval import (
+from common.eval import (
     RandomGuoEvaluator,
     RealGuoEvaluator,
     diversity,
@@ -63,7 +63,7 @@ from rmg.representation import (
     decode,
     tplusr_to_h3d_features_with_quats,
 )
-from rmg.utils import EMA, load_checkpoint, set_seed
+from common.utils import EMA, load_checkpoint, set_seed
 
 
 # ---------------------------------------------------------------------------

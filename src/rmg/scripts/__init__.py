@@ -1,1 +1,1 @@
-"""rmg entrypoints (train / evaluate / sanity_eval / visualize / plotting)."""
+"""rmg entrypoints: train / evaluate / visualize."""

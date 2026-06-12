@@ -8,13 +8,13 @@
 #SBATCH --output=slurm/logs/rmg-eval-%j.out
 #SBATCH --error=slurm/logs/rmg-eval-%j.err
 #
-# Unified, fully-configurable EVAL job. Like rmg_train.sbatch: every knob is an
+# Unified, fully-configurable EVAL job. Like rmg/train.sbatch: every knob is an
 # env var + OVERRIDES for arbitrary extra Hydra args. RUN_NAME is honoured (so
 # the app can locate + pull the metrics this run writes under RUNS_ROOT/RUN_NAME).
 #
 #   CKPT=/path/to/latest.pt MODEL_PRESET=dit_base PRESET=rmg_base \
 #   EVAL_SPLIT=test MAX_CLIPS=256 GUIDANCE_SCALES='[6.5]' RUN_NAME=eval-myrun \
-#       sbatch slurm/rmg_eval.sbatch
+#       sbatch slurm/rmg/eval.sbatch
 
 set -euo pipefail
 mkdir -p slurm/logs

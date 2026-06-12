@@ -12,8 +12,8 @@
 # all other knobs are env vars; OVERRIDES appends arbitrary extra Hydra args.
 # Renders GIF (+ .npy joints) under RUNS_ROOT/RUN_NAME/viz/ which the app pulls.
 #
-#   MODE=clip CLIPS=000021,000019 sbatch slurm/rmg_viz.sbatch
-#   MODE=prompt CKPT=/path PROMPTS='a person walks|a person sits' sbatch slurm/rmg_viz.sbatch
+#   MODE=clip CLIPS=000021,000019 sbatch slurm/rmg/viz.sbatch
+#   MODE=prompt CKPT=/path PROMPTS='a person walks|a person sits' sbatch slurm/rmg/viz.sbatch
 
 set -euo pipefail
 mkdir -p slurm/logs

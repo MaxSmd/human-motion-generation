@@ -25,7 +25,7 @@ from .squeue import resolve_run_dir
 
 JOB_PREFIX = "rmgui"
 
-SCRIPTS = {"viz": "rmg_viz.sbatch", "train": "rmg_train.sbatch", "eval": "rmg_eval.sbatch"}
+SCRIPTS = {"viz": "rmg/viz.sbatch", "train": "rmg/train.sbatch", "eval": "rmg/eval.sbatch"}
 
 
 def _run_name(kind: str, tag: str = "") -> str:
