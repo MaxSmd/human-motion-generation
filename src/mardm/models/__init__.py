@@ -1,6 +1,12 @@
-"""MARDM model components — placeholder.
+"""MARDM model components.
 
-Keep tensors on (B, T, D) layout to match the rest of the repo. Reuse
-`rmg.models.text_encoder.Qwen3EmbeddingEncoder` for text conditioning so all
-three methods use the same text representation.
+Reuse `rmg.models.text_encoder.Qwen3EmbeddingEncoder` for text conditioning so
+all three methods share the same text representation; pass its per-caption
+feature tensor into `MARDM` as `cond`.
 """
+
+from .autoencoder import AE, AEConfig
+from .diffmlps import DiffMLPs
+from .mardm import MARDM, MARDMConfig
+
+__all__ = ["AE", "AEConfig", "DiffMLPs", "MARDM", "MARDMConfig"]

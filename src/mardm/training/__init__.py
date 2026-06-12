@@ -1,5 +1,17 @@
-"""MARDM training loop — placeholder.
+"""MARDM training helpers (masking schedule + utilities)."""
 
-Mirror `src/rmg/scripts/train.py` for the run-loop shape:
-checkpointing (`rmg.utils.save_checkpoint`), EMA, Hydra config, AMP, resume.
-"""
+from .masking import (
+    cosine_schedule,
+    eval_decorator,
+    get_mask_subset_prob,
+    lengths_to_mask,
+    uniform,
+)
+
+__all__ = [
+    "cosine_schedule",
+    "eval_decorator",
+    "get_mask_subset_prob",
+    "lengths_to_mask",
+    "uniform",
+]

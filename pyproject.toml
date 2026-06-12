@@ -21,6 +21,7 @@ dependencies = [
     "accelerate",
     "huggingface_hub",
     "wandb",
+    "torchdiffeq",
 ]
 
 [project.optional-dependencies]

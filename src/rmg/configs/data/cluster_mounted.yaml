@@ -29,3 +29,8 @@ num_workers: 8              # local SSD on compute node — can push harder
 pin_memory: true
 persistent_workers: true
 prefetch_factor: 4
+# Preload encoded features into RAM at dataset init (~600 MB unmirrored / 1.2 GB
+# mirrored). Eliminates the per-step encode pipeline (zip read + FK + quat math)
+# which otherwise pins GPU util at ~5%. Default off to keep tests and tiny smoke
+# runs fast; flip on for full-dataset training.
+preload: false

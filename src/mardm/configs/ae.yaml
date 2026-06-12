@@ -1,0 +1,82 @@
+# @package _global_
+# MARDM AutoEncoder (stage 1) — scaled-down "mini" config.
+#
+# Compose with a data layout (defaults to the in-repo submodule):
+#   python scripts/train_mardm_ae.py
+#   python scripts/train_mardm_ae.py +data=cluster_mounted
+#
+# Local smoke (CPU, tiny):
+#   python scripts/train_mardm_ae.py data.root=/tmp/synth \
+#       train.max_steps=20 train.micro_batch_size=4 train.grad_accum=1 \
+#       train.precision=fp32 logging.use_wandb=false logging.use_tensorboard=false
+
+defaults:
+  - /data: local_submodule
+  - _self_
+
+run_name: mardm-ae-${now:%Y%m%d-%H%M%S}
+output_dir: ${oc.env:RMG_RUNS_DIR,${hydra:runtime.cwd}/runs}/${run_name}
+seed: 0
+deterministic: false
+
+# Train-split essential mean/std (run scripts/compute_mardm_stats.py first).
+stats_path: ${oc.env:MARDM_STATS,${hydra:runtime.cwd}/external/data/mardm_essential_stats.pt}
+
+# Deterministic dataset subset (overfit smoke / debugging). subset_frac takes
+# precedence over limit_clips. Both apply to train AND val splits.
+subset_frac: null               # e.g. 0.005 -> 0.5% of clips per split
+limit_clips: null               # e.g. 64    -> first 64 clips per split
+
+# AutoEncoder (paper-faithful: latent 512, ×4 downsample, 3-layer ResNet).
+ae:
+  input_width: 67
+  output_emb_width: 512
+  down_t: 2
+  stride_t: 2
+  width: 512
+  depth: 3
+  dilation_growth_rate: 3
+  activation: relu
+
+train:
+  window_size: 64               # fixed-window AE training (upstream uses 64)
+  max_steps: 300_000            # paper-faithful (upstream ≈ epoch=50 × ~6k iters)
+  micro_batch_size: 64
+  grad_accum: 4                 # effective BS = 256 (paper)
+  aux_loss_joints: 1.0          # weight on the local-position term (upstream default)
+
+  optimizer:
+    name: AdamW
+    lr: 2.0e-4
+    betas: [0.9, 0.99]
+    weight_decay: 1.0e-5
+    eps: 1.0e-8
+
+  scheduler:
+    warmup_ratio: 0.04
+    min_lr_ratio: 0.0
+
+  grad_clip: 0.5
+  ema:
+    decay: 0.9999
+  precision: auto               # auto | bf16 | fp16 | fp32 — auto picks bf16 on Ampere+, fp16 on Turing
+
+  log_every: 50
+  ckpt_every: 5_000
+  val_every: 2_000
+  val_batches: 16               # val batches per evaluation
+
+logging:
+  use_wandb: true
+  use_tensorboard: true
+  wandb_project: mardm
+  wandb_mode: ${oc.env:WANDB_MODE,offline}
+  wandb_entity: ${oc.env:WANDB_ENTITY,null}
+
+hydra:
+  run:
+    dir: ${output_dir}
+  sweep:
+    dir: ${output_dir}
+  job:
+    chdir: false
