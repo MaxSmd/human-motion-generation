@@ -18,7 +18,7 @@ from torch.utils.data import DataLoader
 from mardm.data import EssentialDataset, collate
 from mardm.models import AE, AEConfig
 from mardm.representation import ESSENTIAL_DIM, compute_essential_stats
-from rmg.representation import NUM_JOINTS
+from shared.geometry import NUM_JOINTS
 
 
 def _offsets() -> torch.Tensor:

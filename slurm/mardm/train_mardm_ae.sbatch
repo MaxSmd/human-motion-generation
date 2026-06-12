@@ -65,7 +65,7 @@ enroot start \
         set -euo pipefail
         cd ${REPO}
         pip install -e . --no-deps --quiet
-        [ -f '${MARDM_STATS}' ] || python scripts/compute_mardm_stats.py \\
+        [ -f '${MARDM_STATS}' ] || python -m mardm.scripts.compute_mardm_stats \\
             --data-root '${DATA_ROOT}' --out '${MARDM_STATS}'
-        python scripts/train_mardm_ae.py run_name='${RUN_NAME}' data.preload=true
+        python -m mardm.scripts.train_mardm_ae run_name='${RUN_NAME}' data.preload=true
     "

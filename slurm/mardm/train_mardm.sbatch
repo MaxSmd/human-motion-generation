@@ -11,7 +11,7 @@
 #
 # MARDM stage 2: train the masked-autoregressive generation branch (mardm_mini)
 # on the frozen AE's latents. Requires a stage-1 AE checkpoint whose `ae:` block
-# matches configs/mardm/gen.yaml (paper-faithful AE by default).
+# matches src/mardm/configs/gen.yaml (paper-faithful AE by default).
 #
 # Defaults to the 24g partition (matches the documented 1-day-per-model GPU
 # budget). 12g works equivalently — the train script auto-picks fp16 on
@@ -38,7 +38,7 @@ if [ -z "${AE_CKPT:-}" ]; then
     shift
 fi
 EXTRA_HYDRA_ARGS="$*"
-CONFIG_NAME="${CONFIG_NAME:-mardm/gen}"
+CONFIG_NAME="${CONFIG_NAME:-gen}"
 if [ -n "${SLURM_SUBMIT_DIR:-}" ]; then
     REPO="${REPO:-${SLURM_SUBMIT_DIR}}"
 else
@@ -74,9 +74,9 @@ enroot start \
         set -euo pipefail
         cd ${REPO}
         pip install -e . --no-deps --quiet
-        [ -f '${MARDM_STATS}' ] || python scripts/compute_mardm_stats.py \\
+        [ -f '${MARDM_STATS}' ] || python -m mardm.scripts.compute_mardm_stats \\
             --data-root '${DATA_ROOT}' --out '${MARDM_STATS}'
-        python scripts/train_mardm.py \\
+        python -m mardm.scripts.train_mardm \\
             --config-name=${CONFIG_NAME} \\
             ae_checkpoint='${AE_CKPT}' \\
             text_encoder.type=qwen3 \\

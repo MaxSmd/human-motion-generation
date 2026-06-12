@@ -16,6 +16,12 @@ from .humanml3d_io import (
     tplusr_to_joints,
 )
 from .humanml3d_upstream import tplusr_to_h3d_features_upstream
+from .quaternions import (
+    make_continuous,
+    normalize_quaternions,
+    quat_continuity,
+    quat_to_upper_hemisphere,
+)
 from .skeleton import (
     FOOT_CONTACT_IDX,
     FOOT_LEFT_IDX,
@@ -41,4 +47,5 @@ __all__ = [
     "quat_inv", "quat_between", "quat_to_cont6d",
     "tplusr_to_joints", "tplusr_to_h3d_features_with_quats", "recover_joints_from_ric",
     "tplusr_to_h3d_features_upstream",
+    "quat_continuity", "quat_to_upper_hemisphere", "make_continuous", "normalize_quaternions",
 ]

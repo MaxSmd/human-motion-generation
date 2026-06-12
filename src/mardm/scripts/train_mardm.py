@@ -33,8 +33,8 @@ from torch.utils.data import DataLoader
 
 from mardm.data import EssentialDataset, collate
 from mardm.models import AE, MARDM, AEConfig, MARDMConfig
-from rmg.models import Qwen3EmbeddingEncoder, RandomTextEncoder, TextEncoder
-from rmg.utils import (
+from shared.text import Qwen3EmbeddingEncoder, RandomTextEncoder, TextEncoder
+from shared.utils import (
     EMA,
     Logger,
     LoggerConfig,
@@ -149,7 +149,7 @@ def _validate(ae, mardm, text_encoder, loader, device, max_batches: int) -> floa
     return total / max(n, 1)
 
 
-@hydra.main(config_path="../configs", config_name="mardm/gen", version_base=None)
+@hydra.main(config_path="../configs", config_name="gen", version_base=None)
 def main(cfg: DictConfig) -> None:
     output_dir = Path(cfg.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)

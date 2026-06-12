@@ -33,8 +33,8 @@ from tqdm import tqdm
 
 from mardm.models import AE, MARDM, AEConfig, MARDMConfig
 from mardm.tasks import generate_h3d_features
-from rmg.data import HumanML3DDataset, collate
-from rmg.eval import (
+from shared.data import HumanML3DDataset, collate
+from shared.eval import (
     RandomGuoEvaluator,
     RealGuoEvaluator,
     diversity,
@@ -43,14 +43,13 @@ from rmg.eval import (
     multimodality,
     r_precision,
 )
-from rmg.models import Qwen3EmbeddingEncoder, RandomTextEncoder
-from rmg.representation import (
-    Skeleton,
-    TRRepresentation,
-    decode,
-    tplusr_to_h3d_features_with_quats,
-)
-from rmg.utils import EMA, load_checkpoint, set_seed
+from shared.geometry import Skeleton, tplusr_to_h3d_features_with_quats
+from shared.text import Qwen3EmbeddingEncoder, RandomTextEncoder
+from shared.utils import EMA, load_checkpoint, set_seed
+
+# rmg's T+R reference pipeline builds the ground-truth 263-D features the Guo
+# evaluator compares against — an intentional cross-method dependency in eval.
+from rmg.representation import TRRepresentation, decode
 
 
 def _load_stats(path: str | Path) -> tuple[torch.Tensor, torch.Tensor]:
@@ -115,7 +114,7 @@ def _pad_stack(feats: list[torch.Tensor], dim: int = 263) -> torch.Tensor:
     return out
 
 
-@hydra.main(config_path="../configs", config_name="mardm/gen", version_base=None)
+@hydra.main(config_path="../configs", config_name="gen", version_base=None)
 def main(cfg: DictConfig) -> None:
     eval_cfg = OmegaConf.create({
         "checkpoint": "???",

@@ -11,12 +11,15 @@ stays uniform):
 
 Shared, model-agnostic code lives in `shared` (don't duplicate it):
 
-    from shared.eval   import RealGuoEvaluator, fid, r_precision, ...
-    from shared.utils  import EMA, Logger, save_checkpoint, ...
+    from shared.eval     import RealGuoEvaluator, fid, r_precision, ...
+    from shared.utils    import EMA, Logger, save_checkpoint, ...
+    from shared.text     import Qwen3EmbeddingEncoder, RandomTextEncoder
+    from shared.geometry import Skeleton, make_continuous, normalize_quaternions
+    from shared.data     import HumanML3DDataset, collate
 
-The HumanML3D loader (`rmg.data`) bakes in rmg's representation; build your
-own dataset/encoding for this model, reusing `shared` where you can
+The shared `HumanML3DDataset` is representation-agnostic: pass it this model's
+`EssentialRepresentation` (see `mardm.data`) to get 67-D essential features.
 
 If you find yourself copy-pasting from `rmg/`, lift the shared piece into
-`rmg/` (or a new `common/` package) instead.
+`shared/` instead.
 """

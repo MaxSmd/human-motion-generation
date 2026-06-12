@@ -27,14 +27,16 @@ import torch
 from tqdm import tqdm
 
 from mardm.representation import ESSENTIAL_DIM, encode_essential, essential_to_h3d
-from rmg.data.humanml3d import HumanML3DDataset
-from rmg.eval import RealGuoEvaluator, fid
-from rmg.representation import (
+from shared.eval import RealGuoEvaluator, fid
+from shared.geometry import (
     Skeleton,
     make_continuous,
     normalize_quaternions,
     tplusr_to_h3d_features_with_quats,
 )
+
+# Diagnostic uses rmg's default T+R representation as the reference loader.
+from rmg.data import HumanML3DDataset
 
 
 def _pad_stack(feats):

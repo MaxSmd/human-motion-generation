@@ -13,7 +13,7 @@ from pathlib import Path
 import torch
 from torch import Tensor
 
-from rmg.representation.skeleton import Skeleton
+from shared.geometry import Skeleton
 
 from ..models import AE, MARDM
 from ..representation import essential_to_h3d

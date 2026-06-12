@@ -28,7 +28,7 @@ from torch.utils.data import DataLoader
 
 from mardm.data import EssentialDataset, collate
 from mardm.models import AE, AEConfig
-from rmg.utils import (
+from shared.utils import (
     EMA,
     Logger,
     LoggerConfig,
@@ -153,7 +153,7 @@ def _validate(
     return tot_total / denom, tot_feat / denom, tot_joint / denom
 
 
-@hydra.main(config_path="../configs", config_name="mardm/ae", version_base=None)
+@hydra.main(config_path="../configs", config_name="ae", version_base=None)
 def main(cfg: DictConfig) -> None:
     output_dir = Path(cfg.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)

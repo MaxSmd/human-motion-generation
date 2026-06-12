@@ -21,8 +21,7 @@ from mardm.representation import (
     encode_essential,
     essential_to_h3d,
 )
-from rmg.representation.humanml3d_io import tplusr_to_h3d_features_with_quats
-from rmg.representation.skeleton import NUM_JOINTS, Skeleton
+from shared.geometry import NUM_JOINTS, Skeleton, tplusr_to_h3d_features_with_quats
 
 
 def _synthetic_skeleton() -> Skeleton:
@@ -64,7 +63,7 @@ def test_essential_is_263_prefix():
 
 
 def test_recover_root_height_matches_feature():
-    from rmg.representation.humanml3d_io import recover_joints_from_ric
+    from shared.geometry import recover_joints_from_ric
 
     skel = _synthetic_skeleton()
     translation, quats = _synthetic_motion()

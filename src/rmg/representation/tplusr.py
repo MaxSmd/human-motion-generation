@@ -15,7 +15,7 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor
 
-from ..manifolds.sphere import quat_continuity, quat_to_upper_hemisphere
+from shared.geometry.quaternions import make_continuous, normalize_quaternions  # noqa: F401
 from shared.geometry.skeleton import NUM_JOINTS
 
 
@@ -55,22 +55,6 @@ def decode(flat: Tensor, num_joints: int = NUM_JOINTS) -> TPlusR:
     return TPlusR(translation=translation, quaternions=quats)
 
 
-def normalize_quaternions(quats: Tensor) -> Tensor:
-    """Project to unit-norm and pick the upper hemisphere (q_w ≥ 0)."""
-    q = quats / quats.norm(dim=-1, keepdim=True).clamp_min(1e-8)
-    return quat_to_upper_hemisphere(q)
-
-
-def make_continuous(quats: Tensor, time_dim: int) -> Tensor:
-    """Resolve sign ambiguity along the temporal axis.
-
-    HumanML3D / AMASS frames are independent quaternions; per-frame upper-
-    hemisphere restriction can flip the sign between adjacent frames even
-    though they represent close rotations. This pass propagates sign so that
-    `<q_t, q_{t+1}> ≥ 0` everywhere — important for the geodesic path used
-    during flow-matching to actually be the *short* arc.
-
-    Operates per-joint independently along `time_dim`.
-    """
-    # quat_continuity does the loop; broadcast-friendly.
-    return quat_continuity(quats, dim=time_dim)
+# `normalize_quaternions` / `make_continuous` were lifted to
+# `shared.geometry.quaternions` (model-agnostic, reused by mardm). Re-exported
+# here so `rmg.representation` and `rmg.data` imports keep working unchanged.

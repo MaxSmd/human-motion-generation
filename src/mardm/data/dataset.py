@@ -1,7 +1,7 @@
 """MARDM dataset: 67-D essential features over the packed HumanML3D dataset.
 
-Thin wrapper around `rmg`'s `HumanML3DDataset` — reusing its zip reader, split
-handling, random crop, and mirror augmentation — but with an
+Thin wrapper around the shared `HumanML3DDataset` (`shared.data`) — reusing its
+zip reader, split handling, random crop, and mirror augmentation — but with an
 `EssentialRepresentation` so each sample's `x1` is the 67-D essential feature.
 
 Two roles, selected by `window_size`:
@@ -11,7 +11,7 @@ Two roles, selected by `window_size`:
 
 The 67-D feature is one frame shorter than the input clip (velocity diff), so
 this wrapper reports `length` from the *encoded* feature rather than the raw
-frame count — fixing the off-by-one that `rmg`'s dataset would otherwise carry.
+frame count — fixing the off-by-one that the shared dataset would otherwise carry.
 
 Set `preload=True` to encode every retained clip once at init and serve from a
 RAM cache afterwards. Removes the encode pipeline (zip read + torch.load + quat
@@ -32,8 +32,8 @@ import torch
 from torch import Tensor
 from torch.utils.data import Dataset
 
-from rmg.data.humanml3d import HumanML3DDataset, HumanML3DSample, mirror_motion
-from rmg.representation import make_continuous, normalize_quaternions
+from shared.data import HumanML3DDataset, HumanML3DSample, mirror_motion
+from shared.geometry import make_continuous, normalize_quaternions
 
 from ..representation import EssentialRepresentation
 
