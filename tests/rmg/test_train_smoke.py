@@ -88,7 +88,7 @@ def _build_tiny_setup(tmp_path: Path):
     model = RMGDiT(dit_cfg)
     enc = RandomTextEncoder(text_dim=dit_cfg.text_dim)
 
-    ds = HumanML3DDataset(data_dir, split="train", min_seq_len=8, max_seq_len=24, mirror_augment=False)
+    ds = HumanML3DDataset(data_dir, split="train", min_seq_len=8, max_seq_len=24)
     loader = DataLoader(ds, batch_size=2, collate_fn=collate, num_workers=0, drop_last=True)
 
     trainer = FlowMatchingTrainer(M, prior, FlowMatchingTrainerCfg(cfg_dropout=0.0))

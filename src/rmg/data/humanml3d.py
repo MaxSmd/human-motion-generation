@@ -20,7 +20,6 @@ from torch import Tensor
 from torch.utils.data import Dataset
 
 from shared.data import (
-    mirror_motion,
     pad_batch,
     random_crop,
     read_clip,
@@ -51,7 +50,6 @@ class HumanML3DDataset(Dataset):
         split: str = "train",
         max_seq_len: int = 196,
         min_seq_len: int = 40,
-        mirror_augment: bool = True,
         zip_name: str = "humanml3d.zip",
         splits_name: str = "splits.json",
         offsets_name: str = "target_offsets.pt",
@@ -67,7 +65,6 @@ class HumanML3DDataset(Dataset):
         self.split = split
         self.max_seq_len = max_seq_len
         self.min_seq_len = min_seq_len
-        self.mirror_augment = mirror_augment and (split == "train")
 
         if not self.zip_path.exists():
             raise FileNotFoundError(
@@ -116,8 +113,11 @@ class HumanML3DDataset(Dataset):
             # Should not happen for a well-built dataset; skip to the next index.
             return self.__getitem__((idx + 1) % len(self))
 
-        if self.mirror_augment and random.random() < 0.5:
-            translation, quats = mirror_motion(translation, quats)
+        # No runtime mirror augmentation: the packed dataset already ships every
+        # clip in both orientations — `<id>` (regular) and `M<id>` (left/right
+        # mirrored motion paired with upstream's correctly L/R-swapped caption) —
+        # both listed in the splits. A runtime flip here would re-mirror the
+        # motion *without* swapping the text, corrupting left/right alignment.
 
         # Normalize + temporal sign continuity, then encode via the chosen
         # Representation (T+R main result; T+P / T+R+P for ablations).

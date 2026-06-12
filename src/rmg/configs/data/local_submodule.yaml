@@ -16,7 +16,9 @@ offsets_name: target_offsets.pt
 fps: 20
 max_seq_len: 196            # HumanML3D upper bound (~10 s @ 20 fps)
 min_seq_len: 40
-mirror_augment: true        # left/right swap augmentation (paper-standard)
+# Mirror augmentation is baked into the packed dataset (every clip ships as
+# `<id>` + left/right-mirrored `M<id>` with a swapped caption), so there is no
+# runtime mirror knob.
 
 # Fast-iteration subset (train split only). Set <1.0 to train on a fixed
 # random subset of training clips, deterministic by seed. Mirror pairs are

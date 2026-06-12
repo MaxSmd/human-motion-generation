@@ -122,9 +122,9 @@ def test_dataset_round_trip(tmp_path: Path) -> None:
 
 def test_dataset_split_filtering(tmp_path: Path) -> None:
     _build_synthetic_dataset(tmp_path)
-    ds_train = HumanML3DDataset(tmp_path, split="train", min_seq_len=10, mirror_augment=False)
-    ds_val = HumanML3DDataset(tmp_path, split="val", min_seq_len=10, mirror_augment=False)
-    ds_test = HumanML3DDataset(tmp_path, split="test", min_seq_len=10, mirror_augment=False)
+    ds_train = HumanML3DDataset(tmp_path, split="train", min_seq_len=10)
+    ds_val = HumanML3DDataset(tmp_path, split="val", min_seq_len=10)
+    ds_test = HumanML3DDataset(tmp_path, split="test", min_seq_len=10)
     assert len(ds_train) == 2
     assert len(ds_val) == 1
     assert len(ds_test) == 1
@@ -134,14 +134,14 @@ def test_dataset_split_filtering(tmp_path: Path) -> None:
 
 def test_dataset_max_seq_len_random_crop(tmp_path: Path) -> None:
     _build_synthetic_dataset(tmp_path)
-    ds = HumanML3DDataset(tmp_path, split="train", min_seq_len=10, max_seq_len=20, mirror_augment=False)
+    ds = HumanML3DDataset(tmp_path, split="train", min_seq_len=10, max_seq_len=20)
     sample = ds[1]  # clip 000001 has T=70 — must be cropped to 20
     assert sample.length == 20
 
 
 def test_collate_pads_and_masks(tmp_path: Path) -> None:
     _build_synthetic_dataset(tmp_path)
-    ds = HumanML3DDataset(tmp_path, split="train", min_seq_len=10, max_seq_len=200, mirror_augment=False)
+    ds = HumanML3DDataset(tmp_path, split="train", min_seq_len=10, max_seq_len=200)
     loader = DataLoader(ds, batch_size=2, collate_fn=collate, num_workers=0)
     batch = next(iter(loader))
     B = batch.x1.shape[0]
@@ -155,26 +155,3 @@ def test_collate_pads_and_masks(tmp_path: Path) -> None:
             assert not batch.mask[i, L:].any()
             assert (batch.x1[i, L:] == 0).all()
     assert isinstance(batch.texts[0], str)
-
-
-def test_dataset_mirror_augmentation_changes_some_samples(tmp_path: Path) -> None:
-    """Mirror is applied with p=0.5 on the train split; over many samples the
-    mean translation x-coordinate should be near zero (cancellation), not
-    biased."""
-    _build_synthetic_dataset(tmp_path)
-    ds = HumanML3DDataset(tmp_path, split="train", min_seq_len=10, mirror_augment=True)
-    # collect translations from many independent draws
-    xs_with_aug = []
-    for _ in range(40):
-        s = ds[0]
-        xs_with_aug.append(decode(s.x1).translation[..., 0].mean().item())
-
-    ds_off = HumanML3DDataset(tmp_path, split="train", min_seq_len=10, mirror_augment=False)
-    s_ref = ds_off[0]
-    ref_x = decode(s_ref.x1).translation[..., 0].mean().item()
-
-    # Some draws should be flipped (negative) — with p=0.5 over 40 trials the
-    # probability of seeing zero flips is ~9.1e-13.
-    has_flip = any(abs(x - (-ref_x)) < 1e-6 for x in xs_with_aug)
-    has_orig = any(abs(x - ref_x) < 1e-6 for x in xs_with_aug)
-    assert has_flip and has_orig

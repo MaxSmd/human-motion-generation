@@ -78,7 +78,6 @@ def _build_dataset(cfg: DictConfig, split: str, representation: Representation) 
         split=split,
         max_seq_len=cfg.data.max_seq_len,
         min_seq_len=cfg.data.min_seq_len,
-        mirror_augment=cfg.data.mirror_augment,
         zip_name=cfg.data.zip_name,
         splits_name=cfg.data.splits_name,
         offsets_name=cfg.data.offsets_name,
