@@ -48,6 +48,8 @@ class RiemannianEulerSampler:
         dtype: torch.dtype | None = None,
         return_trajectory: bool = False,
         generator: torch.Generator | None = None,
+        fixed_values: Tensor | None = None,
+        fixed_mask: Tensor | None = None,
     ) -> Tensor | tuple[Tensor, Tensor]:
         """Generate (B, T, D) samples by integrating the learned velocity from t=0 to t=1.
 
@@ -56,6 +58,11 @@ class RiemannianEulerSampler:
             cond: per-batch conditioning (e.g. text features). None = unconditional.
             guidance_scale: CFG scale ω. None ⇒ uses cfg.guidance_scale.
             num_steps: ODE steps. None ⇒ uses cfg.num_steps.
+            fixed_values / fixed_mask: optional sampling-time constraints. Where
+                `fixed_mask` is True, the state is overwritten with `fixed_values`
+                after every ODE step (inpainting). For RMG these pin whole S^3
+                joint factors to a target quaternion — see `flow.constraints`.
+                Both broadcast against (B, T, D) (e.g. pass (T, D)).
         """
         B, T = shape
         n = num_steps if num_steps is not None else self.cfg.num_steps
@@ -63,8 +70,18 @@ class RiemannianEulerSampler:
         device = device or (cond.device if isinstance(cond, Tensor) else torch.device("cpu"))
         dtype = dtype or (cond.dtype if isinstance(cond, Tensor) else torch.float32)
 
+        # Optional inpainting constraints: move to device/dtype once, then apply
+        # at init and after every step so the model conditions on the pinned
+        # coordinates from the very first integration step.
+        apply_constraint = fixed_mask is not None and fixed_values is not None
+        if apply_constraint:
+            fixed_mask = fixed_mask.to(device=device)
+            fixed_values = fixed_values.to(device=device, dtype=dtype)
+
         # initial state x_0 ~ prior
         x = self.prior.sample((B, T), device=device, dtype=dtype, generator=generator)
+        if apply_constraint:
+            x = torch.where(fixed_mask, fixed_values, x)
 
         # Full ODE integration over [0, 1]. The closed-form CFM target γ̇(t)
         # is finite at both endpoints, so no eps-offset is needed at inference
@@ -92,6 +109,9 @@ class RiemannianEulerSampler:
 
             v_t = self.manifold.project_tangent(x, v_amb)
             x = self.manifold.exp(x, h * v_t)
+
+            if apply_constraint:
+                x = torch.where(fixed_mask, fixed_values, x)
 
             if traj is not None:
                 traj.append(x)

@@ -45,6 +45,9 @@ SUBSET_SEED="${SUBSET_SEED:-0}"
 N_COMPARE="${N_COMPARE:-4}"
 RUN_NAME="${RUN_NAME:-rmg-viz-${MODE}-${SLURM_JOB_ID:-$(date +%Y%m%d-%H%M%S)}}"
 OVERRIDES="${OVERRIDES:-}"
+# Optional sampling-time joint-angle constraints (JSON list); mode=prompt only.
+# Read by visualize.py as RMG_CONSTRAINTS inside the container.
+CONSTRAINTS="${CONSTRAINTS:-}"
 
 if { [ "$MODE" = "prompt" ] || [ "$MODE" = "compare" ]; } && [ -z "$CKPT" ]; then
     echo "ERROR: MODE=${MODE} requires CKPT=/path/to/checkpoint.pt"; exit 1
@@ -60,6 +63,7 @@ enroot start \
     --env "HF_HOME=${HF_CACHE}" \
     --env "MGEN_RUNS_DIR=${RUNS_ROOT}" \
     --env "PYTHONPATH=${REPO}/src" \
+    --env "RMG_CONSTRAINTS=${CONSTRAINTS}" \
     "${IMAGE}" \
     bash -lc "
         set -euo pipefail

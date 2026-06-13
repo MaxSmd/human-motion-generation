@@ -29,6 +29,7 @@ async function req(path, opts) {
 export const api = {
   health: () => req("/health"),
   checkpoints: () => req("/checkpoints"),
+  metaJoints: () => req("/meta/joints"),
 
   generate: (body) =>
     req("/generate", {

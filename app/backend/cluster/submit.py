@@ -16,6 +16,7 @@ frontend shows it as a dry-run preview before any launch.
 
 from __future__ import annotations
 
+import json
 import secrets
 import shlex
 
@@ -87,6 +88,10 @@ def build_viz(params: dict) -> tuple[str, dict[str, str], str, str]:
             "GUIDANCE": str(params.get("guidance", 6.5)),
             "USE_EMA": "true" if params.get("use_ema", True) else "false",
         })
+        # Sampling-time joint-angle pins: JSON forwarded to visualize.py as the
+        # RMG_CONSTRAINTS env var (avoids quoting a structured list through Hydra).
+        if params.get("constraints"):
+            env["CONSTRAINTS"] = json.dumps(params["constraints"])
     elif mode == "compare":
         env.update({
             "CKPT": params["checkpoint"], "MODEL_PRESET": params.get("model_preset", "dit_base"),

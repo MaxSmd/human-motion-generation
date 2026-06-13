@@ -149,6 +149,8 @@ class VizRequest(BaseModel):
     run: str | None = None
     samples_file: str | None = None
     steps: list[int] | None = None   # mode=samples: render only these steps
+    # mode=prompt: sampling-time joint-angle pins forwarded to visualize.py.
+    constraints: list[dict] | None = None
 
 
 class TrainRequest(BaseModel):

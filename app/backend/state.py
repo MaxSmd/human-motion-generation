@@ -20,7 +20,14 @@ import torch
 from omegaconf import DictConfig
 from torch import Tensor
 
-from rmg.flow import RiemannianEulerSampler, SamplerCfg, WrappedGaussianPrior
+from rmg.flow import (
+    CONSTRAINABLE_REPRESENTATIONS,
+    RiemannianEulerSampler,
+    SamplerCfg,
+    WrappedGaussianPrior,
+    build_inpaint_targets,
+    parse_constraints,
+)
 from rmg.models import DiTConfig, Qwen3EmbeddingEncoder, RandomTextEncoder, RMGDiT
 from rmg.models.text_encoder import TextEncoder
 from shared.geometry import Skeleton
@@ -153,10 +160,34 @@ class AppState:
         guidance: float,
         num_steps: int,
         seed: int,
+        constraints: list[dict] | None = None,
     ) -> Tensor:
-        """Text → (T, ambient_dim) sample on the manifold."""
+        """Text → (T, ambient_dim) sample on the manifold.
+
+        `constraints` (optional) are sampling-time joint-angle pins; they only
+        apply to the quaternion-on-S^3 representations (tr/trp). Each pinned
+        joint's quaternion is held at its axis-angle target across the requested
+        frame window via `RiemannianEulerSampler`'s inpainting hook.
+        """
         gen = torch.Generator(device=self.device).manual_seed(int(seed))
         cond = bundle.text_encoder.encode([text], device=self.device)
+
+        fixed_values = fixed_mask = None
+        if constraints:
+            if bundle.representation_name not in CONSTRAINABLE_REPRESENTATIONS:
+                raise NotImplementedError(
+                    f"joint-angle constraints need a quaternion representation "
+                    f"({CONSTRAINABLE_REPRESENTATIONS}); this run uses "
+                    f"{bundle.representation_name!r}."
+                )
+            num_joints = int(bundle.cfg.representation.get("num_joints", 22))
+            fixed_values, fixed_mask = build_inpaint_targets(
+                parse_constraints(constraints),
+                num_frames=int(num_frames),
+                num_joints=num_joints,
+                device=self.device,
+            )
+
         samples = bundle.sampler.sample(
             bundle.model,
             shape=(1, int(num_frames)),
@@ -165,6 +196,8 @@ class AppState:
             num_steps=int(num_steps),
             device=self.device,
             generator=gen,
+            fixed_values=fixed_values,
+            fixed_mask=fixed_mask,
         )
         return samples[0]
 

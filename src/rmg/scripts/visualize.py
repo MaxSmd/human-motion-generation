@@ -52,9 +52,12 @@ matplotlib.use("Agg")
 REPO = Path(__file__).resolve().parent.parent
 
 from rmg.flow import (  # noqa: E402
+    CONSTRAINABLE_REPRESENTATIONS,
     RiemannianEulerSampler,
     SamplerCfg,
     WrappedGaussianPrior,
+    build_inpaint_targets,
+    parse_constraints,
 )
 from rmg.models import (  # noqa: E402
     DiTConfig,
@@ -233,6 +236,26 @@ def _build_sampler(cfg, representation, skel) -> RiemannianEulerSampler:
     )
 
 
+def _load_constraint_specs(cfg) -> list[dict]:
+    """Sampling-time joint-angle constraints for mode=prompt. Read from a JSON
+    env var `RMG_CONSTRAINTS` (set by the app's viz-job submitter — avoids
+    quoting a structured list through the Hydra CLI), falling back to
+    `cfg.viz.constraints` if present. Returns [] when none."""
+    import json
+    import os
+
+    raw = os.environ.get("RMG_CONSTRAINTS", "").strip()
+    if raw:
+        try:
+            specs = json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"RMG_CONSTRAINTS is not valid JSON: {e}") from e
+    else:
+        specs = cfg.viz.get("constraints") if "constraints" in cfg.viz else None
+        specs = OmegaConf.to_container(specs, resolve=True) if specs is not None else []
+    return list(specs or [])
+
+
 @hydra.main(config_path="../configs", config_name="train", version_base=None)
 def main(cfg: DictConfig) -> None:
     viz_cfg = OmegaConf.create({
@@ -368,15 +391,33 @@ def main(cfg: DictConfig) -> None:
         sampler = _build_sampler(cfg, representation, skel)
 
         prompts = [p.strip() for p in str(cfg.viz.prompts).split("|") if p.strip()]
+        n_frames = int(cfg.viz.num_frames)
         print(f"[visualize] sampling {len(prompts)} prompts "
-              f"({int(cfg.viz.num_frames)} frames, "
+              f"({n_frames} frames, "
               f"{int(cfg.viz.num_sample_steps)} ODE steps, "
               f"ω={float(cfg.viz.guidance_scale)})", flush=True)
+
+        # Optional sampling-time joint-angle pins (broadcast across the batch).
+        fixed_values = fixed_mask = None
+        specs = _load_constraint_specs(cfg)
+        if specs:
+            if cfg.representation.name not in CONSTRAINABLE_REPRESENTATIONS:
+                raise ValueError(
+                    f"joint-angle constraints need a quaternion representation "
+                    f"({CONSTRAINABLE_REPRESENTATIONS}); got {cfg.representation.name!r}."
+                )
+            fixed_values, fixed_mask = build_inpaint_targets(
+                parse_constraints(specs), num_frames=n_frames,
+                num_joints=int(representation.num_joints), device=device,
+            )
+            print(f"[visualize] applying {len(specs)} joint-angle constraint(s): "
+                  f"{specs}", flush=True)
 
         with torch.no_grad():
             cond = text_encoder.encode(prompts, device=device)
             samples = sampler.sample(
-                model, shape=(len(prompts), int(cfg.viz.num_frames)), cond=cond,
+                model, shape=(len(prompts), n_frames), cond=cond,
+                fixed_values=fixed_values, fixed_mask=fixed_mask,
             )                                                # (B, T, ambient_dim)
 
         manifest = []

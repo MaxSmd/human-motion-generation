@@ -59,6 +59,14 @@ app.include_router(cluster_router)
 # --------------------------------------------------------------------------- models
 
 
+class JointConstraint(BaseModel):
+    joint: str                     # SMPL joint name, e.g. "L_Elbow"
+    axis: str = "z"                # "x" | "y" | "z" (hinge axis)
+    angle_deg: float = 90.0
+    frame_start: int = 0
+    frame_end: int | None = None   # None / -1 ⇒ to the last frame
+
+
 class GenerateRequest(BaseModel):
     text: str
     guidance: float = 6.5
@@ -67,6 +75,8 @@ class GenerateRequest(BaseModel):
     num_frames: int = 100
     checkpoint: str | None = None  # explicit ckpt path; None → server default
     fmt: str = "auto"              # auto | mp4 | gif
+    # Sampling-time joint-angle pins (RMG tr/trp representations only).
+    constraints: list[JointConstraint] | None = None
 
 
 # --------------------------------------------------------------------------- health
@@ -110,6 +120,25 @@ def checkpoints() -> list[dict]:
     return out
 
 
+# --------------------------------------------------------------------------- meta
+
+
+@app.get("/meta/joints")
+def meta_joints() -> dict:
+    """SMPL joint names + kinematic parents for the constraint editor. Static
+    (the 22-joint HumanML3D skeleton), so the frontend can build its picker."""
+    from shared.geometry.skeleton import JOINT_NAMES, PARENTS, ROOT_JOINT
+
+    return {
+        "joints": [
+            {"index": i, "name": n, "parent": PARENTS[i]}
+            for i, n in enumerate(JOINT_NAMES)
+        ],
+        "root": ROOT_JOINT,
+        "axes": ["x", "y", "z"],
+    }
+
+
 # --------------------------------------------------------------------------- generate
 
 
@@ -126,9 +155,11 @@ def generate(req: GenerateRequest) -> dict:
             "checkpoints/ down from the cluster into RMG_RUNS_DIR.",
         )
 
+    constraints = [c.model_dump() for c in req.constraints] if req.constraints else None
     key = cache.cache_key(
         kind="generate", text=req.text, guidance=req.guidance, num_steps=req.num_steps,
         seed=req.seed, num_frames=req.num_frames, ckpt=ckpt_path, fmt=resolve_format(req.fmt),
+        constraints=constraints,
     )
     hit = cache.find_cached(key)
     if hit:
@@ -143,6 +174,7 @@ def generate(req: GenerateRequest) -> dict:
         sample = st.generate(
             bundle, text=req.text, num_frames=req.num_frames,
             guidance=req.guidance, num_steps=req.num_steps, seed=req.seed,
+            constraints=constraints,
         )
         joints = decode_to_joints(sample, st.skeleton(), bundle.representation_name)
     except FileNotFoundError as e:

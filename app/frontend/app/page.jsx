@@ -54,6 +54,9 @@ export default function Home() {
     return () => clearInterval(t);
   }, [clusterMode]);
 
+  // Constraints (fixed joint angles) is implemented for RMG; still roadmap-only
+  // for MARDM, so show the V2 badge when MARDM is the active model.
+  const constraintsSoon = model === "mardm";
   const tabs = useMemo(() => {
     if (clusterMode)
       return [
@@ -62,15 +65,15 @@ export default function Home() {
         { id: "visualize", n: "02", label: "Visualize", sub: "GT · compare · samples" },
         { id: "model", n: "03", label: "Model", sub: "train · eval" },
         { id: "analysis", n: "04", label: "Analysis", sub: "metrics · plots" },
-        { id: "constraints", n: "05", label: "Constraints", sub: "pins · limits", soon: true },
+        { id: "constraints", n: "05", label: "Constraints", sub: "fixed joint angles", soon: constraintsSoon },
       ];
     return [
       { id: "generate", n: "01", label: "Generate", sub: "text → motion" },
       { id: "gt", n: "02", label: "Ground Truth", sub: "dataset browser" },
       { id: "training", n: "03", label: "Training", sub: "sample scrubber" },
-      { id: "constraints", n: "04", label: "Constraints", sub: "pins · limits", soon: true },
+      { id: "constraints", n: "04", label: "Constraints", sub: "fixed joint angles", soon: constraintsSoon },
     ];
-  }, [clusterMode]);
+  }, [clusterMode, constraintsSoon]);
 
   const [tab, setTab] = useState("generate");
   useEffect(() => {
@@ -126,7 +129,12 @@ export default function Home() {
         {tab === "analysis" && <AnalysisTab />}
         {tab === "gt" && <GTBrowserTab clusterMode={clusterMode} />}
         {tab === "training" && <TrainingViewerTab clusterMode={clusterMode} />}
-        {tab === "constraints" && <ConstraintsTab />}
+        {tab === "constraints" &&
+          (model === "mardm" ? (
+            <MardmUnsupported feature="Constraints" />
+          ) : (
+            <ConstraintsTab checkpoints={checkpoints} clusterMode={clusterMode} />
+          ))}
       </div>
     </>
   );
