@@ -168,6 +168,8 @@ class MaskedMotionTransformer(_TransformerBackbone):
                     next_unknown[i, remask] = True
             tokens[next_unknown] = self.mask_token_id
             unknown = next_unknown
+        if mask is not None:
+            tokens = torch.where(mask, tokens, torch.zeros_like(tokens))
         return tokens
 
 

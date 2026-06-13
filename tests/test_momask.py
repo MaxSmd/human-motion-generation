@@ -135,6 +135,13 @@ def test_momask_models_tokenize_predict_and_decode() -> None:
     assert tokens.shape == (B, 3, T)
     assert recon.shape == x.shape
 
+    ragged_mask = mask.clone()
+    ragged_mask[0, -3:] = False
+    ragged_base = masked.generate(cond=cond, seq_len=T, steps=2, guidance_scale=1.0, mask=ragged_mask)
+    assert (ragged_base[0, -3:] == 0).all()
+    ragged_tokens = residual.generate_residuals(ragged_base, cond=cond, guidance_scale=1.0, mask=ragged_mask)
+    assert ragged_tokens.shape == (B, 3, T)
+
 
 def test_generation_helper_returns_h3d_features() -> None:
     torch.manual_seed(1)
