@@ -22,12 +22,13 @@ matching ProductManifold([Euclidean(3)] + [Sphere(3)]·J).
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import torch
 from torch import Tensor
 
-from shared.geometry.quaternions import quat_to_upper_hemisphere
+from shared.geometry.quaternions import normalize_quaternions, quat_to_upper_hemisphere
 from shared.geometry.skeleton import JOINT_NAMES, NUM_JOINTS
 
 # Layout constants for the quaternion-on-S^3 representations (tr / trp). The
@@ -90,6 +91,14 @@ def _resolve_axis(axis: str | tuple[float, float, float] | Tensor):
     return axis
 
 
+def _clamp_window(frame_start: int, frame_end: int | None, num_frames: int) -> tuple[int, int]:
+    """Half-open [start, end) frame window; end None/≤0 ⇒ to the last frame."""
+    start = max(0, min(int(frame_start), num_frames))
+    end = num_frames if frame_end in (None,) or int(frame_end) <= 0 else int(frame_end)
+    end = max(start, min(end, num_frames))
+    return start, end
+
+
 @dataclass
 class JointAngleConstraint:
     """Pin one joint to a fixed axis-angle rotation over a frame range.
@@ -122,10 +131,7 @@ class JointAngleConstraint:
         return axis_angle_to_quat(_resolve_axis(self.axis), math.radians(self.angle_deg), dtype=dtype)
 
     def frame_window(self, num_frames: int) -> tuple[int, int]:
-        start = max(0, min(int(self.frame_start), num_frames))
-        end = num_frames if self.frame_end in (None,) or int(self.frame_end) <= 0 else int(self.frame_end)
-        end = max(start, min(end, num_frames))
-        return start, end
+        return _clamp_window(self.frame_start, self.frame_end, num_frames)
 
 
 def build_inpaint_targets(
@@ -162,3 +168,168 @@ def parse_constraints(specs: list[dict] | None) -> list[JointAngleConstraint]:
     if not specs:
         return []
     return [JointAngleConstraint.from_dict(s) for s in specs]
+
+
+# ---------------------------------------------------------------------------
+# Joint RANGES (hinge limits) via swing-twist decomposition + projection.
+#
+# A range can't be inpainted (there's no single value to fix). Instead we
+# *project* each constrained joint onto its feasible per-joint submanifold after
+# every ODE step. A hinge (e.g. a knee) decomposes its quaternion about the
+# hinge axis â into q = q_swing · q_twist (twist = rotation about â, swing =
+# the off-axis remainder). We clamp the signed twist angle into [min, max] and
+# shrink the swing toward identity (anatomically: the joint only flexes about â),
+# then recompose and renormalize onto S^3. This is an exact hard limit, unlike a
+# soft barrier penalty.
+# ---------------------------------------------------------------------------
+
+_QUAT_CONJ = torch.tensor([1.0, -1.0, -1.0, -1.0])
+
+
+def _quat_mul(q1: Tensor, q2: Tensor) -> Tensor:
+    """Hamilton product of [w, x, y, z] quaternions (broadcasting over leading dims)."""
+    w1, x1, y1, z1 = q1.unbind(-1)
+    w2, x2, y2, z2 = q2.unbind(-1)
+    return torch.stack(
+        [
+            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+            w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+            w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+            w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+        ],
+        dim=-1,
+    )
+
+
+def swing_twist_clamp(
+    q: Tensor,
+    axis: Tensor,
+    min_rad: float,
+    max_rad: float,
+    swing_max_rad: float = 0.0,
+    eps: float = 1e-6,
+) -> Tensor:
+    """Project unit quaternions `q` (..., 4) onto a hinge about `axis` (3,).
+
+    Decompose q = swing · twist (twist about `axis`), clamp the signed twist
+    angle into [min_rad, max_rad], clamp the swing angle into [0, swing_max_rad]
+    (swing_max_rad=0 ⇒ pure hinge — swing forced to identity), recompose and
+    renormalize. Returns unit quaternions on the upper hemisphere.
+    """
+    conj = _QUAT_CONJ.to(device=q.device, dtype=q.dtype)
+    q = normalize_quaternions(q)  # unit + w ≥ 0
+    a = axis.to(device=q.device, dtype=q.dtype)
+
+    w = q[..., :1]
+    v = q[..., 1:]
+    d = (v * a).sum(dim=-1, keepdim=True)  # axial component of the vector part
+
+    # original twist (rotation about a), normalized; norm² = w² + d²
+    twist_norm = torch.sqrt(w * w + d * d).clamp_min(eps)
+    twist_orig = torch.cat([w, d * a], dim=-1) / twist_norm
+
+    # swing = q · twist⁻¹, lifted to the upper hemisphere
+    swing = quat_to_upper_hemisphere(_quat_mul(q, twist_orig * conj))
+
+    # signed twist angle θ = 2·atan2(d, w) ∈ (−π, π]; clamp into the range
+    theta = 2.0 * torch.atan2(d, w)
+    th = 0.5 * theta.clamp(min_rad, max_rad)
+    twist_new = torch.cat([torch.cos(th), torch.sin(th) * a], dim=-1)
+
+    # swing angle φ ∈ [0, π]; shrink toward identity, keeping the swing axis
+    sw = swing[..., :1]
+    sv = swing[..., 1:]
+    sv_norm = torch.linalg.vector_norm(sv, dim=-1, keepdim=True)
+    phi = 2.0 * torch.atan2(sv_norm, sw)
+    ph = 0.5 * phi.clamp(0.0, swing_max_rad)
+    axis_s = sv / sv_norm.clamp_min(eps)
+    swing_new = torch.cat([torch.cos(ph), torch.sin(ph) * axis_s], dim=-1)
+    identity = torch.zeros_like(swing_new)
+    identity[..., 0] = 1.0
+    swing_new = torch.where(sv_norm < eps, identity, swing_new)
+
+    q_new = normalize_quaternions(_quat_mul(swing_new, twist_new))
+    # Degenerate twist (≈180° about a perpendicular axis): leave q untouched.
+    return torch.where(twist_norm < 1e-4, q, q_new)
+
+
+@dataclass
+class HingeConstraint:
+    """Clamp one joint to a hinge: twist angle ∈ [min_deg, max_deg] about `axis`,
+    swing shrunk toward identity. Applied as a projection each sampling step.
+
+    Attributes:
+        joint: joint index (0..J-1) or SMPL name (e.g. "L_Knee").
+        axis: "x"/"y"/"z" or a 3-vector — the hinge (twist) axis.
+        min_deg / max_deg: allowed signed twist range (e.g. 0..10 for a knee).
+        swing_max_deg: max off-axis swing (0 = pure hinge).
+        frame_start / frame_end: half-open window; end None/≤0 ⇒ to last frame.
+    """
+
+    joint: int | str
+    axis: str | tuple[float, float, float] | Tensor = "x"
+    min_deg: float = 0.0
+    max_deg: float = 10.0
+    swing_max_deg: float = 0.0
+    frame_start: int = 0
+    frame_end: int | None = None
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "HingeConstraint":
+        return cls(
+            joint=d["joint"],
+            axis=d.get("axis", "x"),
+            min_deg=float(d.get("min_deg", 0.0)),
+            max_deg=float(d.get("max_deg", 10.0)),
+            swing_max_deg=float(d.get("swing_max_deg", 0.0)),
+            frame_start=int(d.get("frame_start", 0)),
+            frame_end=(int(d["frame_end"]) if d.get("frame_end") not in (None, "", -1) else None),
+        )
+
+    def frame_window(self, num_frames: int) -> tuple[int, int]:
+        return _clamp_window(self.frame_start, self.frame_end, num_frames)
+
+
+def parse_ranges(specs: list[dict] | None) -> list[HingeConstraint]:
+    """Parse a list of JSON-ish hinge-limit dicts into objects."""
+    if not specs:
+        return []
+    return [HingeConstraint.from_dict(s) for s in specs]
+
+
+def build_hinge_projector(
+    constraints: list[HingeConstraint],
+    num_frames: int,
+    num_joints: int = NUM_JOINTS,
+    device: torch.device | None = None,
+    dtype: torch.dtype = torch.float32,
+) -> Callable[[Tensor], Tensor] | None:
+    """Compile hinge limits into a projector `fn(x) -> x` for the sampler.
+
+    The returned callable clamps each constrained joint's quaternion (over its
+    frame window) onto its hinge submanifold; pass it as
+    `RiemannianEulerSampler.sample(project_fn=...)`. Returns None when there are
+    no effective constraints (so the sampler skips the hook entirely).
+    """
+    specs = []
+    for c in constraints:
+        j = _resolve_joint(c.joint)
+        lo, hi = 3 + 4 * j, 3 + 4 * (j + 1)
+        fs, fe = c.frame_window(num_frames)
+        if fe <= fs:
+            continue
+        a = torch.as_tensor(_resolve_axis(c.axis), dtype=dtype, device=device)
+        a = a / torch.linalg.vector_norm(a).clamp_min(1e-8)
+        specs.append((lo, hi, fs, fe, a,
+                      math.radians(c.min_deg), math.radians(c.max_deg),
+                      math.radians(c.swing_max_deg)))
+    if not specs:
+        return None
+
+    def project(x: Tensor) -> Tensor:
+        x = x.clone()
+        for lo, hi, fs, fe, a, mn, mx, sm in specs:
+            x[:, fs:fe, lo:hi] = swing_twist_clamp(x[:, fs:fe, lo:hi], a, mn, mx, sm)
+        return x
+
+    return project

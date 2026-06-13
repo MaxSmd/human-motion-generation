@@ -25,8 +25,10 @@ from rmg.flow import (
     RiemannianEulerSampler,
     SamplerCfg,
     WrappedGaussianPrior,
+    build_hinge_projector,
     build_inpaint_targets,
     parse_constraints,
+    parse_ranges,
 )
 from rmg.models import DiTConfig, Qwen3EmbeddingEncoder, RandomTextEncoder, RMGDiT
 from rmg.models.text_encoder import TextEncoder
@@ -161,32 +163,40 @@ class AppState:
         num_steps: int,
         seed: int,
         constraints: list[dict] | None = None,
+        ranges: list[dict] | None = None,
     ) -> Tensor:
         """Text → (T, ambient_dim) sample on the manifold.
 
-        `constraints` (optional) are sampling-time joint-angle pins; they only
-        apply to the quaternion-on-S^3 representations (tr/trp). Each pinned
-        joint's quaternion is held at its axis-angle target across the requested
-        frame window via `RiemannianEulerSampler`'s inpainting hook.
+        `constraints` are sampling-time joint-angle pins (inpainting); `ranges`
+        are hinge limits (swing-twist projection each ODE step). Both apply only
+        to the quaternion-on-S^3 representations (tr/trp).
         """
         gen = torch.Generator(device=self.device).manual_seed(int(seed))
         cond = bundle.text_encoder.encode([text], device=self.device)
 
-        fixed_values = fixed_mask = None
-        if constraints:
+        fixed_values = fixed_mask = project_fn = None
+        if constraints or ranges:
             if bundle.representation_name not in CONSTRAINABLE_REPRESENTATIONS:
                 raise NotImplementedError(
-                    f"joint-angle constraints need a quaternion representation "
+                    f"joint constraints need a quaternion representation "
                     f"({CONSTRAINABLE_REPRESENTATIONS}); this run uses "
                     f"{bundle.representation_name!r}."
                 )
             num_joints = int(bundle.cfg.representation.get("num_joints", 22))
-            fixed_values, fixed_mask = build_inpaint_targets(
-                parse_constraints(constraints),
-                num_frames=int(num_frames),
-                num_joints=num_joints,
-                device=self.device,
-            )
+            if constraints:
+                fixed_values, fixed_mask = build_inpaint_targets(
+                    parse_constraints(constraints),
+                    num_frames=int(num_frames),
+                    num_joints=num_joints,
+                    device=self.device,
+                )
+            if ranges:
+                project_fn = build_hinge_projector(
+                    parse_ranges(ranges),
+                    num_frames=int(num_frames),
+                    num_joints=num_joints,
+                    device=self.device,
+                )
 
         samples = bundle.sampler.sample(
             bundle.model,
@@ -198,6 +208,7 @@ class AppState:
             generator=gen,
             fixed_values=fixed_values,
             fixed_mask=fixed_mask,
+            project_fn=project_fn,
         )
         return samples[0]
 

@@ -9,6 +9,7 @@ to combining post-projection.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import torch
@@ -50,6 +51,7 @@ class RiemannianEulerSampler:
         generator: torch.Generator | None = None,
         fixed_values: Tensor | None = None,
         fixed_mask: Tensor | None = None,
+        project_fn: Callable[[Tensor], Tensor] | None = None,
     ) -> Tensor | tuple[Tensor, Tensor]:
         """Generate (B, T, D) samples by integrating the learned velocity from t=0 to t=1.
 
@@ -63,6 +65,11 @@ class RiemannianEulerSampler:
                 after every ODE step (inpainting). For RMG these pin whole S^3
                 joint factors to a target quaternion — see `flow.constraints`.
                 Both broadcast against (B, T, D) (e.g. pass (T, D)).
+            project_fn: optional projection applied to the state after every ODE
+                step — projects each constrained joint onto its feasible
+                submanifold (e.g. hinge limits via swing-twist clamping). See
+                `flow.constraints.build_hinge_projector`. Composes with the
+                inpainting hook (applied after it).
         """
         B, T = shape
         n = num_steps if num_steps is not None else self.cfg.num_steps
@@ -112,6 +119,8 @@ class RiemannianEulerSampler:
 
             if apply_constraint:
                 x = torch.where(fixed_mask, fixed_values, x)
+            if project_fn is not None:
+                x = project_fn(x)
 
             if traj is not None:
                 traj.append(x)

@@ -34,6 +34,16 @@ const newPin = () => ({
   frame_start: 0,
   frame_end: "", // "" ⇒ to last frame
 });
+let _rid = 0;
+const newRange = () => ({
+  id: ++_rid,
+  joint: "L_Knee",
+  axis: "x",
+  min_deg: 0,
+  max_deg: 10,
+  frame_start: 0,
+  frame_end: "",
+});
 
 function pinsToConstraints(pins) {
   return pins.map((p) => ({
@@ -45,22 +55,37 @@ function pinsToConstraints(pins) {
   }));
 }
 
+function rangesToPayload(ranges) {
+  return ranges.map((r) => ({
+    joint: r.joint,
+    axis: r.axis,
+    min_deg: Number(r.min_deg),
+    max_deg: Number(r.max_deg),
+    frame_start: Number(r.frame_start) || 0,
+    frame_end: r.frame_end === "" ? null : Number(r.frame_end),
+  }));
+}
+
 export default function ConstraintsTab({ checkpoints = [], clusterMode }) {
   const [joints, setJoints] = useState(FALLBACK_JOINTS);
   const [pins, setPins] = useState([newPin()]);
+  const [ranges, setRanges] = useState([]);
 
   useEffect(() => {
     api.metaJoints().then((m) => m?.joints?.length && setJoints(m.joints)).catch(() => {});
   }, []);
 
   const editor = (
-    <ConstraintEditor joints={joints} pins={pins} setPins={setPins} />
+    <>
+      <ConstraintEditor joints={joints} pins={pins} setPins={setPins} />
+      <RangeEditor joints={joints} ranges={ranges} setRanges={setRanges} />
+    </>
   );
 
   return clusterMode ? (
-    <ConstraintsCluster checkpoints={checkpoints} pins={pins} editor={editor} />
+    <ConstraintsCluster checkpoints={checkpoints} pins={pins} ranges={ranges} editor={editor} />
   ) : (
-    <ConstraintsLocal checkpoints={checkpoints} pins={pins} editor={editor} />
+    <ConstraintsLocal checkpoints={checkpoints} pins={pins} ranges={ranges} editor={editor} />
   );
 }
 
@@ -169,9 +194,104 @@ function ConstraintEditor({ joints, pins, setPins }) {
   );
 }
 
+// ───────────────────────────────────────────── the hinge-limit editor
+
+function RangeEditor({ joints, ranges, setRanges }) {
+  const set = (id, k, v) => setRanges((rs) => rs.map((r) => (r.id === id ? { ...r, [k]: v } : r)));
+  const remove = (id) => setRanges((rs) => rs.filter((r) => r.id !== id));
+
+  return (
+    <section className="surface mt-5 p-5">
+      <div className="flex items-center justify-between">
+        <div>
+          <div className="display text-base font-bold text-white">Joint ranges (hinge limits)</div>
+          <div className="label mt-0.5">swing-twist projection · twist ∈ [min, max] about the hinge axis</div>
+        </div>
+        <button
+          type="button"
+          onClick={() => setRanges((rs) => [...rs, newRange()])}
+          className="rounded-md border border-[var(--signal)]/50 bg-[var(--signal-dim)] px-3 py-1.5 text-[12px] font-semibold text-[var(--signal)] hover:bg-[var(--signal)]/15"
+        >
+          + add limit
+        </button>
+      </div>
+
+      {ranges.length === 0 && (
+        <p className="label mt-4">No hinge limits. Add one to clamp a joint (e.g. knee ≤ 10°) without fixing it.</p>
+      )}
+
+      <div className="mt-4 space-y-3">
+        {ranges.map((r, i) => (
+          <div key={r.id} className="rounded-lg border border-[var(--hairline)] p-3">
+            <div className="mb-2.5 flex items-center justify-between">
+              <span className="font-mono text-[11px] tracking-widest text-[var(--muted)]">
+                LIMIT {String(i + 1).padStart(2, "0")}
+              </span>
+              <button type="button" onClick={() => remove(r.id)}
+                className="text-[11px] text-[var(--muted)] hover:text-[var(--amber)]">
+                remove
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <label className="block">
+                <span className="label mb-1 block">joint</span>
+                <select className="field-input" value={r.joint} onChange={(e) => set(r.id, "joint", e.target.value)}>
+                  {joints.map((j) => <option key={j.name} value={j.name}>{j.name}</option>)}
+                </select>
+              </label>
+              <div>
+                <span className="label mb-1 block">hinge axis</span>
+                <div className="flex gap-1.5">
+                  {AXES.map((a) => (
+                    <button key={a} type="button" onClick={() => set(r.id, "axis", a)}
+                      className={`flex-1 rounded-md border px-2 py-1.5 font-mono text-[12px] uppercase transition ${
+                        r.axis === a
+                          ? "border-[var(--signal)] bg-[var(--signal-dim)] text-[var(--signal)]"
+                          : "border-[var(--hairline)] text-[var(--muted)] hover:text-slate-200"
+                      }`}>
+                      {a}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-3 grid grid-cols-2 gap-3">
+              <label className="block">
+                <span className="label mb-1 block">min angle (°)</span>
+                <input type="number" className="field-input" value={r.min_deg}
+                  onChange={(e) => set(r.id, "min_deg", e.target.value)} />
+              </label>
+              <label className="block">
+                <span className="label mb-1 block">max angle (°)</span>
+                <input type="number" className="field-input" value={r.max_deg}
+                  onChange={(e) => set(r.id, "max_deg", e.target.value)} />
+              </label>
+            </div>
+
+            <div className="mt-3 grid grid-cols-2 gap-3">
+              <label className="block">
+                <span className="label mb-1 block">frame start</span>
+                <input type="number" min="0" className="field-input" value={r.frame_start}
+                  onChange={(e) => set(r.id, "frame_start", e.target.value)} />
+              </label>
+              <label className="block">
+                <span className="label mb-1 block">frame end <span className="text-[var(--muted)]">(blank = all)</span></span>
+                <input type="number" min="0" className="field-input" placeholder="all" value={r.frame_end}
+                  onChange={(e) => set(r.id, "frame_end", e.target.value)} />
+              </label>
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 // ───────────────────────────────────────────── local mode (in-process /generate)
 
-function ConstraintsLocal({ checkpoints, pins, editor }) {
+function ConstraintsLocal({ checkpoints, pins, ranges, editor }) {
   const [form, setForm] = useState({ text: "a person waves their right hand", guidance: 6.5, num_steps: 50, seed: 0, num_frames: 100 });
   const [checkpoint, setCheckpoint] = useState("");
   const [result, setResult] = useState(null);
@@ -183,7 +303,7 @@ function ConstraintsLocal({ checkpoints, pins, editor }) {
     e.preventDefault();
     setLoading(true); setError(null);
     try {
-      const body = { ...form, constraints: pinsToConstraints(pins) };
+      const body = { ...form, constraints: pinsToConstraints(pins), ranges: rangesToPayload(ranges) };
       if (checkpoint) body.checkpoint = checkpoint;
       const res = await api.generate(body);
       setResult({ ...res, caption: form.text });
@@ -224,7 +344,7 @@ function ConstraintsLocal({ checkpoints, pins, editor }) {
 
 // ───────────────────────────────────────────── cluster mode (mode=prompt viz job)
 
-function ConstraintsCluster({ pins, editor }) {
+function ConstraintsCluster({ pins, ranges, editor }) {
   const [form, setForm] = useState({ prompts: "a person waves their right hand", guidance: 6.5, num_steps: 50, num_frames: 100 });
   const [checkpoint, setCheckpoint] = useState("");
   const [presets, setPresets] = useState(null);
@@ -238,6 +358,7 @@ function ConstraintsCluster({ pins, editor }) {
       num_steps: form.num_steps, num_frames: form.num_frames,
       model_preset: presets?.model_preset, train_preset: presets?.train_preset,
       constraints: pinsToConstraints(pins),
+      ranges: rangesToPayload(ranges),
     });
   }
 

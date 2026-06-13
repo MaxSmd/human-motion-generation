@@ -56,8 +56,10 @@ from rmg.flow import (  # noqa: E402
     RiemannianEulerSampler,
     SamplerCfg,
     WrappedGaussianPrior,
+    build_hinge_projector,
     build_inpaint_targets,
     parse_constraints,
+    parse_ranges,
 )
 from rmg.models import (  # noqa: E402
     DiTConfig,
@@ -236,22 +238,22 @@ def _build_sampler(cfg, representation, skel) -> RiemannianEulerSampler:
     )
 
 
-def _load_constraint_specs(cfg) -> list[dict]:
-    """Sampling-time joint-angle constraints for mode=prompt. Read from a JSON
-    env var `RMG_CONSTRAINTS` (set by the app's viz-job submitter — avoids
-    quoting a structured list through the Hydra CLI), falling back to
-    `cfg.viz.constraints` if present. Returns [] when none."""
+def _load_specs(cfg, env_var: str, cfg_key: str) -> list[dict]:
+    """Sampling-time constraint specs for mode=prompt. Read from a JSON env var
+    (set by the app's viz-job submitter — avoids quoting a structured list
+    through the Hydra CLI), falling back to `cfg.viz.<cfg_key>`. Returns []
+    when none. Used for both fixed-angle constraints and hinge ranges."""
     import json
     import os
 
-    raw = os.environ.get("RMG_CONSTRAINTS", "").strip()
+    raw = os.environ.get(env_var, "").strip()
     if raw:
         try:
             specs = json.loads(raw)
         except json.JSONDecodeError as e:
-            raise ValueError(f"RMG_CONSTRAINTS is not valid JSON: {e}") from e
+            raise ValueError(f"{env_var} is not valid JSON: {e}") from e
     else:
-        specs = cfg.viz.get("constraints") if "constraints" in cfg.viz else None
+        specs = cfg.viz.get(cfg_key) if cfg_key in cfg.viz else None
         specs = OmegaConf.to_container(specs, resolve=True) if specs is not None else []
     return list(specs or [])
 
@@ -397,27 +399,32 @@ def main(cfg: DictConfig) -> None:
               f"{int(cfg.viz.num_sample_steps)} ODE steps, "
               f"ω={float(cfg.viz.guidance_scale)})", flush=True)
 
-        # Optional sampling-time joint-angle pins (broadcast across the batch).
-        fixed_values = fixed_mask = None
-        specs = _load_constraint_specs(cfg)
-        if specs:
+        # Optional sampling-time constraints (broadcast across the batch):
+        # fixed angles (inpainting) + hinge ranges (swing-twist projection).
+        fixed_values = fixed_mask = project_fn = None
+        c_specs = _load_specs(cfg, "RMG_CONSTRAINTS", "constraints")
+        r_specs = _load_specs(cfg, "RMG_RANGES", "ranges")
+        if c_specs or r_specs:
             if cfg.representation.name not in CONSTRAINABLE_REPRESENTATIONS:
                 raise ValueError(
-                    f"joint-angle constraints need a quaternion representation "
+                    f"joint constraints need a quaternion representation "
                     f"({CONSTRAINABLE_REPRESENTATIONS}); got {cfg.representation.name!r}."
                 )
-            fixed_values, fixed_mask = build_inpaint_targets(
-                parse_constraints(specs), num_frames=n_frames,
-                num_joints=int(representation.num_joints), device=device,
-            )
-            print(f"[visualize] applying {len(specs)} joint-angle constraint(s): "
-                  f"{specs}", flush=True)
+            nj = int(representation.num_joints)
+            if c_specs:
+                fixed_values, fixed_mask = build_inpaint_targets(
+                    parse_constraints(c_specs), num_frames=n_frames, num_joints=nj, device=device)
+                print(f"[visualize] applying {len(c_specs)} fixed-angle constraint(s): {c_specs}", flush=True)
+            if r_specs:
+                project_fn = build_hinge_projector(
+                    parse_ranges(r_specs), num_frames=n_frames, num_joints=nj, device=device)
+                print(f"[visualize] applying {len(r_specs)} hinge range(s): {r_specs}", flush=True)
 
         with torch.no_grad():
             cond = text_encoder.encode(prompts, device=device)
             samples = sampler.sample(
                 model, shape=(len(prompts), n_frames), cond=cond,
-                fixed_values=fixed_values, fixed_mask=fixed_mask,
+                fixed_values=fixed_values, fixed_mask=fixed_mask, project_fn=project_fn,
             )                                                # (B, T, ambient_dim)
 
         manifest = []

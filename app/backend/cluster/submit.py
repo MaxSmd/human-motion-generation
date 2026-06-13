@@ -88,10 +88,13 @@ def build_viz(params: dict) -> tuple[str, dict[str, str], str, str]:
             "GUIDANCE": str(params.get("guidance", 6.5)),
             "USE_EMA": "true" if params.get("use_ema", True) else "false",
         })
-        # Sampling-time joint-angle pins: JSON forwarded to visualize.py as the
-        # RMG_CONSTRAINTS env var (avoids quoting a structured list through Hydra).
+        # Sampling-time constraints: JSON forwarded to visualize.py as env vars
+        # (avoids quoting a structured list through the Hydra CLI). CONSTRAINTS =
+        # fixed angles, RANGES = hinge limits.
         if params.get("constraints"):
             env["CONSTRAINTS"] = json.dumps(params["constraints"])
+        if params.get("ranges"):
+            env["RANGES"] = json.dumps(params["ranges"])
     elif mode == "compare":
         env.update({
             "CKPT": params["checkpoint"], "MODEL_PRESET": params.get("model_preset", "dit_base"),

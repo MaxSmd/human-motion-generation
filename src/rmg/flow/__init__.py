@@ -1,9 +1,13 @@
 from .constraints import (
     CONSTRAINABLE_REPRESENTATIONS,
+    HingeConstraint,
     JointAngleConstraint,
     axis_angle_to_quat,
+    build_hinge_projector,
     build_inpaint_targets,
     parse_constraints,
+    parse_ranges,
+    swing_twist_clamp,
 )
 from .interpolation import FlowMatchingBatch, build_cfm_batch, sample_t
 from .prior import WrappedGaussianPrior, rest_pose_mu, rmg_manifold
@@ -27,4 +31,8 @@ __all__ = [
     "build_inpaint_targets",
     "parse_constraints",
     "CONSTRAINABLE_REPRESENTATIONS",
+    "HingeConstraint",
+    "swing_twist_clamp",
+    "build_hinge_projector",
+    "parse_ranges",
 ]

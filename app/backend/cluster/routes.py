@@ -149,8 +149,9 @@ class VizRequest(BaseModel):
     run: str | None = None
     samples_file: str | None = None
     steps: list[int] | None = None   # mode=samples: render only these steps
-    # mode=prompt: sampling-time joint-angle pins forwarded to visualize.py.
-    constraints: list[dict] | None = None
+    # mode=prompt: sampling-time constraints forwarded to visualize.py.
+    constraints: list[dict] | None = None   # fixed joint angles (inpaint)
+    ranges: list[dict] | None = None         # hinge limits (projection)
 
 
 class TrainRequest(BaseModel):
