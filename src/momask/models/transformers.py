@@ -176,13 +176,24 @@ class MaskedMotionTransformer(_TransformerBackbone):
 class ResidualTransformer(_TransformerBackbone):
     """Predicts residual-layer tokens from already generated lower layers."""
 
-    def __init__(self, cfg: TokenTransformerConfig | None = None, num_quantizers: int = 6) -> None:
+    def __init__(
+        self,
+        cfg: TokenTransformerConfig | None = None,
+        num_quantizers: int = 6,
+        separate_level_heads: bool = True,
+    ) -> None:
         cfg = cfg or TokenTransformerConfig()
         super().__init__(cfg)
         self.num_quantizers = num_quantizers
+        self.separate_level_heads = separate_level_heads
         self.token_embed = nn.Embedding(cfg.vocab_size, cfg.hidden_dim)
         self.level_embed = nn.Embedding(num_quantizers, cfg.hidden_dim)
-        self.to_logits = nn.Linear(cfg.hidden_dim, cfg.vocab_size)
+        if separate_level_heads:
+            self.to_logits = nn.ModuleList(
+                [nn.Linear(cfg.hidden_dim, cfg.vocab_size) for _ in range(num_quantizers)]
+            )
+        else:
+            self.to_logits = nn.Linear(cfg.hidden_dim, cfg.vocab_size)
 
     def forward(
         self,
@@ -203,6 +214,8 @@ class ResidualTransformer(_TransformerBackbone):
         h = self.token_embed(prev_tokens).sum(dim=1)
         h = h + self.level_embed(torch.full((B, T), target_level, device=prev_tokens.device, dtype=torch.long))
         h = self._encode(h, cond=cond, mask=mask, drop_cond_mask=drop_cond_mask)
+        if self.separate_level_heads:
+            return self.to_logits[target_level](h)
         return self.to_logits(h)
 
     def training_loss(
