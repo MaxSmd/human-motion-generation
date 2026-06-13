@@ -85,7 +85,7 @@ const KIND_META = {
 function Tile({ o }) {
   const k = KIND_META[o.kind];
   return (
-    <figure className="overflow-hidden rounded-lg border border-[var(--hairline)] bg-black">
+    <figure className="min-w-0 overflow-hidden rounded-lg border border-[var(--hairline)] bg-black">
       {o.media_url.toLowerCase().endsWith(".mp4") ? (
         <video src={mediaUrl(o.media_url)} className="w-full" controls autoPlay loop muted />
       ) : (
@@ -101,7 +101,7 @@ function Tile({ o }) {
           {o.clip_id && <span className="font-mono text-slate-300">{o.clip_id}</span>}
           {o.step != null && <span className="font-mono text-[var(--muted)]">step {o.step}</span>}
         </div>
-        <div className="text-[11px] leading-snug text-slate-400">{o.caption}</div>
+        <div className="max-h-16 overflow-y-auto break-words text-[11px] leading-snug text-slate-400">{o.caption}</div>
       </figcaption>
     </figure>
   );

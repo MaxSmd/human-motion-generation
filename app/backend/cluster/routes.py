@@ -98,15 +98,26 @@ def cluster_run_sample_steps(run: str) -> list[dict]:
 @router.get("/gt-clips")
 def cluster_gt_clips(
     split: str = "train",
-    subset_fraction: float = 0.01,
+    subset_fraction: float = 1.0,
     subset_seed: int = 0,
+    subset_n: int = 0,
     limit: int = 60,
+    tag_seen: bool = False,
+    q: str = "",
 ) -> list[dict]:
-    """Available GT clips (id + assigned caption) for the Visualize tab dropdown.
-    Train split is narrowed to the model's subset; cached, SSH-light."""
+    """Available GT clips (id + assigned caption) for the Visualize tab. Plain
+    browse by default; with `tag_seen` each clip is tagged `seen` for the run's
+    training subset (fraction/seed/n) vs unseen. `q` searches captions across the
+    whole dataset. Cached, SSH-light."""
     _require_online()
     return gtbrowse.gt_clips(
-        split, subset_fraction=subset_fraction, subset_seed=subset_seed, limit=limit
+        split,
+        subset_fraction=subset_fraction,
+        subset_seed=subset_seed,
+        subset_n=subset_n,
+        limit=limit,
+        tag_seen=tag_seen,
+        q=q,
     )
 
 

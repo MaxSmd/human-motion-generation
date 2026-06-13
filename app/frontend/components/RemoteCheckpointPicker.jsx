@@ -22,7 +22,17 @@ export default function RemoteCheckpointPicker({ value, onChange, onConfig }) {
     api.clusterCheckpoints(run).then(setCkpts).catch(() => setCkpts([]));
     api.runInfo(run).then((info) => {
       const c = info.config || {};
-      const p = { model_preset: c.model?.name, train_preset: c.train?.preset, representation: c.representation?.name };
+      const d = c.data || {};
+      const p = {
+        run,
+        model_preset: c.model?.name,
+        train_preset: c.train?.preset,
+        representation: c.representation?.name,
+        // training subset, so callers can mark seen vs unseen GT clips
+        subset_fraction: d.subset_fraction ?? 1.0,
+        subset_seed: d.subset_seed ?? 0,
+        subset_n: d.subset_n ?? 0,
+      };
       setPresets(p);
       onConfig?.(p);
     }).catch(() => { setPresets(null); onConfig?.(null); });
