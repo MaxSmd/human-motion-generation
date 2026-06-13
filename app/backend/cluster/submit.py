@@ -173,6 +173,104 @@ def build_eval(params: dict) -> tuple[str, dict[str, str], str, str]:
     return SCRIPTS["eval"], env, f"{JOB_PREFIX}-eval", run_name
 
 
+# --------------------------------------------------------------------------- mardm
+#
+# MARDM diverges from rmg: training is two-stage (AE → gen) and eval needs both
+# checkpoints. These builders map the app's params onto the `slurm/mardm/*`
+# env-var contracts (which accept an `OVERRIDES` passthrough, mirroring rmg).
+
+MARDM_SCRIPTS = {
+    "train_ae": "mardm/train_mardm_ae.sbatch",
+    "train_gen": "mardm/train_mardm.sbatch",
+    "eval": "mardm/evaluate_mardm.sbatch",
+}
+
+
+def build_mardm_train(params: dict) -> tuple[str, dict[str, str], str, str]:
+    """Two-stage MARDM training. `stage` ∈ {ae, gen}; gen requires an AE ckpt.
+
+    rmg's structured knobs map onto MARDM's hydra keys (top-level `subset_frac`/
+    `limit_clips`, `train.*`); anything else flows through the free-form
+    `overrides` string → the sbatch `OVERRIDES` passthrough."""
+    stage = params.get("stage", "gen")
+    if stage not in ("ae", "gen"):
+        raise ValueError(f"unknown MARDM train stage {stage!r} (expected ae|gen)")
+    run_name = params.get("run_name") or _run_name("train", stage)
+    env: dict[str, str] = {"RUN_NAME": run_name, "RUNS_ROOT": _runs_root("train")}
+    ov = _overrides([
+        ("subset_frac", params.get("subset_fraction")),
+        ("limit_clips", params.get("subset_n")),
+        ("train.max_steps", params.get("max_steps")),
+        ("train.ckpt_every", params.get("ckpt_every")),
+        ("train.optimizer.lr", params.get("lr")),
+        ("train.precision", params.get("precision")),
+    ], params.get("overrides"))
+    if stage == "ae":
+        script, job = MARDM_SCRIPTS["train_ae"], f"{JOB_PREFIX}-train-ae"
+    else:
+        ae = params.get("ae_checkpoint")
+        if not ae:
+            raise ValueError("MARDM gen training needs an AE checkpoint (ae_checkpoint)")
+        env["AE_CKPT"] = ae
+        env["CONFIG_NAME"] = params.get("config_name") or "gen"
+        script, job = MARDM_SCRIPTS["train_gen"], f"{JOB_PREFIX}-train-gen"
+    if ov:
+        env["OVERRIDES"] = ov
+    return script, env, job, run_name
+
+
+def build_mardm_eval(params: dict) -> tuple[str, dict[str, str], str, str]:
+    """MARDM eval needs the stage-1 AE checkpoint AND the stage-2 gen checkpoint.
+    The gen checkpoint reuses the shared `checkpoint` param (the eval picker)."""
+    gen = params.get("checkpoint")
+    ae = params.get("ae_checkpoint")
+    if not gen:
+        raise ValueError("MARDM eval needs a gen checkpoint (checkpoint)")
+    if not ae:
+        raise ValueError("MARDM eval needs an AE checkpoint (ae_checkpoint)")
+    run_name = _run_name("eval", params.get("run", ""))
+    env: dict[str, str] = {
+        "AE_CKPT": ae,
+        "GEN_CKPT": gen,
+        "CONFIG_NAME": params.get("config_name") or "gen",
+        "RUN_NAME": run_name,
+        "RUNS_ROOT": _runs_root("eval"),
+    }
+    # The eval picker may send a single value or a bracketed list; either is a
+    # valid MARDM GUIDANCE (forwarded to +eval.guidance_scales).
+    guidance = params.get("guidance_scales")
+    if guidance in (None, ""):
+        guidance = params.get("guidance")
+    if guidance not in (None, ""):
+        env["GUIDANCE"] = str(guidance)
+    if params.get("overrides"):
+        env["OVERRIDES"] = str(params["overrides"])
+    return MARDM_SCRIPTS["eval"], env, f"{JOB_PREFIX}-eval", run_name
+
+
+# --------------------------------------------------------------- model dispatch
+
+# Per-model task → builder. Each builder embeds its own sbatch script. MARDM has
+# no `viz` (no standalone generate/render pipeline yet), so Generate/Visualize
+# are gated off in the UI when MARDM is active.
+_BUILDERS: dict[str, dict] = {
+    "rmg": {"viz": build_viz, "train": build_train, "eval": build_eval},
+    "mardm": {"train": build_mardm_train, "eval": build_mardm_eval},
+}
+
+
+def has_task(model: str, kind: str) -> bool:
+    return kind in _BUILDERS.get(model, {})
+
+
+def builder_for(model: str, kind: str):
+    """Resolve the (model, kind) builder. Raises ValueError on an unsupported task."""
+    try:
+        return _BUILDERS[model][kind]
+    except KeyError as e:
+        raise ValueError(f"task {kind!r} is not available for model {model!r}") from e
+
+
 def submit(builder, params: dict) -> dict:
     """Run a `build_*` and submit. Returns {slurm_id, run_name, job_name, command}."""
     script, env, job_name, run_name = builder(params)

@@ -31,6 +31,34 @@ def _require_online() -> None:
         raise HTTPException(503, st.detail or f"cluster {st.state}")
 
 
+# --------------------------------------------------------------------------- model
+
+
+@router.get("/model")
+def get_model() -> dict:
+    """Active model + the set of models the app can drive, plus which tasks each
+    supports (so the UI can gate Generate/Visualize when a model has no viz)."""
+    return {
+        "active": cfgmod.cluster_model(),
+        "models": list(cfgmod.MODELS),
+        "tasks": {m: sorted(submit._BUILDERS.get(m, {})) for m in cfgmod.MODELS},
+    }
+
+
+class ModelRequest(BaseModel):
+    model: str
+
+
+@router.post("/model")
+def set_model(req: ModelRequest) -> dict:
+    """Set the global active model (rmg | mardm). Persisted across restarts."""
+    try:
+        active = cfgmod.set_cluster_model(req.model)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return {"active": active, "models": list(cfgmod.MODELS)}
+
+
 # --------------------------------------------------------------------------- status
 
 
@@ -38,7 +66,7 @@ def _require_online() -> None:
 def cluster_status() -> dict:
     # Cached (≈5 s TTL): the gate + page + cluster tab all poll this, so a forced
     # probe per request would hammer SSH. The TTL keeps it to ~one probe / 5 s.
-    return status.probe().to_dict()
+    return {**status.probe().to_dict(), "model": cfgmod.cluster_model()}
 
 
 @router.get("/squeue")
@@ -127,11 +155,14 @@ class TrainRequest(BaseModel):
     guidance: float | None = None
     precision: str | None = None
     overrides: str | None = None     # extra free-form hydra args
+    # MARDM-only: two-stage training. stage ∈ {ae, gen}; gen needs an AE ckpt.
+    stage: str | None = None
+    ae_checkpoint: str | None = None
 
 
 class EvalRequest(BaseModel):
     run: str | None = None
-    checkpoint: str               # eval keys off the checkpoint
+    checkpoint: str               # eval keys off the checkpoint (gen ckpt for MARDM)
     model_preset: str = "dit_base"
     train_preset: str = "rmg_base"
     eval_split: str | None = None
@@ -142,6 +173,7 @@ class EvalRequest(BaseModel):
     num_sample_steps: int | None = None
     use_ema: bool | None = None
     overrides: str | None = None
+    ae_checkpoint: str | None = None     # MARDM-only: the stage-1 AE checkpoint
 
 
 @router.get("/queue")

@@ -18,11 +18,28 @@ export default function Home() {
   const [connError, setConnError] = useState(null);
   const [clusterStatus, setClusterStatus] = useState(null);
   const [queue, setQueue] = useState(null);
+  const [modelInfo, setModelInfo] = useState(null); // { active, models, tasks }
 
   useEffect(() => {
     api.health().then(setHealth).catch((e) => setConnError(e.message));
     api.checkpoints().then(setCheckpoints).catch(() => {});
+    api.getModel().then(setModelInfo).catch(() => {});
   }, []);
+
+  const model = modelInfo?.active || "rmg";
+
+  // Switch the global active model, then refetch checkpoints (they're listed per
+  // active model on the backend) so downstream pickers reflect the new model.
+  async function changeModel(next) {
+    if (next === model) return;
+    try {
+      const info = await api.setModel(next);
+      setModelInfo((prev) => ({ ...(prev || {}), ...info }));
+      api.checkpoints().then(setCheckpoints).catch(() => {});
+    } catch {
+      /* ignore — toggle stays on the current model */
+    }
+  }
 
   const clusterMode = !!health?.cluster_mode;
 
@@ -97,9 +114,15 @@ export default function Home() {
 
       <div key={tab} className="animate-fade-up">
         {tab === "cluster" && <ClusterTab status={clusterStatus} />}
-        {tab === "generate" && <GenerateTab checkpoints={checkpoints} clusterMode={clusterMode} />}
-        {tab === "visualize" && <VisualizeTab />}
-        {tab === "model" && <ModelTab />}
+        {tab === "generate" &&
+          (model === "mardm" ? (
+            <MardmUnsupported feature="Generate" />
+          ) : (
+            <GenerateTab checkpoints={checkpoints} clusterMode={clusterMode} />
+          ))}
+        {tab === "visualize" &&
+          (model === "mardm" ? <MardmUnsupported feature="Visualize" /> : <VisualizeTab />)}
+        {tab === "model" && <ModelTab model={model} />}
         {tab === "analysis" && <AnalysisTab />}
         {tab === "gt" && <GTBrowserTab clusterMode={clusterMode} />}
         {tab === "training" && <TrainingViewerTab clusterMode={clusterMode} />}
@@ -123,11 +146,61 @@ export default function Home() {
               scrub training samples, and launch viz / train / eval jobs.
             </p>
           </div>
-          <Telemetry health={health} error={connError} cluster={clusterStatus} clusterMode={clusterMode} queue={queue} />
+          <div className="flex flex-col items-end gap-3">
+            {clusterMode && (
+              <ModelToggle model={model} models={modelInfo?.models} onChange={changeModel} />
+            )}
+            <Telemetry health={health} error={connError} cluster={clusterStatus} clusterMode={clusterMode} queue={queue} />
+          </div>
         </header>
 
         {clusterMode ? <ClusterGate>{panel}</ClusterGate> : panel}
       </div>
+    </div>
+  );
+}
+
+function MardmUnsupported({ feature }) {
+  return (
+    <div className="surface flex flex-col items-center justify-center gap-3 p-12 text-center">
+      <span className="rounded-full border border-[var(--amber)]/40 px-2.5 py-0.5 text-[10px] font-semibold tracking-wider text-[var(--amber)]">
+        MARDM
+      </span>
+      <h3 className="display text-lg font-bold text-slate-200">
+        {feature} is not available for MARDM
+      </h3>
+      <p className="max-w-sm text-[13px] leading-relaxed text-[var(--muted)]">
+        MARDM has no standalone viz/generate pipeline yet — its only generation
+        path runs inside evaluation. Use{" "}
+        <span className="text-[var(--signal)]">Model ▸ Evaluate</span> to score a
+        MARDM checkpoint, or switch the model back to{" "}
+        <span className="text-[var(--signal)]">rmg</span>.
+      </p>
+    </div>
+  );
+}
+
+function ModelToggle({ model, models, onChange }) {
+  const opts = models && models.length ? models : ["rmg", "mardm"];
+  return (
+    <div className="surface flex items-center gap-1.5 px-3 py-2">
+      <span className="label mr-1">model</span>
+      {opts.map((m) => {
+        const active = m === model;
+        return (
+          <button
+            key={m}
+            onClick={() => onChange(m)}
+            className={`rounded-md px-3 py-1 font-mono text-[11px] uppercase tracking-widest transition ${
+              active
+                ? "border border-[var(--signal)] bg-[var(--signal-dim)] text-[var(--signal)]"
+                : "border border-[var(--hairline)] text-[var(--muted)] hover:text-slate-200"
+            }`}
+          >
+            {m}
+          </button>
+        );
+      })}
     </div>
   );
 }

@@ -42,6 +42,8 @@ HF_CACHE="${HF_CACHE:-${HOME}/hf-cache}"
 DATA_ROOT="${RMG_DATA_ROOT:-${REPO}/external/data/humanml3d_packed}"
 # Shared across AE / gen / eval — must be a writable path (the dataset mount is RO).
 MARDM_STATS="${MARDM_STATS:-${RUNS_ROOT}/mardm_essential_stats.pt}"
+# Extra Hydra overrides (space-separated key=value), e.g. from the interactive app.
+OVERRIDES="${OVERRIDES:-}"
 if [ -n "${WANDB_API_KEY:-}" ]; then
     : "${WANDB_MODE:=online}"
 else
@@ -67,5 +69,5 @@ enroot start \
         pip install -e . --no-deps --quiet
         [ -f '${MARDM_STATS}' ] || python -m mardm.scripts.compute_mardm_stats \\
             --data-root '${DATA_ROOT}' --out '${MARDM_STATS}'
-        python -m mardm.scripts.train_mardm_ae run_name='${RUN_NAME}' data.preload=true
+        python -m mardm.scripts.train_mardm_ae run_name='${RUN_NAME}' data.preload=true ${OVERRIDES}
     "

@@ -33,8 +33,9 @@ _SLURM_OK = {"COMPLETED"}
 _SLURM_FAIL = {"FAILED", "NODE_FAIL", "BOOT_FAIL", "OUT_OF_MEMORY", "DEADLINE"}
 _SLURM_CANCEL = {"CANCELLED", "TIMEOUT", "PREEMPTED", "SUSPENDED"}
 
-# kind → builder (validates params + resolves the sbatch command at enqueue time)
-_BUILDERS = {"viz": submit.build_viz, "train": submit.build_train, "eval": submit.build_eval}
+# (model, kind) → builder is resolved at enqueue time via `submit.builder_for`
+# against the active model (cfgmod.cluster_model()), so the same kinds dispatch
+# to rmg or MARDM scripts depending on the global toggle.
 
 
 @dataclass
@@ -135,9 +136,9 @@ class JobManager:
         the cluster slot is free. Never blocks: extra jobs wait locally (not on the
         cluster). Raises ValueError/KeyError on bad params (→ 400)."""
         import secrets
-        builder = _BUILDERS.get(kind)
-        if builder is None:
-            raise ValueError(f"unknown job kind {kind!r}")
+        # Resolve against the active model so the same kind dispatches to the
+        # right rmg/MARDM script (raises ValueError on an unsupported task).
+        builder = submit.builder_for(cfgmod.cluster_model(), kind)
         # Build now → validates params + resolves remote paths (raises on error).
         script, env, job_name, run_name = builder(params)
         job = ClusterJob(

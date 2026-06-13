@@ -164,10 +164,47 @@ def cluster_host() -> str:
     return _env("CLUSTER_HOST", "head")
 
 
+# Models the app can drive. The control plane namespaces runs per model
+# (`runs/<model>/<kind>/<run>`) and picks per-model sbatch scripts/builders.
+MODELS = ("rmg", "mardm")
+
+# Process-global override for the active model, persisted to disk so the choice
+# survives a backend restart (set via the UI toggle / POST /cluster/model).
+_active_model: str | None = None
+
+
+def _active_model_path() -> Path:
+    """Where the active-model selection is persisted (next to jobs.json)."""
+    return jobs_state_path().parent / "active_model"
+
+
 def cluster_model() -> str:
     """Active model namespace under the runs root: `runs/<model>/<kind>/<run>`.
-    Default `rmg`; the momask/mardm merge will make this per-submission."""
-    return _env("CLUSTER_MODEL", "rmg")
+
+    Resolution order: in-process override (set this session) → persisted file →
+    env `CLUSTER_MODEL`/`RMG_CLUSTER_MODEL` → `rmg`. Validated against `MODELS`.
+    """
+    global _active_model
+    if _active_model is None:
+        p = _active_model_path()
+        if p.exists():
+            val = p.read_text().strip()
+            if val in MODELS:
+                _active_model = val
+    candidate = _active_model or _env("CLUSTER_MODEL", "rmg")
+    return candidate if candidate in MODELS else "rmg"
+
+
+def set_cluster_model(name: str) -> str:
+    """Set + persist the active model. Raises ValueError on an unknown model."""
+    if name not in MODELS:
+        raise ValueError(f"unknown model {name!r}; choose one of {MODELS}")
+    global _active_model
+    _active_model = name
+    p = _active_model_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(name)
+    return name
 
 
 RUN_KINDS = ("train", "eval", "viz")

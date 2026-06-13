@@ -37,6 +37,11 @@ HF_CACHE="${HF_CACHE:-${HOME}/hf-cache}"
 DATA_ROOT="${RMG_DATA_ROOT:-${REPO}/external/data/humanml3d_packed}"
 MARDM_STATS="${MARDM_STATS:-${RUNS_ROOT}/mardm_essential_stats.pt}"
 GUIDANCE="${GUIDANCE:-[2.5,3.5,4.5,5.5,6.5]}"
+# Run name (results land under RUNS_ROOT/RUN_NAME) — honoured so the app can
+# locate + pull this eval's metrics. Defaults to the gen-checkpoint basename.
+RUN_NAME="${RUN_NAME:-mardm-eval-$(basename "${GEN_CKPT}" .pt)}"
+# Extra Hydra overrides (space-separated key=value), e.g. from the app.
+OVERRIDES="${OVERRIDES:-}"
 
 enroot start \
     --rw \
@@ -60,5 +65,6 @@ enroot start \
             +eval.checkpoint='${GEN_CKPT}' \\
             +eval.evaluator=real \\
             +eval.guidance_scales='${GUIDANCE}' \\
-            run_name=mardm-eval-\$(basename ${GEN_CKPT} .pt)
+            run_name='${RUN_NAME}' \\
+            ${OVERRIDES}
     "

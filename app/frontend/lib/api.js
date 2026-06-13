@@ -49,6 +49,8 @@ export const api = {
   runSample: (run, step) => req(`/runs/${encodeURIComponent(run)}/sample/${step}`),
 
   // ── cluster control plane ────────────────────────────────────────────────
+  getModel: () => req("/cluster/model"),
+  setModel: (model) => post("/cluster/model", { model }),
   clusterStatus: () => req("/cluster/status"),
   clusterSqueue: () => req("/cluster/squeue"),
   clusterRuns: () => req("/cluster/runs"),

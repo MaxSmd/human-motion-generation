@@ -38,6 +38,9 @@ if [ -z "${AE_CKPT:-}" ]; then
     shift
 fi
 EXTRA_HYDRA_ARGS="$*"
+# Extra Hydra overrides via env (space-separated key=value), e.g. from the app —
+# appended after any positional EXTRA_HYDRA_ARGS.
+OVERRIDES="${OVERRIDES:-}"
 CONFIG_NAME="${CONFIG_NAME:-gen}"
 if [ -n "${SLURM_SUBMIT_DIR:-}" ]; then
     REPO="${REPO:-${SLURM_SUBMIT_DIR}}"
@@ -82,5 +85,5 @@ enroot start \
             text_encoder.type=qwen3 \\
             data.preload=true \\
             run_name='${RUN_NAME}' \\
-            ${EXTRA_HYDRA_ARGS}
+            ${EXTRA_HYDRA_ARGS} ${OVERRIDES}
     "
