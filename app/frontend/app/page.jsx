@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import dynamic from "next/dynamic";
 import { api } from "@/lib/api";
 import GenerateTab from "@/components/GenerateTab";
 import GTBrowserTab from "@/components/GTBrowserTab";
@@ -11,6 +12,9 @@ import VisualizeTab from "@/components/VisualizeTab";
 import ModelTab from "@/components/ModelTab";
 import AnalysisTab from "@/components/AnalysisTab";
 import ClusterGate from "@/components/ClusterGate";
+
+// three.js / r3f canvas — client-only (no SSR).
+const RoomEditor = dynamic(() => import("@/components/RoomEditor"), { ssr: false });
 
 export default function Home() {
   const [health, setHealth] = useState(null);
@@ -66,12 +70,14 @@ export default function Home() {
         { id: "model", n: "03", label: "Model", sub: "train · eval" },
         { id: "analysis", n: "04", label: "Analysis", sub: "metrics · plots" },
         { id: "constraints", n: "05", label: "Constraints", sub: "fixed joint angles", soon: constraintsSoon },
+        { id: "room", n: "06", label: "Room", sub: "scene · objects · spawn", soon: constraintsSoon },
       ];
     return [
       { id: "generate", n: "01", label: "Generate", sub: "text → motion" },
       { id: "gt", n: "02", label: "Ground Truth", sub: "dataset browser" },
       { id: "training", n: "03", label: "Training", sub: "sample scrubber" },
       { id: "constraints", n: "04", label: "Constraints", sub: "fixed joint angles", soon: constraintsSoon },
+      { id: "room", n: "05", label: "Room", sub: "scene · objects · spawn", soon: constraintsSoon },
     ];
   }, [clusterMode, constraintsSoon]);
 
@@ -134,6 +140,12 @@ export default function Home() {
             <MardmUnsupported feature="Constraints" />
           ) : (
             <ConstraintsTab checkpoints={checkpoints} clusterMode={clusterMode} />
+          ))}
+        {tab === "room" &&
+          (model === "mardm" ? (
+            <MardmUnsupported feature="Room" />
+          ) : (
+            <RoomEditor clusterMode={clusterMode} checkpoints={checkpoints} />
           ))}
       </div>
     </>

@@ -152,6 +152,8 @@ class VizRequest(BaseModel):
     # mode=prompt: sampling-time constraints forwarded to visualize.py.
     constraints: list[dict] | None = None   # fixed joint angles (inpaint)
     ranges: list[dict] | None = None         # hinge limits (projection)
+    scene: dict | None = None                # euclidean room/obstacles/spawn
+    room_guidance: float = 0.0               # room/obstacle guidance weight
 
 
 class TrainRequest(BaseModel):

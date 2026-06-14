@@ -27,8 +27,11 @@ from rmg.flow import (
     WrappedGaussianPrior,
     build_hinge_projector,
     build_inpaint_targets,
+    build_room_energy_fn,
     parse_constraints,
     parse_ranges,
+    parse_scene,
+    place_motion,
 )
 from rmg.models import DiTConfig, Qwen3EmbeddingEncoder, RandomTextEncoder, RMGDiT
 from rmg.models.text_encoder import TextEncoder
@@ -164,21 +167,25 @@ class AppState:
         seed: int,
         constraints: list[dict] | None = None,
         ranges: list[dict] | None = None,
+        scene: dict | None = None,
+        room_guidance: float = 0.0,
     ) -> Tensor:
         """Text → (T, ambient_dim) sample on the manifold.
 
         `constraints` are sampling-time joint-angle pins (inpainting); `ranges`
-        are hinge limits (swing-twist projection each ODE step). Both apply only
+        are hinge limits (swing-twist projection each ODE step); `scene` adds
+        euclidean room/obstacle guidance + exact spawn placement. All apply only
         to the quaternion-on-S^3 representations (tr/trp).
         """
         gen = torch.Generator(device=self.device).manual_seed(int(seed))
         cond = bundle.text_encoder.encode([text], device=self.device)
 
-        fixed_values = fixed_mask = project_fn = None
-        if constraints or ranges:
+        fixed_values = fixed_mask = project_fn = energy_fn = None
+        scene_obj = parse_scene(scene)
+        if constraints or ranges or scene_obj:
             if bundle.representation_name not in CONSTRAINABLE_REPRESENTATIONS:
                 raise NotImplementedError(
-                    f"joint constraints need a quaternion representation "
+                    f"constraints need a quaternion representation "
                     f"({CONSTRAINABLE_REPRESENTATIONS}); this run uses "
                     f"{bundle.representation_name!r}."
                 )
@@ -186,17 +193,15 @@ class AppState:
             if constraints:
                 fixed_values, fixed_mask = build_inpaint_targets(
                     parse_constraints(constraints),
-                    num_frames=int(num_frames),
-                    num_joints=num_joints,
-                    device=self.device,
+                    num_frames=int(num_frames), num_joints=num_joints, device=self.device,
                 )
             if ranges:
                 project_fn = build_hinge_projector(
                     parse_ranges(ranges),
-                    num_frames=int(num_frames),
-                    num_joints=num_joints,
-                    device=self.device,
+                    num_frames=int(num_frames), num_joints=num_joints, device=self.device,
                 )
+            if scene_obj and room_guidance:
+                energy_fn = build_room_energy_fn(scene_obj, self.skeleton(), num_joints=num_joints)
 
         samples = bundle.sampler.sample(
             bundle.model,
@@ -209,8 +214,23 @@ class AppState:
             fixed_values=fixed_values,
             fixed_mask=fixed_mask,
             project_fn=project_fn,
+            energy_fn=energy_fn,
+            guidance_weight=float(room_guidance) if energy_fn is not None else 0.0,
         )
-        return samples[0]
+        sample = samples[0]
+
+        # Exact spawn placement: rigidly move the clip so it starts at the spawn
+        # pose inside the room (translation + root orientation). tr/trp only.
+        if scene_obj is not None:
+            nj = int(bundle.cfg.representation.get("num_joints", 22))
+            qd = 3 + 4 * nj
+            trans = sample[:, :3]
+            quats = sample[:, 3:qd].reshape(sample.shape[0], nj, 4)
+            trans2, quats2 = place_motion(trans, quats, scene_obj.spawn)
+            sample = sample.clone()
+            sample[:, :3] = trans2
+            sample[:, 3:qd] = quats2.reshape(sample.shape[0], -1)
+        return sample
 
 
 # Module-level singleton, initialised on FastAPI startup.

@@ -45,11 +45,13 @@ SUBSET_SEED="${SUBSET_SEED:-0}"
 N_COMPARE="${N_COMPARE:-4}"
 RUN_NAME="${RUN_NAME:-rmg-viz-${MODE}-${SLURM_JOB_ID:-$(date +%Y%m%d-%H%M%S)}}"
 OVERRIDES="${OVERRIDES:-}"
-# Optional sampling-time constraints (JSON lists); mode=prompt only. Read by
-# visualize.py inside the container as RMG_CONSTRAINTS (fixed angles) and
-# RMG_RANGES (hinge limits).
+# Optional sampling-time constraints (JSON); mode=prompt only. Read by
+# visualize.py inside the container as RMG_CONSTRAINTS (fixed angles),
+# RMG_RANGES (hinge limits) and RMG_SCENE (room/obstacles/spawn) + guidance.
 CONSTRAINTS="${CONSTRAINTS:-}"
 RANGES="${RANGES:-}"
+SCENE="${SCENE:-}"
+ROOM_GUIDANCE="${ROOM_GUIDANCE:-0.0}"
 
 if { [ "$MODE" = "prompt" ] || [ "$MODE" = "compare" ]; } && [ -z "$CKPT" ]; then
     echo "ERROR: MODE=${MODE} requires CKPT=/path/to/checkpoint.pt"; exit 1
@@ -67,6 +69,8 @@ enroot start \
     --env "PYTHONPATH=${REPO}/src" \
     --env "RMG_CONSTRAINTS=${CONSTRAINTS}" \
     --env "RMG_RANGES=${RANGES}" \
+    --env "RMG_SCENE=${SCENE}" \
+    --env "RMG_ROOM_GUIDANCE=${ROOM_GUIDANCE}" \
     "${IMAGE}" \
     bash -lc "
         set -euo pipefail

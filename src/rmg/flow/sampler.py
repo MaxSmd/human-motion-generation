@@ -52,6 +52,8 @@ class RiemannianEulerSampler:
         fixed_values: Tensor | None = None,
         fixed_mask: Tensor | None = None,
         project_fn: Callable[[Tensor], Tensor] | None = None,
+        energy_fn: Callable[[Tensor], Tensor] | None = None,
+        guidance_weight: float = 0.0,
     ) -> Tensor | tuple[Tensor, Tensor]:
         """Generate (B, T, D) samples by integrating the learned velocity from t=0 to t=1.
 
@@ -70,6 +72,12 @@ class RiemannianEulerSampler:
                 submanifold (e.g. hinge limits via swing-twist clamping). See
                 `flow.constraints.build_hinge_projector`. Composes with the
                 inpainting hook (applied after it).
+            energy_fn / guidance_weight: optional euclidean (room/obstacle)
+                guidance. Each step the clean-sample estimate x̂₁ = Exp_x((1−t)·v)
+                is fed to `energy_fn` (FK → world → penalty); its gradient w.r.t.
+                x (through the Exp map) is tangent-projected and subtracted from
+                the velocity, scaled by `guidance_weight`. Soft constraint — see
+                `flow.scene`.
         """
         B, T = shape
         n = num_steps if num_steps is not None else self.cfg.num_steps
@@ -115,6 +123,16 @@ class RiemannianEulerSampler:
                 v_amb = model(x, t_batch, cond=cond, drop_cond_mask=drop_mask, mask=mask)
 
             v_t = self.manifold.project_tangent(x, v_amb)
+
+            # Euclidean (room/obstacle) guidance on the clean-sample estimate x̂₁.
+            if energy_fn is not None and guidance_weight != 0.0:
+                with torch.enable_grad():
+                    x_req = x.detach().requires_grad_(True)
+                    x_hat = self.manifold.exp(x_req, (1.0 - t_i) * v_t.detach())
+                    energy = energy_fn(x_hat)
+                    (grad,) = torch.autograd.grad(energy, x_req)
+                v_t = v_t - guidance_weight * self.manifold.project_tangent(x, grad)
+
             x = self.manifold.exp(x, h * v_t)
 
             if apply_constraint:

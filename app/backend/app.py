@@ -88,6 +88,10 @@ class GenerateRequest(BaseModel):
     # Sampling-time constraints (RMG tr/trp representations only).
     constraints: list[JointConstraint] | None = None  # fixed joint angles (inpaint)
     ranges: list[RangeConstraint] | None = None        # hinge limits (projection)
+    # Euclidean room/scene: free-form dict ({room, objects, spawn}) from the
+    # RoomEditor; exact spawn placement + soft room/obstacle guidance.
+    scene: dict | None = None
+    room_guidance: float = 0.0     # 0 ⇒ placement only (no avoidance guidance)
 
 
 # --------------------------------------------------------------------------- health
@@ -171,7 +175,7 @@ def generate(req: GenerateRequest) -> dict:
     key = cache.cache_key(
         kind="generate", text=req.text, guidance=req.guidance, num_steps=req.num_steps,
         seed=req.seed, num_frames=req.num_frames, ckpt=ckpt_path, fmt=resolve_format(req.fmt),
-        constraints=constraints, ranges=ranges,
+        constraints=constraints, ranges=ranges, scene=req.scene, room_guidance=req.room_guidance,
     )
     hit = cache.find_cached(key)
     if hit:
@@ -187,6 +191,7 @@ def generate(req: GenerateRequest) -> dict:
             bundle, text=req.text, num_frames=req.num_frames,
             guidance=req.guidance, num_steps=req.num_steps, seed=req.seed,
             constraints=constraints, ranges=ranges,
+            scene=req.scene, room_guidance=req.room_guidance,
         )
         joints = decode_to_joints(sample, st.skeleton(), bundle.representation_name)
     except FileNotFoundError as e:

@@ -95,6 +95,10 @@ def build_viz(params: dict) -> tuple[str, dict[str, str], str, str]:
             env["CONSTRAINTS"] = json.dumps(params["constraints"])
         if params.get("ranges"):
             env["RANGES"] = json.dumps(params["ranges"])
+        # Euclidean room/scene → RMG_SCENE (+ guidance weight) in visualize.py.
+        if params.get("scene"):
+            env["SCENE"] = json.dumps(params["scene"])
+            env["ROOM_GUIDANCE"] = str(params.get("room_guidance", 0.0))
     elif mode == "compare":
         env.update({
             "CKPT": params["checkpoint"], "MODEL_PRESET": params.get("model_preset", "dit_base"),

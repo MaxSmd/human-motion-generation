@@ -58,8 +58,11 @@ from rmg.flow import (  # noqa: E402
     WrappedGaussianPrior,
     build_hinge_projector,
     build_inpaint_targets,
+    build_room_energy_fn,
     parse_constraints,
     parse_ranges,
+    parse_scene,
+    place_motion,
 )
 from rmg.models import (  # noqa: E402
     DiTConfig,
@@ -258,6 +261,23 @@ def _load_specs(cfg, env_var: str, cfg_key: str) -> list[dict]:
     return list(specs or [])
 
 
+def _load_scene(cfg) -> dict | None:
+    """Room/scene dict for mode=prompt — from JSON env var `RMG_SCENE` (set by
+    the app) or `cfg.viz.scene`. Returns None when absent."""
+    import json
+    import os
+
+    raw = os.environ.get("RMG_SCENE", "").strip()
+    if raw:
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"RMG_SCENE is not valid JSON: {e}") from e
+    if "scene" in cfg.viz:
+        return OmegaConf.to_container(cfg.viz.scene, resolve=True)
+    return None
+
+
 @hydra.main(config_path="../configs", config_name="train", version_base=None)
 def main(cfg: DictConfig) -> None:
     viz_cfg = OmegaConf.create({
@@ -400,14 +420,17 @@ def main(cfg: DictConfig) -> None:
               f"ω={float(cfg.viz.guidance_scale)})", flush=True)
 
         # Optional sampling-time constraints (broadcast across the batch):
-        # fixed angles (inpainting) + hinge ranges (swing-twist projection).
-        fixed_values = fixed_mask = project_fn = None
+        # fixed angles (inpainting) + hinge ranges (swing-twist projection) +
+        # euclidean room/obstacle guidance & exact spawn placement.
+        fixed_values = fixed_mask = project_fn = energy_fn = None
+        guidance_weight = 0.0
         c_specs = _load_specs(cfg, "RMG_CONSTRAINTS", "constraints")
         r_specs = _load_specs(cfg, "RMG_RANGES", "ranges")
-        if c_specs or r_specs:
+        scene_obj = parse_scene(_load_scene(cfg))
+        if c_specs or r_specs or scene_obj:
             if cfg.representation.name not in CONSTRAINABLE_REPRESENTATIONS:
                 raise ValueError(
-                    f"joint constraints need a quaternion representation "
+                    f"constraints need a quaternion representation "
                     f"({CONSTRAINABLE_REPRESENTATIONS}); got {cfg.representation.name!r}."
                 )
             nj = int(representation.num_joints)
@@ -419,17 +442,28 @@ def main(cfg: DictConfig) -> None:
                 project_fn = build_hinge_projector(
                     parse_ranges(r_specs), num_frames=n_frames, num_joints=nj, device=device)
                 print(f"[visualize] applying {len(r_specs)} hinge range(s): {r_specs}", flush=True)
+            if scene_obj:
+                import os
+                guidance_weight = float(os.environ.get("RMG_ROOM_GUIDANCE", cfg.viz.get("room_guidance", 0.0)))
+                if guidance_weight:
+                    energy_fn = build_room_energy_fn(scene_obj, skel, num_joints=nj)
+                print(f"[visualize] room scene: {scene_obj.room} m, {len(scene_obj.objects)} obstacle(s), "
+                      f"spawn={scene_obj.spawn}, guidance={guidance_weight}", flush=True)
 
         with torch.no_grad():
             cond = text_encoder.encode(prompts, device=device)
             samples = sampler.sample(
                 model, shape=(len(prompts), n_frames), cond=cond,
                 fixed_values=fixed_values, fixed_mask=fixed_mask, project_fn=project_fn,
+                energy_fn=energy_fn, guidance_weight=guidance_weight,
             )                                                # (B, T, ambient_dim)
 
         manifest = []
         for i, prompt in enumerate(prompts):
             tpr = tplusr_decode(samples[i])
+            if scene_obj is not None:
+                tpr.translation, tpr.quaternions = place_motion(
+                    tpr.translation, tpr.quaternions, scene_obj.spawn)
             joints = forward_kinematics(
                 skel, tpr.quaternions.float(), tpr.translation.float()
             ).cpu().numpy()
