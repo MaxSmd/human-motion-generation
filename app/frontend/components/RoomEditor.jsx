@@ -512,6 +512,10 @@ function Section({ title, sub, children }) {
   );
 }
 
+function Field({ label, children }) {
+  return <label className="block"><span className="label mb-1.5 block">{label}</span>{children}</label>;
+}
+
 function Num({ label, value, onChange, step = 0.1, min }) {
   return (
     <label className="block">
