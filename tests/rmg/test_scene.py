@@ -141,5 +141,6 @@ def test_guidance_reduces_energy() -> None:
         return float(scene_energy(joints, scene))
 
     e_unguided = run(0.0)
-    e_guided = run(5.0)
-    assert e_guided < e_unguided, f"guided {e_guided} !< unguided {e_unguided}"
+    e_guided = run(3.0)
+    # Guidance should cut the violation energy by a large margin.
+    assert e_guided < 0.5 * e_unguided, f"guided {e_guided} !<< unguided {e_unguided}"

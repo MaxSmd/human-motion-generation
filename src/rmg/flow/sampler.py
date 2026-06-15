@@ -131,7 +131,14 @@ class RiemannianEulerSampler:
                     x_hat = self.manifold.exp(x_req, (1.0 - t_i) * v_t.detach())
                     energy = energy_fn(x_hat)
                     (grad,) = torch.autograd.grad(energy, x_req)
-                v_t = v_t - guidance_weight * self.manifold.project_tangent(x, grad)
+                g = self.manifold.project_tangent(x, grad)
+                # Use the unit avoidance DIRECTION scaled by guidance_weight, so the
+                # step is bounded regardless of penetration depth (no divergence
+                # cliff) and the weight is an intuitive, model-scale-independent
+                # knob. Only descend when there's an actual violation (grad ≠ 0).
+                gnorm = g.flatten(1).norm(dim=1).view(-1, *([1] * (g.dim() - 1)))
+                g = g / gnorm.clamp_min(1e-8)
+                v_t = v_t - guidance_weight * g
 
             x = self.manifold.exp(x, h * v_t)
 

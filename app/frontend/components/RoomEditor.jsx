@@ -324,7 +324,7 @@ export default function RoomEditor({ clusterMode = false, checkpoints = [] }) {
 
 function RoomDispatch({ scene, clusterMode, checkpoints }) {
   const [form, setForm] = useState({
-    text: "a person walks forward", guidance: 6.5, num_steps: 50, num_frames: 120, seed: 0, room_guidance: 25,
+    text: "a person walks forward", guidance: 6.5, num_steps: 50, num_frames: 120, seed: 0, room_guidance: 2,
   });
   const [checkpoint, setCheckpoint] = useState("");
   const [presets, setPresets] = useState(null);
@@ -404,8 +404,8 @@ function RoomDispatch({ scene, clusterMode, checkpoints }) {
             <span className="label">room guidance</span>
             <span className="font-mono text-sm text-[var(--signal)]">{form.room_guidance === 0 ? "off (place only)" : form.room_guidance}</span>
           </div>
-          <input type="range" min="0" max="80" step="5" value={form.room_guidance} onChange={set("room_guidance")} className="w-full accent-[var(--signal)]" />
-          <p className="label mt-1">0 = just place at spawn · higher = stronger room/obstacle avoidance (soft)</p>
+          <input type="range" min="0" max="6" step="0.25" value={form.room_guidance} onChange={set("room_guidance")} className="w-full accent-[var(--signal)]" />
+          <p className="label mt-1">0 = just place at spawn · ~1–4 = stronger room/obstacle avoidance (soft) · too high distorts motion</p>
         </div>
 
         <button type="submit" className="btn-signal w-full" disabled={(clusterMode && (submitting || !checkpoint)) || (!clusterMode && loading)}>

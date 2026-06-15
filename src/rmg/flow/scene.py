@@ -138,7 +138,10 @@ def place_joints(joints: Tensor, spawn: tuple[float, float, float]) -> Tensor:
     yawed so its walk direction faces the spawn rotation. Differentiable."""
     sx, sz, rot = spawn
     pelvis = joints[:, :, 0, :]                       # (B,T,3)
-    yaw = _alignment_yaw(pelvis, math.radians(rot))   # (B,)
+    # Detach the heading: orientation is fixed by the spawn, not something the
+    # avoidance gradient should drive. Backprop through atan2 of a tiny/noisy
+    # early-step trajectory otherwise produces huge gradients (sampler diverges).
+    yaw = _alignment_yaw(pelvis, math.radians(rot)).detach()   # (B,)
     p0 = joints[:, 0:1, 0:1, :]                       # (B,1,1,3) frame-0 pelvis
     recenter = joints.new_tensor([1.0, 0.0, 1.0])     # drop xz only, keep y
     centered = joints - p0 * recenter
@@ -171,11 +174,21 @@ def place_motion(translation: Tensor, quats: Tensor, spawn: tuple[float, float, 
 
 
 def scene_energy(joints_world: Tensor, scene: Scene) -> Tensor:
-    """Mean squared violation: outside-the-room + inside-any-obstacle. >=0."""
+    """Squared violation energy: outside-the-room + inside-any-obstacle. >=0.
+
+    Aggregation is **sum over joints, mean over frames/batch** — NOT a flat mean
+    over all joints. Averaging across all 22 joints would dilute a few penetrating
+    feet by the ~20 clear joints, making the gradient vanishingly small (the
+    reason high guidance weights felt inert). Summing keeps the penalty
+    proportional to total penetration so the gradient actually pushes joints out.
+    """
+    def _agg(violation: Tensor) -> Tensor:           # (B,T,J) -> scalar
+        return violation.pow(2).sum(dim=-1).mean()
+
     w, d, h = scene.room
     # room containment — penalise leaving the box (incl. floor y<0 and ceiling y>h)
     sdf_room = _sdf_box(joints_world, center=(0.0, h / 2, 0.0), half=(w / 2, h / 2, d / 2))
-    energy = sdf_room.clamp_min(0.0).pow(2).mean()
+    energy = _agg(sdf_room.clamp_min(0.0))
 
     for o in scene.objects:
         kind = o.get("kind")
@@ -190,7 +203,7 @@ def scene_energy(joints_world: Tensor, scene: Scene) -> Tensor:
                            yaw_rad=math.radians(float(o.get("rotation", 0.0))))
         else:
             continue
-        energy = energy + sdf.mul(-1.0).clamp_min(0.0).pow(2).mean()  # penetration depth²
+        energy = energy + _agg(sdf.mul(-1.0).clamp_min(0.0))  # penetration depth²
     return energy
 
 
