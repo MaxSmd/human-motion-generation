@@ -74,7 +74,8 @@ def _build_dataset(cfg: DictConfig, split: str, mean, std) -> EssentialDataset:
     )
 
 
-def _build_loader(ds: EssentialDataset, cfg: DictConfig, batch_size: int, shuffle: bool) -> DataLoader:
+def _build_loader(ds: EssentialDataset, cfg: DictConfig, batch_size: int, shuffle: bool,
+                  drop_last: bool = True) -> DataLoader:
     return DataLoader(
         ds,
         batch_size=batch_size,
@@ -85,7 +86,7 @@ def _build_loader(ds: EssentialDataset, cfg: DictConfig, batch_size: int, shuffl
         persistent_workers=cfg.data.persistent_workers and cfg.data.num_workers > 0,
         prefetch_factor=cfg.data.prefetch_factor if cfg.data.num_workers > 0 else None,
         worker_init_fn=worker_init_fn,
-        drop_last=True,
+        drop_last=drop_last,
     )
 
 
@@ -148,8 +149,11 @@ def _validate(
         tot_joint += float(joint)
         n += 1
     ae.train()
-    denom = max(n, 1)
-    return tot_total / denom, tot_feat / denom, tot_joint / denom
+    if n == 0:
+        print("[ae] WARNING: validation loader yielded 0 batches — val split too "
+              "small for the batch size (check subset_frac). Reporting nan.", flush=True)
+        return float("nan"), float("nan"), float("nan")
+    return tot_total / n, tot_feat / n, tot_joint / n
 
 
 @hydra.main(config_path="../configs", config_name="ae", version_base=None)
@@ -176,7 +180,9 @@ def main(cfg: DictConfig) -> None:
     train_ds = _build_dataset(cfg, "train", mean, std)
     val_ds = _build_dataset(cfg, "val", mean, std)
     train_iter = _infinite(_build_loader(train_ds, cfg, cfg.train.micro_batch_size, shuffle=True))
-    val_loader = _build_loader(val_ds, cfg, cfg.train.micro_batch_size, shuffle=False)
+    # drop_last=False so a small (overfit-subset) val split still yields a batch;
+    # otherwise _validate iterates 0 batches and silently reports val_l1 0.
+    val_loader = _build_loader(val_ds, cfg, cfg.train.micro_batch_size, shuffle=False, drop_last=False)
 
     ae = AE(AEConfig(**OmegaConf.to_container(cfg.ae, resolve=True))).to(device)
 
@@ -262,6 +268,8 @@ def main(cfg: DictConfig) -> None:
                 "grad_norm": float(grad_norm),
                 "steps_per_s": cfg.train.log_every / max(now - t_last, 1e-9),
             }, step=step)
+            print(f"[ae] step {step}: l1={accum_loss * cfg.train.grad_accum:.4f} "
+                  f"(feature={accum_feat:.4f} joint={accum_joint:.4f})", flush=True)
             t_last = now
 
         if step % cfg.train.val_every == 0 or step == cfg.train.max_steps:
