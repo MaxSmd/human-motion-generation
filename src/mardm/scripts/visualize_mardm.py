@@ -207,6 +207,22 @@ def main_impl(cfg: DictConfig) -> None:
             cond, m_lens=torch.tensor([latent_len], device=device),
             timesteps=int(cfg.viz.timesteps), cond_scale=float(cfg.viz.guidance),
         )
+        # --- latent-space collapse probe (isolates gen branch from the AE) ---
+        # Compare the GENERATED latents against the AE's TRUE latents for this
+        # clip and against the learned mask token. If gen latents sit on the
+        # mask token (rmse_mask≈0) and have ~no temporal variance, the masked-AR
+        # decode never moved off the mask → collapse, not an AE problem.
+        gt_norm = ((gt_ess - mean) / std).unsqueeze(0).to(device)         # (1, L, 67)
+        z_true = ae.encode(gt_norm)                                       # (1, ae_dim, Lz)
+        Lz = min(latents.shape[-1], z_true.shape[-1])
+        mask_tok = mardm.mask_latent.detach().reshape(1, -1, 1).to(device)  # (1, ae_dim, 1)
+        rmse_true = float((latents[..., :Lz] - z_true[..., :Lz]).pow(2).mean().sqrt())
+        rmse_mask = float((latents - mask_tok).pow(2).mean().sqrt())
+        gen_tvar = float(latents.std(dim=-1).mean())   # temporal spread of gen latents
+        true_tvar = float(z_true.std(dim=-1).mean())   # ...vs the real target's
+        print(f"[probe] {cid}  rmse(gen,true)={rmse_true:.3f}  rmse(gen,mask)={rmse_mask:.3f}  "
+              f"tvar gen/true={gen_tvar:.3f}/{true_tvar:.3f}", flush=True)
+
         pred_ess = denormalize(ae.decode(latents)[0].cpu(), mean, std)   # (latent_len*ds, 67)
         pred_joints = recover_joints_from_ric(pred_ess).numpy()
 
