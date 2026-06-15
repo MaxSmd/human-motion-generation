@@ -168,6 +168,9 @@ def main_impl(cfg: DictConfig) -> None:
     if cfg.viz.checkpoint in (None, "", "???"):
         raise ValueError("set +viz.checkpoint=<path/to/gen latest.pt>")
 
+    print(f"[viz] guidance={float(cfg.viz.guidance)}  timesteps={int(cfg.viz.timesteps)}  "
+          f"(cond_drop_prob={cfg.model.cond_drop_prob}: use guidance=1.0 if it was 0)", flush=True)
+
     mean, std = _load_stats(cfg.stats_path)
     text_encoder = _build_text_encoder(cfg)
     ae = _load_frozen_ae(cfg, device)
@@ -186,7 +189,7 @@ def main_impl(cfg: DictConfig) -> None:
     zf = zipfile.ZipFile(Path(cfg.data.root) / cfg.data.zip_name)
 
     manifest: list[dict] = []
-    metrics: dict[str, float] = {}
+    metrics: dict[str, dict] = {}
     for idx in range(n_render):
         sample = dataset[idx]
         cid = sample.clip_id
@@ -208,9 +211,17 @@ def main_impl(cfg: DictConfig) -> None:
         pred_joints = recover_joints_from_ric(pred_ess).numpy()
 
         m = min(gt_joints.shape[0], pred_joints.shape[0])
-        mpjpe = float(np.linalg.norm(gt_joints[:m] - pred_joints[:m], axis=-1).mean())
-        metrics[cid] = mpjpe
-        print(f"[viz] {cid}  L={L:3d}  MPJPE={mpjpe:.4f}  cap={caption[:50]!r}", flush=True)
+        gt_m, pred_m = gt_joints[:m], pred_joints[:m]
+        mpjpe = float(np.linalg.norm(gt_m - pred_m, axis=-1).mean())
+        # Root-relative (pose-only): subtract joint-0 each frame so global
+        # trajectory drift (integrated root velocity) doesn't dominate. This
+        # isolates "did it memorize the pose" from "did the root trajectory drift".
+        gt_rel = gt_m - gt_m[:, 0:1, :]
+        pred_rel = pred_m - pred_m[:, 0:1, :]
+        mpjpe_local = float(np.linalg.norm(gt_rel - pred_rel, axis=-1).mean())
+        metrics[cid] = {"mpjpe": mpjpe, "mpjpe_local": mpjpe_local}
+        print(f"[viz] {cid}  L={L:3d}  MPJPE={mpjpe:.4f}  local={mpjpe_local:.4f}  "
+              f"cap={caption[:46]!r}", flush=True)
 
         gt_gif = _render(gt_joints, out_dir / f"real-{cid}.gif",
                          title=f"GT [{cid}] {caption[:50]}", fps=int(cfg.viz.fps))
@@ -221,14 +232,18 @@ def main_impl(cfg: DictConfig) -> None:
                          "caption": caption, "mpjpe": mpjpe})
 
     if metrics:
-        vals = np.array(list(metrics.values()))
-        summary = {"per_clip": metrics, "mean_mpjpe": float(vals.mean()),
-                   "median_mpjpe": float(np.median(vals)), "n_clips": len(metrics)}
+        glob = np.array([v["mpjpe"] for v in metrics.values()])
+        loc = np.array([v["mpjpe_local"] for v in metrics.values()])
+        summary = {"per_clip": metrics, "n_clips": len(metrics),
+                   "mean_mpjpe": float(glob.mean()), "median_mpjpe": float(np.median(glob)),
+                   "mean_mpjpe_local": float(loc.mean()), "median_mpjpe_local": float(np.median(loc))}
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "metrics.json").write_text(json.dumps(summary, indent=2))
         (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
-        print(f"\n[viz] mean MPJPE = {summary['mean_mpjpe']:.4f} over "
-              f"{summary['n_clips']} clips  (lower = better memorized)", flush=True)
+        print(f"\n[viz] mean MPJPE        = {summary['mean_mpjpe']:.4f}  (global; "
+              f"inflated by root drift on locomotion)", flush=True)
+        print(f"[viz] mean MPJPE local  = {summary['mean_mpjpe_local']:.4f}  (pose-only; "
+              f"the real memorization signal — lower = better)", flush=True)
     print(f"[viz] done — GIFs + metrics under {out_dir}", flush=True)
 
 
@@ -237,7 +252,9 @@ def main(cfg: DictConfig) -> None:
     viz_cfg = OmegaConf.create({
         "checkpoint": "???",   # required: gen-branch checkpoint
         "num_clips": 8,        # how many subset clips to render/score
-        "guidance": 1.5,       # CFG scale (overfit AE/gen has weak CFG → keep low)
+        "guidance": 1.0,       # CFG scale; 1.0 = pure conditional. A cond_drop_prob=0
+                               # model has an UNTRAINED unconditional branch, so >1 mixes
+                               # in garbage — keep 1.0 unless the model trained with CFG dropout.
         "timesteps": 18,       # masked-AR sampling iterations
         "use_ema": True,
         "fps": 20,

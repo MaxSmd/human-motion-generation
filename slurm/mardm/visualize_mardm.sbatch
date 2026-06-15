@@ -41,7 +41,7 @@ MARDM_STATS="${MARDM_STATS:-${RUNS_ROOT}/mardm_essential_stats.pt}"
 
 SUBSET_FRAC="${SUBSET_FRAC:-0.003}"
 NUM_CLIPS="${NUM_CLIPS:-8}"
-GUIDANCE="${GUIDANCE:-1.5}"
+GUIDANCE="${GUIDANCE:-1.0}"   # 1.0 = pure conditional (correct for cond_drop_prob=0 overfit)
 TIMESTEPS="${TIMESTEPS:-18}"
 RUN_NAME="${RUN_NAME:-mardm-viz-$(basename "${GEN_CKPT}" .pt)}"
 OVERRIDES="${OVERRIDES:-}"
