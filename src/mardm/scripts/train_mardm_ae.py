@@ -307,9 +307,11 @@ def main(cfg: DictConfig) -> None:
     # load time preserves it (this repo's EMA tracks buffers).
     scale_loader = _build_loader(train_ds, cfg, cfg.train.micro_batch_size,
                                  shuffle=False, drop_last=False)
-    with ema.swapped(ae):
-        scale = ae.compute_latent_scale(
-            scale_loader, device, max_batches=int(cfg.train.get("scale_batches", 50)))
+    # Compute on LIVE weights — gen/eval load the frozen AE with ae_use_ema=false
+    # (the AE EMA is init-dominated on short runs), so the scale must match the
+    # live encoder it will actually be applied to.
+    scale = ae.compute_latent_scale(
+        scale_loader, device, max_batches=int(cfg.train.get("scale_batches", 50)))
     ae.latent_scale.copy_(scale)
     ema.shadow["latent_scale"] = scale.detach().clone()
     raw_std = float((1.0 / ae.latent_scale).mean())
