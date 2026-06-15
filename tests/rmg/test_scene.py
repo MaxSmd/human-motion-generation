@@ -65,6 +65,24 @@ def test_place_motion_puts_pelvis_at_spawn() -> None:
     assert torch.allclose(t2[0, 1], translation[0, 1], atol=1e-5)
 
 
+def test_spawn_rotation_is_absolute_walk_direction() -> None:
+    # A clip that walks +X canonically must, at spawn rotation 0, walk +Z (the
+    # spawn arrow); at rotation 90° it must walk +X.
+    T = 10
+    quats = torch.zeros(T, NUM_JOINTS, 4)
+    quats[..., 0] = 1.0
+    translation = torch.zeros(T, 3)
+    translation[:, 0] = torch.linspace(0, 2.0, T)  # walk +X
+
+    t0, _ = place_motion(translation, quats, (0.0, 0.0, 0.0))
+    disp0 = t0[-1] - t0[0]
+    assert disp0[2] > 0.5 and abs(disp0[0]) < 1e-4, f"rot 0 should walk +Z, got {disp0}"
+
+    t90, _ = place_motion(translation, quats, (0.0, 0.0, 90.0))
+    disp90 = t90[-1] - t90[0]
+    assert disp90[0] > 0.5 and abs(disp90[2]) < 1e-4, f"rot 90 should walk +X, got {disp90}"
+
+
 def test_place_motion_matches_place_joints() -> None:
     skel = _toy_skeleton()
     T = 4

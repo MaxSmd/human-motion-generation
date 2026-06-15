@@ -82,20 +82,33 @@ function presetNarrowPath() {
     spawn: { x: 0, z: -2.6, rotation: 0 },
   };
 }
+function _stairs(z0 = 0.8, n = 4, w = 1.6) {
+  const steps = [];
+  for (let i = 0; i < n; i++) {
+    const h = (i + 1) * 0.2;
+    steps.push({ id: uid(), kind: "box", x: 0, y: h / 2, z: z0 + i * 0.45, w, h, d: 0.45, rotation: 0, label: `step ${i + 1}` });
+  }
+  return steps;
+}
 function presetStairs() {
   // Solid blocks of increasing height ahead of the spawn (avoid-penetration).
-  const steps = [];
-  for (let i = 0; i < 4; i++) {
-    const h = (i + 1) * 0.2;
-    steps.push({ id: uid(), kind: "box", x: 0, y: h / 2, z: 0.8 + i * 0.45, w: 1.6, h, d: 0.45, rotation: 0, label: `step ${i + 1}` });
-  }
-  return { room: { width: 4, depth: 6, height: 3 }, objects: steps, spawn: { x: 0, z: -2.2, rotation: 0 } };
+  return { room: { width: 4, depth: 6, height: 3 }, objects: _stairs(0.8), spawn: { x: 0, z: -2.2, rotation: 0 } };
+}
+function presetPathStairs() {
+  // Narrow corridor leading INTO a staircase — the combined test scene.
+  const wall = (x, label) => ({ id: uid(), kind: "box", x, y: 0.75, z: -1.5, w: 0.2, h: 1.5, d: 3, rotation: 0, label });
+  return {
+    room: { width: 4, depth: 7, height: 3 },
+    objects: [wall(-0.6, "left wall"), wall(0.6, "right wall"), ..._stairs(1.0, 4, 1.0)],
+    spawn: { x: 0, z: -3.0, rotation: 0 },
+  };
 }
 const PRESETS = [
   { key: "empty", label: "Empty", build: presetEmpty },
   { key: "low", label: "Low ceiling", build: presetLowCeiling },
   { key: "narrow", label: "Narrow path", build: presetNarrowPath },
   { key: "stairs", label: "Stairs ahead", build: presetStairs },
+  { key: "pathstairs", label: "Path + stairs", build: presetPathStairs },
 ];
 
 export default function RoomEditor({ clusterMode = false, checkpoints = [] }) {

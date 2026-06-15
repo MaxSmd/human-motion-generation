@@ -37,10 +37,27 @@ from .constraints import CONSTRAINABLE_REPRESENTATIONS  # noqa: F401 (re-exporte
 
 
 def _rot_y(p: Tensor, angle_rad: float) -> Tensor:
-    """Rotate points `p` (..., 3) about the up (Y) axis by `angle_rad`."""
+    """Rotate points `p` (..., 3) about the up (Y) axis by `angle_rad` (float)."""
     c, s = math.cos(angle_rad), math.sin(angle_rad)
     x, y, z = p[..., 0], p[..., 1], p[..., 2]
     return torch.stack([c * x + s * z, y, -s * x + c * z], dim=-1)
+
+
+def _rot_y_t(p: Tensor, ang: Tensor) -> Tensor:
+    """Rotate points `p` (..., 3) about Y by a tensor angle `ang` (broadcasts)."""
+    c, s = torch.cos(ang), torch.sin(ang)
+    x, y, z = p[..., 0], p[..., 1], p[..., 2]
+    return torch.stack([c * x + s * z, y, -s * x + c * z], dim=-1)
+
+
+# Heading measured so 0 = +Z (forward) and +90° = +X (right) — matches the
+# RoomEditor spawn arrow (cone points +Z at rotation 0; rotating the marker +90°
+# about Y sends it to +X). atan2(x, z) gives exactly that.
+def _heading(dx: Tensor, dz: Tensor) -> Tensor:
+    return torch.atan2(dx, dz)
+
+
+_MOVE_EPS = 0.12  # m of horizontal travel below which heading is ill-defined
 
 
 def _sdf_box(p: Tensor, center, half, yaw_rad: float = 0.0) -> Tensor:
@@ -99,30 +116,52 @@ def parse_scene(d: dict | None) -> Scene | None:
 # --------------------------------------------------------------------------- placement (exact)
 
 
+def _alignment_yaw(traj: Tensor, desired_rad: Tensor | float) -> Tensor:
+    """Yaw that rotates the clip's *walk direction* to face `desired_rad`.
+
+    `traj` is the pelvis trajectory (..., T, 3). We take its net horizontal
+    displacement as the clip's heading and return desired − heading, so the spawn
+    rotation is ABSOLUTE (0° ⇒ walks toward +Z, the spawn arrow) regardless of
+    the model's canonical facing. Falls back to `desired` when the clip barely
+    moves (heading undefined — e.g. waving in place). Per leading batch dim.
+    """
+    disp = traj[..., -1, :] - traj[..., 0, :]            # (..., 3)
+    dx, dz = disp[..., 0], disp[..., 2]
+    horiz = torch.sqrt(dx * dx + dz * dz + 1e-12)         # +eps ⇒ finite grad at 0
+    heading = _heading(dx, dz)
+    desired = traj.new_tensor(desired_rad) if not torch.is_tensor(desired_rad) else desired_rad
+    return torch.where(horiz > _MOVE_EPS, desired - heading, torch.broadcast_to(desired, heading.shape))
+
+
 def place_joints(joints: Tensor, spawn: tuple[float, float, float]) -> Tensor:
-    """Rigidly place FK joints (B, T, J, 3) so the frame-0 pelvis sits at the
-    spawn xz and the clip is yawed by the spawn rotation. Differentiable."""
+    """Rigidly place FK joints (B, T, J, 3): frame-0 pelvis at the spawn xz, clip
+    yawed so its walk direction faces the spawn rotation. Differentiable."""
     sx, sz, rot = spawn
-    p0 = joints[:, 0:1, 0:1, :]                      # (B,1,1,3) frame-0 pelvis
-    recenter = joints.new_tensor([1.0, 0.0, 1.0])    # drop xz only, keep y
+    pelvis = joints[:, :, 0, :]                       # (B,T,3)
+    yaw = _alignment_yaw(pelvis, math.radians(rot))   # (B,)
+    p0 = joints[:, 0:1, 0:1, :]                       # (B,1,1,3) frame-0 pelvis
+    recenter = joints.new_tensor([1.0, 0.0, 1.0])     # drop xz only, keep y
     centered = joints - p0 * recenter
-    placed = _rot_y(centered, math.radians(rot))
+    placed = _rot_y_t(centered, yaw.view(-1, 1, 1))  # (B,1,1) ⇒ broadcasts over T,J
     return placed + joints.new_tensor([sx, 0.0, sz])
 
 
 def place_motion(translation: Tensor, quats: Tensor, spawn: tuple[float, float, float]) -> tuple[Tensor, Tensor]:
-    """Exact spawn placement on the representation: yaw + xz-translate the root
-    trajectory and pre-rotate the root orientation. (T, 3), (T, J, 4) → placed.
+    """Exact spawn placement on the representation: align the walk direction to
+    the spawn rotation, then xz-translate the root to spawn and pre-rotate the
+    root orientation. (T, 3), (T, J, 4) → placed.
 
     Equivalent (verified) to `place_joints(FK(...))`; used to place the *final*
     sample before decode/render so the returned clip actually starts at spawn.
     """
     sx, sz, rot = spawn
-    rad = math.radians(rot)
+    yaw = _alignment_yaw(translation, math.radians(rot))   # scalar tensor
     p0 = translation[0]
     centered = translation - translation.new_tensor([p0[0], 0.0, p0[2]])
-    trans2 = _rot_y(centered, rad) + translation.new_tensor([sx, 0.0, sz])
-    q_yaw = quats.new_tensor([math.cos(rad / 2), 0.0, math.sin(rad / 2), 0.0])
+    trans2 = _rot_y_t(centered, yaw) + translation.new_tensor([sx, 0.0, sz])
+    half = 0.5 * yaw
+    z = torch.zeros_like(half)
+    q_yaw = torch.stack([torch.cos(half), z, torch.sin(half), z])  # (4,)
     quats2 = quats.clone()
     quats2[..., 0, :] = quat_mul(q_yaw.expand_as(quats[..., 0, :]), quats[..., 0, :])
     return trans2, quats2
