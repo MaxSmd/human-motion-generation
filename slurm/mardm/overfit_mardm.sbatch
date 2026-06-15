@@ -47,6 +47,13 @@ MARDM_STATS="${MARDM_STATS:-${RUNS_ROOT}/mardm_essential_stats.pt}"
 SUBSET_FRAC="${SUBSET_FRAC:-0.005}"
 AE_STEPS="${AE_STEPS:-3000}"
 GEN_STEPS="${GEN_STEPS:-5000}"
+# CFG dropout: must be >0 so the model learns a conditional-vs-unconditional
+# contrast and generation can be driven by the caption with guidance>1. (0 only
+# memorizes the context shortcut -> generation ignores text / collapses.)
+COND_DROP="${COND_DROP:-0.1}"
+# Min LR as a fraction of peak; raise (e.g. 0.3) for longer runs so the schedule
+# doesn't floor out early and stall the loss.
+MIN_LR_RATIO="${MIN_LR_RATIO:-0.1}"
 
 STAMP="${SLURM_JOB_ID:-$(date +%Y%m%d-%H%M%S)}"
 AE_RUN="mardm-overfit-ae-${STAMP}"
@@ -100,8 +107,9 @@ enroot start \
             data.preload=true \\
             train.micro_batch_size=16 \\
             train.grad_accum=1 \\
-            model.cond_drop_prob=0 \\
+            model.cond_drop_prob=${COND_DROP} \\
             model.dropout=0 \\
+            train.scheduler.min_lr_ratio=${MIN_LR_RATIO} \\
             train.max_steps=${GEN_STEPS} \\
             train.val_every=$((GEN_STEPS / 4)) \\
             train.ckpt_every=${GEN_STEPS} \\

@@ -66,6 +66,23 @@ standing vs. RMG/MoMask at matched, ≤1-day-per-model compute.
 - **z-normalization, not manifold normalization.** MARDM standardizes the
   essential dims with a train-split mean/std (`mardm.scripts.compute_mardm_stats`),
   unlike RMG's manifold structure.
+- **Unit-variance AE latents for the SiT head — intentional deviation from
+  upstream.** Upstream MARDM feeds the *raw* AE latents straight into the SiT
+  diffusion head (no scaling anywhere in `AE.py` / `MARDM.py` / `DiffMLPs.py` /
+  `train_MARDM.py`). Our AE's latents come out at std ≈ 0.13, and against the
+  SiT N(0,1) prior that low SNR makes the trivial "predict the noise / collapse
+  to the latent mean" solution a strong attractor — the velocity loss parks at
+  `var(latent) ≈ 0.13² ≈ 0.02` and sampling returns noise (motions just jitter
+  in place). Upstream escapes this with full-dataset, long-schedule training; at
+  our scaled-down ≤1-day budget it does not. So we add a **per-channel
+  `latent_scale` buffer to the AE** (`encode` ×scale, `decode` ÷scale;
+  `forward`/reconstruction is bypassed and therefore unchanged), computed
+  post-training as `1/std` of the raw encoder output and stored in the AE
+  checkpoint (and EMA shadow). This makes the head see ~unit-variance latents —
+  standard SiT/LDM practice — and lets the generator learn the signal within the
+  compute budget. A deliberate, documented departure from a 1:1 port;
+  `latent_scale=1` (the default for pre-existing checkpoints) recovers upstream
+  behavior.
 - **`tasks/` layering.** Sampling/orchestration lives in `tasks/generation.py`;
   the scripts are thin Hydra wrappers (models / training / tasks split).
 - **Dropped from upstream** (irrelevant for this task): the DDPM head, the
