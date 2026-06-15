@@ -77,7 +77,7 @@ def _build_text_encoder(cfg: DictConfig) -> TextEncoder:
 def _load_frozen_ae(cfg: DictConfig, device: torch.device) -> AE:
     ae = AE(AEConfig(**OmegaConf.to_container(cfg.ae, resolve=True))).to(device)
     state = load_checkpoint(Path(cfg.ae_checkpoint), map_location=device)
-    ae.load_state_dict(state.model)
+    ae.load_state_dict(state.model, strict=False)  # tolerate pre-latent_scale checkpoints
     if cfg.ae_use_ema and state.ema is not None:
         ema = EMA(ae, decay=0.0)
         ema.load_state_dict(state.ema)

@@ -141,22 +141,55 @@ class AE(nn.Module):
                                cfg.width, cfg.depth, cfg.dilation_growth_rate, cfg.activation, cfg.norm)
         self.decoder = Decoder(cfg.input_width, cfg.output_emb_width, cfg.down_t, cfg.stride_t,
                                cfg.width, cfg.depth, cfg.dilation_growth_rate, cfg.activation, cfg.norm)
+        # Per-channel latent scale so `encode` hands the diffusion head ~unit-
+        # variance latents (the SiT prior is N(0,1)); without it the raw latents
+        # (std ~0.13) sit under the noise floor and the head can't learn the
+        # signal. Computed post-training via `compute_latent_scale`; defaults to
+        # 1.0 (no-op) so older checkpoints behave unchanged. `forward` bypasses
+        # encode/decode, so reconstruction is unaffected.
+        self.register_buffer("latent_scale", torch.ones(cfg.output_emb_width))
 
     @staticmethod
     def _to_channels_first(x: Tensor) -> Tensor:
         return x.permute(0, 2, 1).float()  # (B, T, C) -> (B, C, T)
 
     def encode(self, x: Tensor) -> Tensor:
-        """(B, T, input_width) -> (B, output_emb_width, T // downsample_rate)."""
-        return self.encoder(self._to_channels_first(x))
+        """(B, T, input_width) -> (B, output_emb_width, T // downsample_rate), scaled."""
+        z = self.encoder(self._to_channels_first(x))
+        return z * self.latent_scale.view(1, -1, 1)
 
     def decode(self, z: Tensor) -> Tensor:
-        """(B, output_emb_width, L) -> (B, L * downsample_rate, input_width)."""
-        return self.decoder(z)
+        """(B, output_emb_width, L) -> (B, L * downsample_rate, input_width). Inverts `encode`'s scale."""
+        return self.decoder(z / self.latent_scale.view(1, -1, 1))
 
     def forward(self, x: Tensor) -> Tensor:
-        """(B, T, input_width) -> (B, T, input_width) reconstruction."""
+        """(B, T, input_width) -> (B, T, input_width) reconstruction (scale-free)."""
         return self.decoder(self.encoder(self._to_channels_first(x)))
+
+    @torch.no_grad()
+    def compute_latent_scale(self, loader, device, max_batches: int = 50,
+                             eps: float = 1e-4) -> Tensor:
+        """Return per-channel 1/std of the RAW encoder output over `loader`.
+
+        Uses `self.encoder` directly (not `encode`), so it's independent of the
+        current `latent_scale`. The caller stores the result on the model (and,
+        because this repo's EMA tracks buffers, on the EMA shadow too).
+        """
+        csum = torch.zeros(self.output_emb_width, device=device)
+        csqs = torch.zeros(self.output_emb_width, device=device)
+        count = 0
+        for i, batch in enumerate(loader):
+            if i >= max_batches:
+                break
+            x = batch.x1.to(device)
+            z = self.encoder(self._to_channels_first(x))          # (B, ae_dim, L) raw
+            zc = z.transpose(0, 1).reshape(self.output_emb_width, -1)
+            csum += zc.sum(1)
+            csqs += (zc * zc).sum(1)
+            count += zc.shape[1]
+        mean = csum / max(count, 1)
+        std = (csqs / max(count, 1) - mean ** 2).clamp(min=eps).sqrt()
+        return (1.0 / std.clamp(min=eps)).to(self.latent_scale)
 
     def num_params(self) -> int:
         return sum(p.numel() for p in self.parameters())

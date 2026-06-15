@@ -203,7 +203,7 @@ def main(cfg: DictConfig) -> None:
     if latest is not None:
         print(f"[ae] resuming from {latest}")
         state = load_checkpoint(latest, map_location=device)
-        ae.load_state_dict(state.model)
+        ae.load_state_dict(state.model, strict=False)  # tolerate pre-latent_scale checkpoints
         if state.ema:
             ema.load_state_dict(state.ema)
         opt.load_state_dict(state.optimizer)
@@ -299,6 +299,29 @@ def main(cfg: DictConfig) -> None:
             if step % cfg.train.ckpt_every == 0 or step == cfg.train.max_steps:
                 save_checkpoint(output_dir / "checkpoints" / f"ckpt-{step:09d}.pt", payload)
             save_checkpoint(output_dir / "checkpoints" / "latest.pt", payload)
+
+    # --- per-channel latent scale for the diffusion head ---------------------
+    # Compute on the EMA weights (what inference uses). The scale is computed
+    # INSIDE the swap but applied OUTSIDE it, because the EMA swap would revert
+    # the buffer on exit; we also write it into the EMA shadow so `copy_to` at
+    # load time preserves it (this repo's EMA tracks buffers).
+    scale_loader = _build_loader(train_ds, cfg, cfg.train.micro_batch_size,
+                                 shuffle=False, drop_last=False)
+    with ema.swapped(ae):
+        scale = ae.compute_latent_scale(
+            scale_loader, device, max_batches=int(cfg.train.get("scale_batches", 50)))
+    ae.latent_scale.copy_(scale)
+    ema.shadow["latent_scale"] = scale.detach().clone()
+    raw_std = float((1.0 / ae.latent_scale).mean())
+    print(f"[ae] latent_scale set: raw latent std ~{raw_std:.3f} -> ~unit after scaling "
+          f"(per-channel, mean factor {float(ae.latent_scale.mean()):.2f})", flush=True)
+    payload = TrainState(
+        step=step, model=ae.state_dict(), ema=ema.state_dict(),
+        optimizer=opt.state_dict(), scheduler=sched.state_dict(),
+        scaler=scaler.state_dict() if scaler is not None else None,
+        rng=collect_rng_state(), extras={"wandb_run_id": logger.wandb_run_id},
+    )
+    save_checkpoint(output_dir / "checkpoints" / "latest.pt", payload)
 
     logger.close()
     print(f"[ae] done at step {step}")
