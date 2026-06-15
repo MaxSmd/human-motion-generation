@@ -308,6 +308,13 @@ def main_impl(cfg: DictConfig) -> None:
 
         pred_ess = denormalize(ae.decode(latents)[0].cpu(), mean, std)   # (latent_len*ds, 67)
         pred_joints = recover_joints_from_ric(pred_ess).numpy()
+        # AE reconstruction (decode∘encode of GT, NO diffusion) = the decode floor.
+        # gen ≈ true latents, so gen joints can't beat this. If aerecon wiggles
+        # too, the AE/essential→joints path is the culprit, not the diffusion.
+        recon_ess = denormalize(ae.decode(z_true)[0].cpu(), mean, std)
+        recon_joints = recover_joints_from_ric(recon_ess).numpy()
+        mr = min(gt_joints.shape[0], recon_joints.shape[0])
+        recon_mpjpe = float(np.linalg.norm(gt_joints[:mr] - recon_joints[:mr], axis=-1).mean())
 
         m = min(gt_joints.shape[0], pred_joints.shape[0])
         gt_m, pred_m = gt_joints[:m], pred_joints[:m]
@@ -322,11 +329,17 @@ def main_impl(cfg: DictConfig) -> None:
         print(f"[viz] {cid}  L={L:3d}  MPJPE={mpjpe:.4f}  local={mpjpe_local:.4f}  "
               f"cap={caption[:46]!r}", flush=True)
 
+        print(f"[aerecon] {cid}  mpjpe(aerecon,gt)={recon_mpjpe:.4f}  "
+              f"(decode∘encode floor; gen can't beat this)", flush=True)
+
         gt_gif = _render(gt_joints, out_dir / f"real-{cid}.gif",
                          title=f"GT [{cid}] {caption[:50]}", fps=int(cfg.viz.fps))
+        recon_gif = _render(recon_joints, out_dir / f"aerecon-{cid}.gif",
+                            title=f"AE-RECON [{cid}] mpjpe={recon_mpjpe:.3f}", fps=int(cfg.viz.fps))
         pred_gif = _render(pred_joints, out_dir / f"gen-{cid}.gif",
                            title=f"PRED [{cid}] mpjpe={mpjpe:.3f}", fps=int(cfg.viz.fps))
         manifest.append({"file": gt_gif.name, "kind": "gt", "clip_id": cid, "caption": caption})
+        manifest.append({"file": recon_gif.name, "kind": "aerecon", "clip_id": cid})
         manifest.append({"file": pred_gif.name, "kind": "pred", "clip_id": cid,
                          "caption": caption, "mpjpe": mpjpe})
 
