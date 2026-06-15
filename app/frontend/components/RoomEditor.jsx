@@ -23,8 +23,9 @@ import {
   OrbitControls,
   TransformControls,
 } from "@react-three/drei";
-import { api } from "@/lib/api";
+import { api, mediaUrl } from "@/lib/api";
 import MediaViewer from "./MediaViewer";
+import MotionPlayer from "./MotionPlayer";
 import RemoteCheckpointPicker from "./RemoteCheckpointPicker";
 import VizJobResult from "./VizJobResult";
 import { useVizJob } from "@/lib/useVizJob";
@@ -63,6 +64,40 @@ const C = {
   room: "#2b3a52",
 };
 
+// Preset scenes. Each builder returns a fresh scene (new object ids). The
+// geometry ones (low ceiling / narrow path / stairs) only bite when room
+// guidance > 0; spawn placement is always exact.
+function presetEmpty() {
+  return { room: { width: 4, depth: 4, height: 2.5 }, objects: [], spawn: { x: 0, z: 0, rotation: 0 } };
+}
+function presetLowCeiling() {
+  // 1.3 m ceiling — a ~1.7 m skeleton must crouch (bones are fixed, can't shrink).
+  return { room: { width: 3, depth: 4, height: 1.3 }, objects: [], spawn: { x: 0, z: -1.4, rotation: 0 } };
+}
+function presetNarrowPath() {
+  const wall = (x, label) => ({ id: uid(), kind: "box", x, y: 0.75, z: 0, w: 0.2, h: 1.5, d: 5, rotation: 0, label });
+  return {
+    room: { width: 4, depth: 6, height: 2.5 },
+    objects: [wall(-0.6, "left wall"), wall(0.6, "right wall")], // ~1.0 m gap down +z
+    spawn: { x: 0, z: -2.6, rotation: 0 },
+  };
+}
+function presetStairs() {
+  // Solid blocks of increasing height ahead of the spawn (avoid-penetration).
+  const steps = [];
+  for (let i = 0; i < 4; i++) {
+    const h = (i + 1) * 0.2;
+    steps.push({ id: uid(), kind: "box", x: 0, y: h / 2, z: 0.8 + i * 0.45, w: 1.6, h, d: 0.45, rotation: 0, label: `step ${i + 1}` });
+  }
+  return { room: { width: 4, depth: 6, height: 3 }, objects: steps, spawn: { x: 0, z: -2.2, rotation: 0 } };
+}
+const PRESETS = [
+  { key: "empty", label: "Empty", build: presetEmpty },
+  { key: "low", label: "Low ceiling", build: presetLowCeiling },
+  { key: "narrow", label: "Narrow path", build: presetNarrowPath },
+  { key: "stairs", label: "Stairs ahead", build: presetStairs },
+];
+
 export default function RoomEditor({ clusterMode = false, checkpoints = [] }) {
   const [scene, setScene] = useState(DEFAULT_SCENE);
   const [selectedId, setSelectedId] = useState(null); // object id | 'spawn' | null
@@ -84,8 +119,31 @@ export default function RoomEditor({ clusterMode = false, checkpoints = [] }) {
 
   const selectedObj = scene.objects.find((o) => o.id === selectedId) || null;
 
+  const [preset, setPreset] = useState("empty");
+  const applyPreset = (p) => { setScene(p.build()); setSelectedId(null); setPreset(p.key); };
+
   return (
     <div className="space-y-5">
+    {/* ───────────── presets ───────────── */}
+    <div className="surface flex flex-wrap items-center gap-2 p-3">
+      <span className="label mr-1">presets</span>
+      {PRESETS.map((p) => (
+        <button
+          key={p.key}
+          onClick={() => applyPreset(p)}
+          className={`rounded-md border px-3 py-1.5 text-[12px] transition ${
+            preset === p.key
+              ? "border-[var(--signal)] bg-[var(--signal-dim)] text-[var(--signal)]"
+              : "border-[var(--hairline)] text-slate-300 hover:border-[var(--hairline-strong)]"
+          }`}
+        >
+          {p.label}
+        </button>
+      ))}
+      <span className="ml-auto text-[11px] text-[var(--muted)]">
+        low ceiling / narrow path / stairs need room guidance &gt; 0 to take effect
+      </span>
+    </div>
     <div className="grid gap-5 lg:grid-cols-[1fr_360px]">
       {/* ───────────── 3D viewport ───────────── */}
       <div className="surface relative overflow-hidden p-0" style={{ minHeight: 540 }}>
@@ -291,8 +349,16 @@ function RoomDispatch({ scene, clusterMode, checkpoints }) {
     finally { setLoading(false); }
   }
 
+  // Joints .npy for the in-browser 3D player (placement already applied server
+  // side, so it's in the room's world frame). Local → joints_npy_url; cluster →
+  // first finished output's npy_url.
+  const clusterOut = clusterMode && job?.state === "done" ? (job.outputs || []).find((o) => o.npy_url) : null;
+  const jointsUrl = clusterMode
+    ? (clusterOut?.npy_url ? mediaUrl(clusterOut.npy_url) : null)
+    : (result?.joints_npy_url ? mediaUrl(result.joints_npy_url) : null);
+
   return (
-    <div className="grid gap-5 lg:grid-cols-[1fr_360px]">
+    <div className="grid gap-5 lg:grid-cols-[340px_1fr]">
       <form className="surface space-y-4 p-5" onSubmit={go}>
         <div className="flex items-center justify-between">
           <div className="display text-sm font-bold text-white">Sample in this room</div>
@@ -336,7 +402,23 @@ function RoomDispatch({ scene, clusterMode, checkpoints }) {
       </form>
 
       <div className="surface p-5">
-        {clusterMode ? (
+        {jointsUrl ? (
+          <>
+            <div className="mb-3 flex items-center justify-between">
+              <span className="label">3d preview · orbit to view from any angle</span>
+              {(clusterOut?.media_url || result?.media_url) && (
+                <a
+                  href={mediaUrl(clusterOut?.media_url || result?.media_url)}
+                  target="_blank" rel="noreferrer"
+                  className="text-[11px] text-[var(--muted)] hover:text-[var(--signal)]"
+                >
+                  open gif ↗
+                </a>
+              )}
+            </div>
+            <MotionPlayer jointsUrl={jointsUrl} scene={scene} />
+          </>
+        ) : clusterMode ? (
           <VizJobResult job={job} error={jobError} submitting={submitting} emptyHint="Room-constrained clips will appear here." />
         ) : (
           <MediaViewer url={result?.media_url} caption={result?.caption} loading={loading} error={error} />
