@@ -232,34 +232,68 @@ def _caption_cosine(text_encoder, dataset, zf, device, n_clips: int) -> None:
 
 
 @torch.no_grad()
+def _ae_reconstruct(ae, dataset, zf, mean, std, device, n_clips: int,
+                    out_dir: Path, fps: int) -> None:
+    """Render GT vs decode(encode(GT)) for a trained AE — a pure reconstruction
+    sanity check, no generation branch. Prints per-clip MPJPE (global + pose-only
+    local) and writes real-<cid>.gif / aerecon-<cid>.gif."""
+    locs, globs = [], []
+    for idx in range(n_clips):
+        sample = dataset[idx]
+        cid = sample.clip_id
+        gt_ess = sample.x1
+        gt_joints = recover_joints_from_ric(gt_ess).numpy()
+        gt_norm = ((gt_ess - mean) / std).unsqueeze(0).to(device)
+        recon_ess = denormalize(ae.decode(ae.encode(gt_norm))[0].cpu(), mean, std)
+        recon_joints = recover_joints_from_ric(recon_ess).numpy()
+        m = min(gt_joints.shape[0], recon_joints.shape[0])
+        gt_m, rc_m = gt_joints[:m], recon_joints[:m]
+        g = float(np.linalg.norm(gt_m - rc_m, axis=-1).mean())
+        loc = float(np.linalg.norm((gt_m - gt_m[:, 0:1]) - (rc_m - rc_m[:, 0:1]), axis=-1).mean())
+        globs.append(g); locs.append(loc)
+        print(f"[ae-recon] {cid}  L={gt_ess.shape[0]:3d}  MPJPE={g:.4f}  local={loc:.4f}", flush=True)
+        _render(gt_joints, out_dir / f"real-{cid}.gif", title=f"GT [{cid}]", fps=fps)
+        _render(recon_joints, out_dir / f"aerecon-{cid}.gif",
+                title=f"AE-RECON [{cid}] local={loc:.3f}", fps=fps)
+    if locs:
+        print(f"[ae-recon] mean MPJPE={float(np.mean(globs)):.4f}  "
+              f"mean local={float(np.mean(locs)):.4f}  (local≈0 ⇒ AE reproduces the pose; "
+              f"global inflated by root drift on locomotion)", flush=True)
+
+
+@torch.no_grad()
 def main_impl(cfg: DictConfig) -> None:
     set_seed(int(cfg.viz.seed))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     out_dir = Path(cfg.output_dir) / "viz"
     print(f"[viz] device={device}  out_dir={out_dir}", flush=True)
 
-    if cfg.viz.checkpoint in (None, "", "???"):
-        raise ValueError("set +viz.checkpoint=<path/to/gen latest.pt>")
-
-    print(f"[viz] guidance={float(cfg.viz.guidance)}  timesteps={int(cfg.viz.timesteps)}  "
-          f"(cond_drop_prob={cfg.model.cond_drop_prob}: use guidance=1.0 if it was 0)", flush=True)
-
     mean, std = _load_stats(cfg.stats_path)
-    text_encoder = _build_text_encoder(cfg)
     ae = _load_frozen_ae(cfg, device)
-    mardm = _load_mardm(cfg, cfg.viz.checkpoint, ae, device)
-    ds_rate = ae.downsample_rate
 
-    # Exact clips the model trained on: the same deterministic subset selection
-    # the training run used (subset_frac keeps the first N of the train split).
     dataset = EssentialDataset(
-        root=cfg.data.root, split="train", subset_frac=cfg.get("subset_frac"),
-        limit_clips=cfg.get("limit_clips"), window_size=None,
-        min_seq_len=cfg.data.min_seq_len, max_seq_len=cfg.data.max_seq_len,
+        root=cfg.data.root, split=str(cfg.viz.get("split", "train")),
+        subset_frac=cfg.get("subset_frac"), limit_clips=cfg.get("limit_clips"),
+        window_size=None, min_seq_len=cfg.data.min_seq_len, max_seq_len=cfg.data.max_seq_len,
     )
     n_render = min(len(dataset), int(cfg.viz.num_clips))
-    print(f"[viz] {len(dataset)} subset clips; rendering first {n_render}", flush=True)
     zf = zipfile.ZipFile(Path(cfg.data.root) / cfg.data.zip_name)
+
+    # AE-only mode: render GT vs decode(encode(GT)); no generation branch needed.
+    if bool(cfg.viz.get("ae_only", False)):
+        print(f"[viz] AE-only reconstruction check on {n_render} clips "
+              f"(split={cfg.viz.get('split', 'train')})", flush=True)
+        _ae_reconstruct(ae, dataset, zf, mean, std, device, n_render, out_dir, int(cfg.viz.fps))
+        return
+
+    if cfg.viz.checkpoint in (None, "", "???"):
+        raise ValueError("set +viz.checkpoint=<path/to/gen latest.pt> (or +viz.ae_only=true)")
+    print(f"[viz] guidance={float(cfg.viz.guidance)}  timesteps={int(cfg.viz.timesteps)}  "
+          f"(cond_drop_prob={cfg.model.cond_drop_prob}: use guidance=1.0 if it was 0)", flush=True)
+    text_encoder = _build_text_encoder(cfg)
+    mardm = _load_mardm(cfg, cfg.viz.checkpoint, ae, device)
+    ds_rate = ae.downsample_rate
+    print(f"[viz] {len(dataset)} subset clips; rendering first {n_render}", flush=True)
 
     if bool(cfg.viz.sweep):
         _recon_sweep(mardm, ae, text_encoder, dataset, zf, mean, std, device,
@@ -387,6 +421,8 @@ def main(cfg: DictConfig) -> None:
         "seed": 0,
         "sweep": True,         # run the teacher-forced mask-ratio reconstruction probe
         "sweep_clips": 4,      # how many clips to average the sweep over
+        "ae_only": False,      # render only GT vs decode(encode(GT)) — no gen needed
+        "split": "train",      # which split to pull clips from (ae_only / rendering)
     })
     cfg.viz = OmegaConf.merge(viz_cfg, cfg.get("viz", OmegaConf.create({})))
     main_impl(cfg)
