@@ -9,12 +9,17 @@ stays uniform):
     from mardm.training   import MARDMTrainerCfg
     from mardm.tasks      import generation as mardm_generation
 
-Shared utilities live in `rmg` and are intentionally NOT duplicated here:
+Shared, model-agnostic code lives in `shared` (don't duplicate it):
 
-    from rmg.data         import HumanML3DDataset, collate
-    from rmg.eval         import RealGuoEvaluator, fid, r_precision, ...
-    from rmg.utils        import EMA, Logger, save_checkpoint, ...
+    from shared.eval     import RealGuoEvaluator, fid, r_precision, ...
+    from shared.utils    import EMA, Logger, save_checkpoint, ...
+    from shared.text     import Qwen3EmbeddingEncoder, RandomTextEncoder
+    from shared.geometry import Skeleton, make_continuous, normalize_quaternions
+    from shared.data     import HumanML3DDataset, collate
+
+The shared `HumanML3DDataset` is representation-agnostic: pass it this model's
+`EssentialRepresentation` (see `mardm.data`) to get 67-D essential features.
 
 If you find yourself copy-pasting from `rmg/`, lift the shared piece into
-`rmg/` (or a new `common/` package) instead.
+`shared/` instead.
 """

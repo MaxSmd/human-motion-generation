@@ -1,0 +1,36 @@
+# Cluster-mounted layout: dataset zip is exposed via the cluster's
+# `/mnt/datasets/tools/mount_dataset.py` helper at job start. Activated when
+# the admins host the packed dataset centrally — until then, use
+# `local_submodule.yaml`.
+
+defaults: []
+
+root: /tmp/datasets/humanml3d_packed
+layout: mounted_zip
+zip_name: humanml3d.zip
+splits_name: splits.json
+offsets_name: target_offsets.pt
+
+fps: 20
+max_seq_len: 196
+min_seq_len: 40
+# Mirror augmentation is baked into the packed dataset (every clip ships as
+# `<id>` + left/right-mirrored `M<id>` with a swapped caption), so there is no
+# runtime mirror knob.
+
+# Fast-iteration subset (train split only). Set <1.0 to train on a fixed
+# random subset of training clips, deterministic by seed. Mirror pairs are
+# kept together. Same subset_seed across all three methods → comparable runs.
+subset_fraction: 1.0
+subset_seed: 0
+subset_n: 0                   # exact #clips override for tiny-overfit tests (0 = use subset_fraction)
+
+num_workers: 8              # local SSD on compute node — can push harder
+pin_memory: true
+persistent_workers: true
+prefetch_factor: 4
+# Preload encoded features into RAM at dataset init (~600 MB unmirrored / 1.2 GB
+# mirrored). Eliminates the per-step encode pipeline (zip read + FK + quat math)
+# which otherwise pins GPU util at ~5%. Default off to keep tests and tiny smoke
+# runs fast; flip on for full-dataset training.
+preload: false

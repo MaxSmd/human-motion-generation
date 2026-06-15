@@ -1,0 +1,5 @@
+# Backend-only extras. The model/render code comes from the `rmg` package
+# (installed via `pip install -e .` using the repo's pyproject.toml).
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pydantic>=2.0

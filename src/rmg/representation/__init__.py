@@ -1,4 +1,4 @@
-from .humanml3d_io import (
+from shared.geometry.humanml3d_io import (
     H3D_FEATURE_DIM,
     quat_between,
     quat_inv,
@@ -14,7 +14,7 @@ from .registry import (
     TRRepresentation,
     build_representation,
 )
-from .skeleton import (
+from shared.geometry.skeleton import (
     FOOT_LEFT_IDX,
     FOOT_RIGHT_IDX,
     JOINT_NAMES,

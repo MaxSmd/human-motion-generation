@@ -1,4 +1,4 @@
-# RMG container — builds an enroot-importable image.
+# Training/eval container (shared across models) — builds an enroot-importable image.
 #
 # Two paths to use this on the cluster:
 #   1. Enroot (recommended, primary path on this cluster — see BUILD.md). The

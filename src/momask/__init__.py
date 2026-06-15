@@ -9,11 +9,13 @@ stays uniform):
     from momask.training    import VQTrainerCfg, MaskedTrainerCfg
     from momask.tasks       import generation as momask_generation
 
-Shared utilities live in `rmg` and are intentionally NOT duplicated here:
+Shared, model-agnostic code lives in `shared` (don't duplicate it):
 
-    from rmg.data           import HumanML3DDataset, collate
-    from rmg.eval           import RealGuoEvaluator, fid, r_precision, ...
-    from rmg.utils          import EMA, Logger, save_checkpoint, ...
+    from shared.eval   import RealGuoEvaluator, fid, r_precision, ...
+    from shared.utils  import EMA, Logger, save_checkpoint, ...
+
+The HumanML3D loader (`rmg.data`) bakes in rmg's representation; build your
+own dataset/encoding for this model, reusing `shared` where you can
 
 If you find yourself copy-pasting from `rmg/`, lift the shared piece into
 `rmg/` (or a new `common/` package) instead.

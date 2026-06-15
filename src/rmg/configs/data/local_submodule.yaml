@@ -1,0 +1,34 @@
+# Local-first data layout: read packed HumanML3D from the in-repo submodule.
+# Default while AMASS is not yet hosted on the cluster.
+#
+# Override at the CLI:
+#   python scripts/train.py +data=cluster_mounted
+
+defaults: []
+
+root: ${oc.env:MGEN_DATA_ROOT,${oc.env:RMG_DATA_ROOT,${hydra:runtime.cwd}/external/data/humanml3d_packed}}
+layout: submodule_zip       # how the dataset class interprets `root`
+zip_name: humanml3d.zip
+splits_name: splits.json
+offsets_name: target_offsets.pt
+
+# Sequence + sampling
+fps: 20
+max_seq_len: 196            # HumanML3D upper bound (~10 s @ 20 fps)
+min_seq_len: 40
+# Mirror augmentation is baked into the packed dataset (every clip ships as
+# `<id>` + left/right-mirrored `M<id>` with a swapped caption), so there is no
+# runtime mirror knob.
+
+# Fast-iteration subset (train split only). Set <1.0 to train on a fixed
+# random subset of training clips, deterministic by seed. Mirror pairs are
+# kept together. Same subset_seed across all three methods → comparable runs.
+subset_fraction: 1.0
+subset_seed: 0
+subset_n: 0                   # exact #clips override for tiny-overfit tests (0 = use subset_fraction)
+
+# Dataloader
+num_workers: 4
+pin_memory: true
+persistent_workers: true
+prefetch_factor: 4

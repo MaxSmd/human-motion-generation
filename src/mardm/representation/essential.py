@@ -28,11 +28,11 @@ import numpy as np
 import torch
 from torch import Tensor
 
-from rmg.representation.humanml3d_io import (
+from shared.geometry import (
+    Skeleton,
     recover_joints_from_ric,
     tplusr_to_h3d_features_with_quats,
 )
-from rmg.representation.skeleton import Skeleton
 
 # root(1+2+1) + (J-1)*3 local joint positions = 4 + 63
 ESSENTIAL_DIM = 67

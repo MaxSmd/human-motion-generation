@@ -122,32 +122,10 @@ class Sphere(Manifold):
 
 
 # --- Quaternion helpers ----------------------------------------------------
-
-
-def quat_to_upper_hemisphere(q: Tensor) -> Tensor:
-    """Flip sign so that q_0 ≥ 0 (paper App. A: avoids the q ↔ -q ambiguity)."""
-    sign = torch.where(q[..., :1] < 0, -torch.ones_like(q[..., :1]), torch.ones_like(q[..., :1]))
-    return q * sign
-
-
-def quat_continuity(q: Tensor, dim: int = -2) -> Tensor:
-    """Propagate sign continuity across a sequence of quaternions (along `dim`).
-
-    For adjacent frames q_t, q_{t+1}: if <q_t, q_{t+1}> < 0, flip q_{t+1}'s sign.
-    Done as a python loop over the temporal axis (small, e.g. 196 frames).
-    """
-    if dim < 0:
-        dim = q.dim() + dim
-    if q.shape[dim] < 2:
-        return q
-    out = q.clone()
-    # iterate from index 1 along `dim`
-    prev = out.index_select(dim, torch.tensor([0], device=q.device)).squeeze(dim)
-    pieces = [prev]
-    for i in range(1, q.shape[dim]):
-        cur = out.index_select(dim, torch.tensor([i], device=q.device)).squeeze(dim)
-        dot = (prev * cur).sum(dim=-1, keepdim=True)
-        cur = torch.where(dot < 0, -cur, cur)
-        pieces.append(cur)
-        prev = cur
-    return torch.stack(pieces, dim=dim)
+# These model-agnostic sign-convention helpers were lifted to
+# `shared.geometry.quaternions` so mardm can reuse them. Re-exported here so
+# existing `rmg.manifolds.sphere` imports keep working unchanged.
+from shared.geometry.quaternions import (  # noqa: E402, F401
+    quat_continuity,
+    quat_to_upper_hemisphere,
+)

@@ -24,7 +24,7 @@ mkdir -p slurm/logs
 
 AE_CKPT="${AE_CKPT:?set AE_CKPT to the stage-1 AE checkpoint}"
 GEN_CKPT="${GEN_CKPT:-${1:?set GEN_CKPT env var or pass the gen checkpoint as the first positional arg}}"
-CONFIG_NAME="${CONFIG_NAME:-mardm/gen}"
+CONFIG_NAME="${CONFIG_NAME:-gen}"
 if [ -n "${SLURM_SUBMIT_DIR:-}" ]; then
     REPO="${REPO:-${SLURM_SUBMIT_DIR}}"
 else
@@ -37,6 +37,11 @@ HF_CACHE="${HF_CACHE:-${HOME}/hf-cache}"
 DATA_ROOT="${RMG_DATA_ROOT:-${REPO}/external/data/humanml3d_packed}"
 MARDM_STATS="${MARDM_STATS:-${RUNS_ROOT}/mardm_essential_stats.pt}"
 GUIDANCE="${GUIDANCE:-[2.5,3.5,4.5,5.5,6.5]}"
+# Run name (results land under RUNS_ROOT/RUN_NAME) — honoured so the app can
+# locate + pull this eval's metrics. Defaults to the gen-checkpoint basename.
+RUN_NAME="${RUN_NAME:-mardm-eval-$(basename "${GEN_CKPT}" .pt)}"
+# Extra Hydra overrides (space-separated key=value), e.g. from the app.
+OVERRIDES="${OVERRIDES:-}"
 
 enroot start \
     --rw \
@@ -53,12 +58,13 @@ enroot start \
         cd ${REPO}
         pip install -e . --no-deps --quiet
         python -m spacy download en_core_web_sm --quiet || true
-        python -u scripts/evaluate_mardm.py \\
+        python -u -m mardm.scripts.evaluate_mardm \\
             --config-name=${CONFIG_NAME} \\
             ae_checkpoint='${AE_CKPT}' \\
             text_encoder.type=qwen3 \\
             +eval.checkpoint='${GEN_CKPT}' \\
             +eval.evaluator=real \\
             +eval.guidance_scales='${GUIDANCE}' \\
-            run_name=mardm-eval-\$(basename ${GEN_CKPT} .pt)
+            run_name='${RUN_NAME}' \\
+            ${OVERRIDES}
     "

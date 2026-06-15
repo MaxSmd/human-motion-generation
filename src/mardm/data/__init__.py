@@ -1,6 +1,6 @@
-"""MARDM data: 67-D essential dataset (reuses rmg's packed loader + collate)."""
+"""MARDM data: 67-D essential dataset (reuses the shared packed loader + collate)."""
 
-from rmg.data.humanml3d import collate
+from shared.data import collate
 
 from .dataset import EssentialDataset
 

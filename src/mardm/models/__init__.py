@@ -1,8 +1,8 @@
 """MARDM model components.
 
-Reuse `rmg.models.text_encoder.Qwen3EmbeddingEncoder` for text conditioning so
-all three methods share the same text representation; pass its per-caption
-feature tensor into `MARDM` as `cond`.
+Reuse `shared.text.Qwen3EmbeddingEncoder` for text conditioning so all three
+methods share the same text representation; pass its per-caption feature tensor
+into `MARDM` as `cond`.
 """
 
 from .autoencoder import AE, AEConfig

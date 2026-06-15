@@ -14,6 +14,9 @@ dist/
 .ruff_cache/
 .coverage
 
+# backend rendered-media cache (server/cache.py)
+.media/
+
 # experiment outputs
 runs/
 outputs/
