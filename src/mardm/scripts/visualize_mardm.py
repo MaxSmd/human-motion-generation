@@ -159,6 +159,53 @@ def _load_mardm(cfg: DictConfig, ckpt: str | Path, ae: AE, device: torch.device)
 
 
 @torch.no_grad()
+def _recon_sweep(mardm, ae, text_encoder, dataset, zf, mean, std, device,
+                 n_clips: int, ratios: list[float]) -> None:
+    """Teacher-forced latent reconstruction at controlled mask ratios.
+
+    For each clip: encode the GT to true latents, mask a fraction r of the
+    tokens (rest kept as true context), run ONE prediction step, and measure
+    RMSE between predicted and true latents on the masked tokens. This isolates
+    whether the diffusion head works given context (low r) vs the all-masked
+    generation regime (r=1.0):
+      * low+flat across r  -> head/sampling fine; collapse is elsewhere.
+      * low at small r, blows up toward r=1 -> the model can denoise WITH
+        context but not from caption-only; the all-masked first generation
+        step is out-of-distribution. That's the bug, and it's training-side.
+    """
+    print("\n[sweep] teacher-forced latent reconstruction (1 step); "
+          "rmse = pred vs true latent on masked tokens:", flush=True)
+    agg: dict[float, list[float]] = {r: [] for r in ratios}
+    for idx in range(n_clips):
+        sample = dataset[idx]
+        cid = sample.clip_id
+        caption = torch.load(io.BytesIO(zf.read(f"{cid}.pt")),
+                             weights_only=False)["texts"][0]
+        gt_norm = ((sample.x1 - mean) / std).unsqueeze(0).to(device)
+        z_true = ae.encode(gt_norm).permute(0, 2, 1)          # (1, L, ae_dim)
+        b, L, _ = z_true.shape
+        cond = text_encoder.encode([caption], device=device)
+        padding_mask = torch.zeros(b, L, dtype=torch.bool, device=device)
+        row = []
+        for r in ratios:
+            num = max(1, int(round(r * L)))
+            torch.manual_seed(0)
+            perm = torch.randperm(L, device=device)
+            is_mask = torch.zeros(b, L, dtype=torch.bool, device=device)
+            is_mask[0, perm[:num]] = True
+            latents_in = torch.where(is_mask.unsqueeze(-1),
+                                     mardm.mask_latent.to(device), z_true)
+            pred = mardm.forward_with_CFG(latents_in, cond, padding_mask, cfg=1.0, mask=is_mask)
+            err = float((pred[is_mask] - z_true[is_mask]).pow(2).mean().sqrt())
+            row.append(err)
+            agg[r].append(err)
+        print(f"[sweep]   {cid}: " + "  ".join(f"r={r:.2f}:{e:.3f}" for r, e in zip(ratios, row)),
+              flush=True)
+    print("[sweep]   MEAN: " + "  ".join(f"r={r:.2f}:{float(np.mean(agg[r])):.3f}" for r in ratios),
+          flush=True)
+
+
+@torch.no_grad()
 def main_impl(cfg: DictConfig) -> None:
     set_seed(int(cfg.viz.seed))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -187,6 +234,11 @@ def main_impl(cfg: DictConfig) -> None:
     n_render = min(len(dataset), int(cfg.viz.num_clips))
     print(f"[viz] {len(dataset)} subset clips; rendering first {n_render}", flush=True)
     zf = zipfile.ZipFile(Path(cfg.data.root) / cfg.data.zip_name)
+
+    if bool(cfg.viz.sweep):
+        _recon_sweep(mardm, ae, text_encoder, dataset, zf, mean, std, device,
+                     n_clips=min(n_render, int(cfg.viz.sweep_clips)),
+                     ratios=[0.1, 0.25, 0.5, 0.75, 1.0])
 
     manifest: list[dict] = []
     metrics: dict[str, dict] = {}
@@ -275,6 +327,8 @@ def main(cfg: DictConfig) -> None:
         "use_ema": True,
         "fps": 20,
         "seed": 0,
+        "sweep": True,         # run the teacher-forced mask-ratio reconstruction probe
+        "sweep_clips": 4,      # how many clips to average the sweep over
     })
     cfg.viz = OmegaConf.merge(viz_cfg, cfg.get("viz", OmegaConf.create({})))
     main_impl(cfg)
