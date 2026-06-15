@@ -31,6 +31,7 @@ export default function MotionPlayer({ jointsUrl, scene, fps = 20 }) {
   const [frame, setFrame] = useState(0);
   const [playing, setPlaying] = useState(true);
   const [speed, setSpeed] = useState(1);
+  const [showAnalysis, setShowAnalysis] = useState(true);
 
   useEffect(() => {
     let alive = true;
@@ -56,7 +57,19 @@ export default function MotionPlayer({ jointsUrl, scene, fps = 20 }) {
   return (
     <div className="relative">
       <div className="relative overflow-hidden rounded-lg border border-[var(--hairline)]" style={{ height: 440 }}>
-        {fm && <ConstraintHUD fm={fm} clip={clip} />}
+        {showAnalysis && fm && <ConstraintHUD fm={fm} clip={clip} />}
+        {clip && (
+          <button
+            onClick={() => setShowAnalysis((s) => !s)}
+            className={`absolute right-3 top-3 z-10 rounded-md border px-2.5 py-1 font-mono text-[11px] uppercase tracking-widest transition ${
+              showAnalysis
+                ? "border-[var(--signal)] bg-[var(--signal-dim)] text-[var(--signal)]"
+                : "border-[var(--hairline)] bg-black/50 text-[var(--muted)] hover:text-slate-200"
+            }`}
+          >
+            analysis {showAnalysis ? "on" : "off"}
+          </button>
+        )}
         <Canvas camera={{ position: [4.5, 3.5, 5.5], fov: 48 }} style={{ height: 440, background: "transparent" }}>
           <hemisphereLight intensity={0.7} groundColor="#0a0f18" />
           <directionalLight position={[5, 8, 4]} intensity={1.0} />
@@ -66,7 +79,7 @@ export default function MotionPlayer({ jointsUrl, scene, fps = 20 }) {
             cellColor="#1d2738" sectionSize={1} sectionThickness={1} sectionColor="#2b3a52" fadeDistance={30}
             position={[0, 0.001, 0]} />
 
-          <SkeletonFrame joints={joints} frame={frame} violating={fm?.violating} />
+          <SkeletonFrame joints={joints} frame={frame} violating={showAnalysis ? fm?.violating : null} />
           <PlaybackDriver playing={playing} speed={speed} fps={fps} count={T} frame={frame} setFrame={setFrame} />
 
           <OrbitControls makeDefault enableDamping dampingFactor={0.1} maxPolarAngle={Math.PI / 2.05} />
@@ -96,7 +109,7 @@ export default function MotionPlayer({ jointsUrl, scene, fps = 20 }) {
         </select>
       </div>
 
-      {clip && <ViolationTimeline clip={clip} frame={frame} onSeek={(f) => { setPlaying(false); setFrame(f); }} />}
+      {showAnalysis && clip && <ViolationTimeline clip={clip} frame={frame} onSeek={(f) => { setPlaying(false); setFrame(f); }} />}
     </div>
   );
 }

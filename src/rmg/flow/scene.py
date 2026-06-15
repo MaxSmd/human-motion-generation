@@ -94,6 +94,7 @@ class Scene:
     room: tuple[float, float, float]      # (width, depth, height)
     objects: list[dict]                   # normalized obstacle dicts
     spawn: tuple[float, float, float]     # (x, z, rotation_deg)
+    padding: float = 0.0                  # standoff margin (m): brake this far out
 
     @property
     def spawn_rad(self) -> float:
@@ -110,6 +111,7 @@ def parse_scene(d: dict | None) -> Scene | None:
         room=(float(room.get("width", 4.0)), float(room.get("depth", 4.0)), float(room.get("height", 2.5))),
         objects=list(d.get("objects", []) or []),
         spawn=(float(spawn.get("x", 0.0)), float(spawn.get("z", 0.0)), float(spawn.get("rotation", 0.0))),
+        padding=float(d.get("padding", 0.0)),
     )
 
 
@@ -185,10 +187,12 @@ def scene_energy(joints_world: Tensor, scene: Scene) -> Tensor:
     def _agg(violation: Tensor) -> Tensor:           # (B,T,J) -> scalar
         return violation.pow(2).sum(dim=-1).mean()
 
+    m = max(0.0, float(scene.padding))               # standoff margin
     w, d, h = scene.room
-    # room containment — penalise leaving the box (incl. floor y<0 and ceiling y>h)
+    # Room containment — penalise leaving the box, and (with margin) coming within
+    # `m` of a wall/ceiling/floor, so the body keeps clear: ReLU(sdf + m).
     sdf_room = _sdf_box(joints_world, center=(0.0, h / 2, 0.0), half=(w / 2, h / 2, d / 2))
-    energy = _agg(sdf_room.clamp_min(0.0))
+    energy = _agg((sdf_room + m).clamp_min(0.0))
 
     for o in scene.objects:
         kind = o.get("kind")
@@ -203,7 +207,8 @@ def scene_energy(joints_world: Tensor, scene: Scene) -> Tensor:
                            yaw_rad=math.radians(float(o.get("rotation", 0.0))))
         else:
             continue
-        energy = energy + _agg(sdf.mul(-1.0).clamp_min(0.0))  # penetration depth²
+        # Penalise inside-the-obstacle AND within `m` of its surface: ReLU(m − sdf).
+        energy = energy + _agg((m - sdf).clamp_min(0.0))
     return energy
 
 

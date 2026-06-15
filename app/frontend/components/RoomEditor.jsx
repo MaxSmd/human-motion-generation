@@ -39,6 +39,7 @@ const DEFAULT_SCENE = {
   room: { width: 4, depth: 4, height: 2.5 },
   objects: [],
   spawn: { x: 0, z: 0, rotation: 0 },
+  padding: 0.1, // standoff margin (m): guidance brakes this far from surfaces
 };
 
 // Add-button presets. `kind` is the geometry; walls are just a thin tall box.
@@ -133,7 +134,7 @@ export default function RoomEditor({ clusterMode = false, checkpoints = [] }) {
   const selectedObj = scene.objects.find((o) => o.id === selectedId) || null;
 
   const [preset, setPreset] = useState("empty");
-  const applyPreset = (p) => { setScene(p.build()); setSelectedId(null); setPreset(p.key); };
+  const applyPreset = (p) => { setScene({ padding: scene.padding ?? 0.1, ...p.build() }); setSelectedId(null); setPreset(p.key); };
 
   return (
     <div className="space-y-5">
@@ -238,6 +239,11 @@ export default function RoomEditor({ clusterMode = false, checkpoints = [] }) {
             <Num label="depth" value={scene.room.depth} min={0.5} step={0.1} onChange={(v) => setRoom({ depth: v })} />
             <Num label="height" value={scene.room.height} min={0.5} step={0.1} onChange={(v) => setRoom({ height: v })} />
           </div>
+          <div className="mt-2">
+            <Num label="padding / standoff (m)" value={scene.padding ?? 0} min={0} step={0.05}
+              onChange={(v) => setScene((s) => ({ ...s, padding: v }))} />
+            <p className="label mt-1">brake this far before walls & objects (0 = touch allowed)</p>
+          </div>
         </Section>
 
         <Section title="Objects" sub="obstacles & structure">
@@ -324,7 +330,7 @@ export default function RoomEditor({ clusterMode = false, checkpoints = [] }) {
 
 function RoomDispatch({ scene, clusterMode, checkpoints }) {
   const [form, setForm] = useState({
-    text: "a person walks forward", guidance: 6.5, num_steps: 50, num_frames: 120, seed: 0, room_guidance: 2,
+    text: "a person walks forward", guidance: 6.5, num_steps: 50, num_frames: 120, seed: 0, room_guidance: 0.75,
   });
   const [checkpoint, setCheckpoint] = useState("");
   const [presets, setPresets] = useState(null);
@@ -404,8 +410,8 @@ function RoomDispatch({ scene, clusterMode, checkpoints }) {
             <span className="label">room guidance</span>
             <span className="font-mono text-sm text-[var(--signal)]">{form.room_guidance === 0 ? "off (place only)" : form.room_guidance}</span>
           </div>
-          <input type="range" min="0" max="6" step="0.25" value={form.room_guidance} onChange={set("room_guidance")} className="w-full accent-[var(--signal)]" />
-          <p className="label mt-1">0 = just place at spawn · ~1–4 = stronger room/obstacle avoidance (soft) · too high distorts motion</p>
+          <input type="range" min="0" max="2" step="0.05" value={form.room_guidance} onChange={set("room_guidance")} className="w-full accent-[var(--signal)]" />
+          <p className="label mt-1">0 = just place at spawn · ~0.5–1.5 = avoidance strength relative to the motion · 1 ≈ as strong as the walk itself</p>
         </div>
 
         <button type="submit" className="btn-signal w-full" disabled={(clusterMode && (submitting || !checkpoint)) || (!clusterMode && loading)}>

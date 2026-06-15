@@ -111,6 +111,17 @@ def test_energy_zero_inside_positive_outside() -> None:
     assert float(scene_energy(in_sphere, scene)) > 0.0
 
 
+def test_padding_brakes_before_contact() -> None:
+    # A joint 0.1 m outside a sphere: no violation without padding, but a
+    # standoff of 0.2 m flags it (guidance brakes before contact).
+    base = {"room": {"width": 4, "depth": 4, "height": 2.5},
+            "objects": [{"kind": "sphere", "x": 0, "y": 1, "z": 0, "radius": 0.5}],
+            "spawn": {"x": 0, "z": 0, "rotation": 0}}
+    near = torch.tensor([[[[0.6, 1.0, 0.0]]]])  # 0.1 m outside the r=0.5 sphere
+    assert float(scene_energy(near, parse_scene(base))) == 0.0
+    assert float(scene_energy(near, parse_scene({**base, "padding": 0.2}))) > 0.0
+
+
 def test_guidance_reduces_energy() -> None:
     """A guided sample should land with lower scene energy than the unguided one
     drawn from the same noise (oracle field pulls toward a fixed x1)."""
@@ -141,6 +152,6 @@ def test_guidance_reduces_energy() -> None:
         return float(scene_energy(joints, scene))
 
     e_unguided = run(0.0)
-    e_guided = run(3.0)
+    e_guided = run(1.0)
     # Guidance should cut the violation energy by a large margin.
     assert e_guided < 0.5 * e_unguided, f"guided {e_guided} !<< unguided {e_unguided}"

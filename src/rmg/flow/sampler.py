@@ -132,13 +132,17 @@ class RiemannianEulerSampler:
                     energy = energy_fn(x_hat)
                     (grad,) = torch.autograd.grad(energy, x_req)
                 g = self.manifold.project_tangent(x, grad)
-                # Use the unit avoidance DIRECTION scaled by guidance_weight, so the
-                # step is bounded regardless of penetration depth (no divergence
-                # cliff) and the weight is an intuitive, model-scale-independent
-                # knob. Only descend when there's an actual violation (grad ≠ 0).
-                gnorm = g.flatten(1).norm(dim=1).view(-1, *([1] * (g.dim() - 1)))
-                g = g / gnorm.clamp_min(1e-8)
-                v_t = v_t - guidance_weight * g
+                # Steer the velocity along the avoidance direction with a strength
+                # RELATIVE to the model velocity: guidance velocity =
+                # guidance_weight · ‖v_t‖ · ĝ. This is scale-invariant (works
+                # regardless of the model's velocity magnitude — a unit-direction
+                # step would be swamped by a fast "walk forward" field) and has no
+                # divergence cliff. guidance_weight ≈ fraction of the motion
+                # redirected: ~1 ⇒ as strong as the model's own velocity.
+                per = [-1, *([1] * (g.dim() - 1))]
+                gnorm = g.flatten(1).norm(dim=1).view(*per).clamp_min(1e-8)
+                vnorm = v_t.flatten(1).norm(dim=1).view(*per)
+                v_t = v_t - guidance_weight * vnorm * (g / gnorm)
 
             x = self.manifold.exp(x, h * v_t)
 
