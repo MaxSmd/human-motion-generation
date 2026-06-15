@@ -214,6 +214,24 @@ def _recon_sweep(mardm, ae, text_encoder, dataset, zf, mean, std, device,
 
 
 @torch.no_grad()
+def _caption_cosine(text_encoder, dataset, zf, device, n_clips: int) -> None:
+    """Pairwise cosine of the caption embeddings. If ~0.99 the text encoder
+    isn't separating the prompts, so the diffusion stack can't either."""
+    caps = [torch.load(io.BytesIO(zf.read(f"{dataset[i].clip_id}.pt")),
+                       weights_only=False)["texts"][0] for i in range(n_clips)]
+    E = text_encoder.encode(caps, device=device)                 # (N, text_dim)
+    E = E / E.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+    cos = (E @ E.T).cpu()
+    off = cos[~torch.eye(cos.shape[0], dtype=torch.bool)]
+    print(f"\n[cond] caption embedding pairwise cosine: min={off.min():.3f} "
+          f"mean={off.mean():.3f} max={off.max():.3f}", flush=True)
+    print("[cond]   (≈0.99 ⇒ Qwen3 pooling is non-discriminative — text encoder "
+          "is the bottleneck, not the diffusion stack)", flush=True)
+    for c in caps:
+        print(f"[cond]   - {c[:72]}", flush=True)
+
+
+@torch.no_grad()
 def main_impl(cfg: DictConfig) -> None:
     set_seed(int(cfg.viz.seed))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -247,9 +265,12 @@ def main_impl(cfg: DictConfig) -> None:
         _recon_sweep(mardm, ae, text_encoder, dataset, zf, mean, std, device,
                      n_clips=min(n_render, int(cfg.viz.sweep_clips)),
                      ratios=[0.1, 0.25, 0.5, 0.75, 1.0])
+        _caption_cosine(text_encoder, dataset, zf, device, n_render)
 
     manifest: list[dict] = []
     metrics: dict[str, dict] = {}
+    gen_pools: list[torch.Tensor] = []   # per-clip time-mean of gen latents
+    true_pools: list[torch.Tensor] = []  # ...and of the true latents
     for idx in range(n_render):
         sample = dataset[idx]
         cid = sample.clip_id
@@ -280,6 +301,8 @@ def main_impl(cfg: DictConfig) -> None:
         rmse_mask = float((latents - mask_tok).pow(2).mean().sqrt())
         gen_tvar = float(latents.std(dim=-1).mean())   # temporal spread of gen latents
         true_tvar = float(z_true.std(dim=-1).mean())   # ...vs the real target's
+        gen_pools.append(latents.mean(dim=-1).flatten().cpu())
+        true_pools.append(z_true.mean(dim=-1).flatten().cpu())
         print(f"[probe] {cid}  rmse(gen,true)={rmse_true:.3f}  rmse(gen,mask)={rmse_mask:.3f}  "
               f"tvar gen/true={gen_tvar:.3f}/{true_tvar:.3f}", flush=True)
 
@@ -320,6 +343,20 @@ def main_impl(cfg: DictConfig) -> None:
               f"inflated by root drift on locomotion)", flush=True)
         print(f"[viz] mean MPJPE local  = {summary['mean_mpjpe_local']:.4f}  (pose-only; "
               f"the real memorization signal — lower = better)", flush=True)
+
+    # Inter-clip diversity: if generation collapses to one output regardless of
+    # caption, gen spread << true spread (every GIF looks the same).
+    if len(gen_pools) > 1:
+        def _mean_pdist(rows: list[torch.Tensor]) -> float:
+            X = torch.stack(rows)
+            d = torch.cdist(X, X)
+            n = X.shape[0]
+            return float(d[~torch.eye(n, dtype=torch.bool)].mean())
+        g, t = _mean_pdist(gen_pools), _mean_pdist(true_pools)
+        print(f"[cond] inter-clip latent spread (mean pairwise L2): gen={g:.3f} true={t:.3f}  "
+              f"ratio={g / max(t, 1e-6):.2f}", flush=True)
+        print("[cond]   (gen ≪ true ⇒ generation collapses to a caption-independent "
+              "output — the 'every GIF looks the same' symptom)", flush=True)
     print(f"[viz] done — GIFs + metrics under {out_dir}", flush=True)
 
 
