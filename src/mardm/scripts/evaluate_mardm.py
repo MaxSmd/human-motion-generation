@@ -1,6 +1,6 @@
 """Evaluate a MARDM checkpoint on HumanML3D (HumanML3D format) via the Guo evaluator.
 
-Pipeline (mirrors scripts/evaluate.py, swapping RMG's manifold sampler for the
+Pipeline (mirrors rmg.scripts.evaluate, swapping RMG's manifold sampler for the
 MARDM generation task):
   1. Load the generation-branch checkpoint (EMA) + the frozen AE + text encoder.
   2. Iterate the test split. Real motions are featurized to true 263-D from the
@@ -10,7 +10,7 @@ MARDM generation task):
      Diversity, MultiModality. Optionally sweep classifier-free guidance.
 
 Run (cluster):
-    python scripts/evaluate_mardm.py +data=cluster_mounted \\
+    python -m mardm.scripts.evaluate_mardm +data=cluster_mounted \\
         ae_checkpoint=runs/mardm-ae-XXXX/checkpoints/latest.pt \\
         eval.checkpoint=runs/mardm-gen-YYYY/checkpoints/latest.pt \\
         eval.evaluator=real text_encoder.type=qwen3
@@ -123,8 +123,8 @@ def main(cfg: DictConfig) -> None:
         "evaluator": "random",                 # real | random
         "text_to_motion_repo": "external/text-to-motion",
         "humanml3d_repo": "external/HumanML3D",
-        "guidance_scales": [4.5],              # paper's HumanML3D CFG scale
-        "timesteps": 10,                       # masked-AR iterations
+        "guidance_scales": [2.0],              # CFG scale (Qwen3 cond is weaker than CLIP; sweep lower)
+        "timesteps": 18,                       # masked-AR iterations (upstream evaluation_MARDM default)
         "batch_size": 32,
         "max_clips": -1,
         "mm_num_texts": 30,

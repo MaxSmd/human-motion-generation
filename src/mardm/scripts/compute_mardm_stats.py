@@ -2,9 +2,9 @@
 
 MARDM standardizes the essential dims (no manifold normalization), so both the
 AutoEncoder and the generation branch need a fixed per-dim mean/std computed
-once over the training split. Run this before `scripts/train_mardm_ae.py`:
+once over the training split. Run this before `mardm.scripts.train_mardm_ae`:
 
-    python scripts/compute_mardm_stats.py \\
+    python -m mardm.scripts.compute_mardm_stats \\
         --data-root external/data/humanml3d_packed \\
         --out external/data/mardm_essential_stats.pt
 
@@ -31,10 +31,10 @@ def main() -> None:
     ap.add_argument("--max-clips", type=int, default=None, help="cap clips (debug); default = all")
     args = ap.parse_args()
 
-    # Raw (unnormalized) essential features, no windowing, no mirror.
+    # Raw (unnormalized) essential features, no windowing.
     ds = EssentialDataset(
         root=args.data_root, split=args.split,
-        mean=None, std=None, window_size=None, mirror_augment=False,
+        mean=None, std=None, window_size=None,
     )
     print(f"[stats] computing essential mean/std over {len(ds)} clips (split={args.split}) ...", flush=True)
     mean, std = compute_essential_stats(ds, max_clips=args.max_clips)

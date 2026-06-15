@@ -1,8 +1,13 @@
 """MARDM dataset: 67-D essential features over the packed HumanML3D dataset.
 
 Thin wrapper around the shared `HumanML3DDataset` (`shared.data`) — reusing its
-zip reader, split handling, random crop, and mirror augmentation — but with an
+zip reader, split handling, and random crop — but with an
 `EssentialRepresentation` so each sample's `x1` is the 67-D essential feature.
+
+Mirror augmentation is NOT done here: the packed dataset already ships every
+clip in both orientations (`<id>` + `M<id>`, both listed in the splits, with the
+`M` captions left/right-swapped), so mardm relies on those baked-in mirrors
+rather than flipping at runtime.
 
 Two roles, selected by `window_size`:
   * `window_size=None` → full variable-length clips (generation branch);
@@ -17,8 +22,7 @@ Set `preload=True` to encode every retained clip once at init and serve from a
 RAM cache afterwards. Removes the encode pipeline (zip read + torch.load + quat
 math + FK) from the dataloader hot path. Necessary on CAMP cluster runs where
 the auto-cancel policy (<5% GPU util for ~2h) trips when the data pipeline is
-the bottleneck. Memory cost: ~600 MB (or ~1.2 GB if mirror_augment is on, since
-we cache both mirrored and unmirrored features).
+the bottleneck. Memory cost: ~600 MB.
 """
 
 from __future__ import annotations
@@ -32,7 +36,7 @@ import torch
 from torch import Tensor
 from torch.utils.data import Dataset
 
-from shared.data import HumanML3DDataset, HumanML3DSample, mirror_motion
+from shared.data import HumanML3DDataset, HumanML3DSample
 from shared.geometry import make_continuous, normalize_quaternions
 
 from ..representation import EssentialRepresentation
@@ -47,7 +51,6 @@ class EssentialDataset(Dataset):
         mean: Tensor | None = None,
         std: Tensor | None = None,
         window_size: int | None = None,
-        mirror_augment: bool = True,
         max_seq_len: int = 196,
         min_seq_len: int = 40,
         subset_frac: float | None = None,
@@ -64,7 +67,6 @@ class EssentialDataset(Dataset):
             split=split,
             max_seq_len=max_seq_len,
             min_seq_len=min_seq_len,
-            mirror_augment=mirror_augment,
             zip_name=zip_name,
             splits_name=splits_name,
             offsets_name=offsets_name,
@@ -85,7 +87,7 @@ class EssentialDataset(Dataset):
             self._build_preload_cache()
 
     def _build_preload_cache(self) -> None:
-        # Encode every retained clip once and stash (x1, x1_mirrored, texts).
+        # Encode every retained clip once and stash (x1, texts).
         # __getitem__ becomes a RAM slice; no zip/torch.load/FK in the hot path.
         cache: dict[str, dict] = {}
         skeleton = self.inner._skeleton
@@ -102,14 +104,7 @@ class EssentialDataset(Dataset):
 
                 q = make_continuous(normalize_quaternions(quats), time_dim=0)
                 x1 = self._rep.encode_clip(translation, q, skeleton=skeleton).float()
-                entry: dict = {"x1": x1, "texts": texts}
-
-                if self.inner.mirror_augment:
-                    tm, qm = mirror_motion(translation, quats)
-                    qm = make_continuous(normalize_quaternions(qm), time_dim=0)
-                    entry["x1_mirrored"] = self._rep.encode_clip(tm, qm, skeleton=skeleton).float()
-
-                cache[clip_id] = entry
+                cache[clip_id] = {"x1": x1, "texts": texts}
         self._preload_cache = cache
 
     def set_stats(self, mean: Tensor, std: Tensor) -> None:
@@ -142,11 +137,7 @@ class EssentialDataset(Dataset):
     def _getitem_preloaded(self, idx: int) -> HumanML3DSample:
         clip_id = self.inner.clip_ids[idx]
         entry = self._preload_cache[clip_id]
-
-        if self.inner.mirror_augment and "x1_mirrored" in entry and random.random() < 0.5:
-            x = entry["x1_mirrored"]
-        else:
-            x = entry["x1"]
+        x = entry["x1"]
 
         # max_seq_len crop. Original cropped the clip then encoded → max_seq_len-1
         # features; slicing the full encoded features [start:start+max_seq_len-1]

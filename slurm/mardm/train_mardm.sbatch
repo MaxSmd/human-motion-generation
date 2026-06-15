@@ -19,9 +19,9 @@
 # To use 12g: `sbatch --partition=12g --nodelist=frankfurt,hamburg,kassel,leipzig ...`
 #
 # Submit:
-#     AE_CKPT=/path/to/mardm-ae-XXXX/checkpoints/latest.pt sbatch slurm/train_mardm.sbatch
+#     AE_CKPT=/path/to/mardm-ae-XXXX/checkpoints/latest.pt sbatch slurm/mardm/train_mardm.sbatch
 #     # or pass as the first positional arg
-#     sbatch slurm/train_mardm.sbatch ${HOME}/rmg-runs/mardm-ae-XXXX/checkpoints/latest.pt
+#     sbatch slurm/mardm/train_mardm.sbatch ${HOME}/rmg-runs/mardm-ae-XXXX/checkpoints/latest.pt
 # Resume: just resubmit (auto-detects latest checkpoint under the run dir).
 #
 # Throughput probe: run with train.max_steps=500, read `steps_per_s`, then set

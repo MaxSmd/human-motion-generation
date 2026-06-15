@@ -5,13 +5,13 @@ Trains the 1D-ResNet AE to reconstruct the z-normalized 67-D essential feature
 branch (stage 2) then diffuses over this AE's frozen latents.
 
 Usage (local smoke, CPU):
-    python scripts/compute_mardm_stats.py --data-root /tmp/synth --out /tmp/synth/stats.pt
-    python scripts/train_mardm_ae.py data.root=/tmp/synth stats_path=/tmp/synth/stats.pt \\
+    python -m mardm.scripts.compute_mardm_stats --data-root /tmp/synth --out /tmp/synth/stats.pt
+    python -m mardm.scripts.train_mardm_ae data.root=/tmp/synth stats_path=/tmp/synth/stats.pt \\
         train.max_steps=20 train.micro_batch_size=4 train.grad_accum=1 \\
         train.precision=fp32 logging.use_wandb=false logging.use_tensorboard=false
 
 Usage (cluster):
-    python scripts/train_mardm_ae.py +data=cluster_mounted
+    python -m mardm.scripts.train_mardm_ae +data=cluster_mounted
 """
 
 from __future__ import annotations
@@ -50,20 +50,19 @@ def _load_stats(stats_path: str | Path) -> tuple[torch.Tensor, torch.Tensor]:
     if not p.exists():
         raise FileNotFoundError(
             f"essential mean/std not found at {p}. Run "
-            "`scripts/compute_mardm_stats.py --data-root <packed> --out <stats_path>` first."
+            "`python -m mardm.scripts.compute_mardm_stats --data-root <packed> --out <stats_path>` first."
         )
     blob = torch.load(p, weights_only=True)
     return blob["mean"], blob["std"]
 
 
-def _build_dataset(cfg: DictConfig, split: str, mean, std, mirror: bool) -> EssentialDataset:
+def _build_dataset(cfg: DictConfig, split: str, mean, std) -> EssentialDataset:
     return EssentialDataset(
         root=cfg.data.root,
         split=split,
         mean=mean,
         std=std,
         window_size=cfg.train.window_size,
-        mirror_augment=mirror,
         max_seq_len=cfg.data.max_seq_len,
         min_seq_len=cfg.data.min_seq_len,
         subset_frac=cfg.get("subset_frac"),
@@ -174,8 +173,8 @@ def main(cfg: DictConfig) -> None:
 
     mean, std = _load_stats(cfg.stats_path)
 
-    train_ds = _build_dataset(cfg, "train", mean, std, mirror=cfg.data.mirror_augment)
-    val_ds = _build_dataset(cfg, "val", mean, std, mirror=False)
+    train_ds = _build_dataset(cfg, "train", mean, std)
+    val_ds = _build_dataset(cfg, "val", mean, std)
     train_iter = _infinite(_build_loader(train_ds, cfg, cfg.train.micro_batch_size, shuffle=True))
     val_loader = _build_loader(val_ds, cfg, cfg.train.micro_batch_size, shuffle=False)
 

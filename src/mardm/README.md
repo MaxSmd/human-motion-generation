@@ -64,13 +64,13 @@ standing vs. RMG/MoMask at matched, ≤1-day-per-model compute.
   encoder constant across RMG/MARDM/MoMask, removing a confound from the
   comparison. `timm`'s MLP is likewise replaced by a plain GELU MLP.
 - **z-normalization, not manifold normalization.** MARDM standardizes the
-  essential dims with a train-split mean/std (`scripts/compute_mardm_stats.py`),
+  essential dims with a train-split mean/std (`mardm.scripts.compute_mardm_stats`),
   unlike RMG's manifold structure.
 - **`tasks/` layering.** Sampling/orchestration lives in `tasks/generation.py`;
   the scripts are thin Hydra wrappers (models / training / tasks split).
 - **Dropped from upstream** (irrelevant for this task): the DDPM head, the
   length estimator, zero-shot `edit()`, the action-conditioned mode, and the
-  upstream data/eval utilities (we use `rmg`'s).
+  upstream data/eval utilities (we use `shared`'s).
 
 ## Layout
 
@@ -79,15 +79,17 @@ src/mardm/
     models/        autoencoder.py · mardm.py · diffmlps.py
     transport/     vendored SiT (linear-path velocity flow matching)
     representation/essential.py — 67-D encode, stats, essential→263 bridge
-    data/          dataset.py — EssentialDataset (wraps rmg's loader)
+    data/          dataset.py — EssentialDataset (wraps shared's loader)
     training/      masking.py — cosine schedule + BERT-style sub-masking
     tasks/         generation.py — text → sampled motion → 263-D
-configs/mardm/     ae.yaml · gen.yaml   (mardm_mini)
-scripts/           compute_mardm_stats.py · train_mardm_ae.py ·
-                   train_mardm.py · evaluate_mardm.py
-slurm/             train_mardm_ae.sbatch · train_mardm.sbatch ·
-                   evaluate_mardm.sbatch
-tests/             test_mardm_{representation,data,models}.py
+    configs/       ae.yaml · gen.yaml · gen_m.yaml   (mardm_mini + paper-M)
+    scripts/       compute_mardm_stats.py · train_mardm_ae.py ·
+                   train_mardm.py · evaluate_mardm.py · diagnose_*.py
+    notebooks/     eval_table.py · training_curves.ipynb
+    reports/       tables/ · figures/
+slurm/mardm/       train_mardm_ae.sbatch · train_mardm.sbatch ·
+                   evaluate_mardm.sbatch · overfit_mardm.sbatch
+tests/mardm/       test_mardm_{representation,data,models}.py
 ```
 
 ## How to run
@@ -95,19 +97,19 @@ tests/             test_mardm_{representation,data,models}.py
 ### Local smoke (CPU, synthetic data — validates the pipeline, not quality)
 
 ```bash
-# 1. Tiny synthetic packed dataset
+# 1. Tiny synthetic packed dataset (rmg helper, still at the repo root)
 python scripts/build_synthetic_dataset.py --output-dir /tmp/synth \
     --num-train 16 --num-val 4 --num-test 4 --seq-len 80
 # 2. Essential mean/std
-python scripts/compute_mardm_stats.py --data-root /tmp/synth --out /tmp/synth/stats.pt
+python -m mardm.scripts.compute_mardm_stats --data-root /tmp/synth --out /tmp/synth/stats.pt
 # 3. AE (stage 1)
-python scripts/train_mardm_ae.py data.root=/tmp/synth stats_path=/tmp/synth/stats.pt \
+python -m mardm.scripts.train_mardm_ae data.root=/tmp/synth stats_path=/tmp/synth/stats.pt \
     ae.width=32 ae.output_emb_width=16 ae.depth=2 \
     train.max_steps=20 train.micro_batch_size=4 train.grad_accum=1 train.precision=fp32 \
     data.num_workers=0 logging.use_wandb=false logging.use_tensorboard=false \
     run_name=ae-smoke output_dir=/tmp/mardm_ae_smoke
 # 4. Generation branch (stage 2) — random text encoder, frozen AE from step 3
-python scripts/train_mardm.py data.root=/tmp/synth stats_path=/tmp/synth/stats.pt \
+python -m mardm.scripts.train_mardm data.root=/tmp/synth stats_path=/tmp/synth/stats.pt \
     ae_checkpoint=/tmp/mardm_ae_smoke/checkpoints/latest.pt \
     ae.width=32 ae.output_emb_width=16 ae.depth=2 \
     text_encoder.type=random text_encoder.text_dim=64 \
@@ -121,14 +123,14 @@ python scripts/train_mardm.py data.root=/tmp/synth stats_path=/tmp/synth/stats.p
 ### Cluster (enroot + slurm; full `mardm_mini`)
 
 ```bash
-sbatch slurm/train_mardm_ae.sbatch                  # stage 1 (also computes stats)
+sbatch slurm/mardm/train_mardm_ae.sbatch            # stage 1 (also computes stats)
 
 AE_CKPT=$HOME/rmg-runs/mardm-ae-XXXX/checkpoints/latest.pt \
-    sbatch slurm/train_mardm.sbatch                 # stage 2
+    sbatch slurm/mardm/train_mardm.sbatch           # stage 2
 
 AE_CKPT=$HOME/rmg-runs/mardm-ae-XXXX/checkpoints/latest.pt \
 GEN_CKPT=$HOME/rmg-runs/mardm-gen-YYYY/checkpoints/latest.pt \
-    sbatch slurm/evaluate_mardm.sbatch              # HumanML3D-format metrics
+    sbatch slurm/mardm/evaluate_mardm.sbatch        # HumanML3D-format metrics
 ```
 
 Env vars honored by the sbatch (see top-level `README.md`): `RMG_DATA_ROOT`,
@@ -142,13 +144,13 @@ a tiny deterministic subset. If it *can't* memorize 0.5% of the data, something'
 wrong (data, loss, optimization) — fix it before a full run.
 
 ```bash
-sbatch slurm/overfit_mardm.sbatch
+sbatch slurm/mardm/overfit_mardm.sbatch
 # Override the subset / step counts:
-SUBSET_FRAC=0.01 AE_STEPS=5000 GEN_STEPS=10000 sbatch slurm/overfit_mardm.sbatch
+SUBSET_FRAC=0.01 AE_STEPS=5000 GEN_STEPS=10000 sbatch slurm/mardm/overfit_mardm.sbatch
 ```
 
 The sbatch chains AE → gen on the subset with overfit-friendly hyperparameters
-(`data.mirror_augment=false`, `model.cond_drop_prob=0`, `model.dropout=0`).
+(`model.cond_drop_prob=0`, `model.dropout=0`).
 
 **What to look for**:
 - `ae/l1` drops to **~0** on the subset — strongest signal; the AE memorizes
@@ -162,9 +164,9 @@ Equivalent for a single stage via CLI:
 
 ```bash
 # AE only, 0.5% subset:
-python scripts/train_mardm_ae.py subset_frac=0.005 data.mirror_augment=false ...
+python -m mardm.scripts.train_mardm_ae subset_frac=0.005 ...
 # Gen only, same subset (needs an AE checkpoint):
-python scripts/train_mardm.py subset_frac=0.005 data.mirror_augment=false \
+python -m mardm.scripts.train_mardm subset_frac=0.005 \
     model.cond_drop_prob=0 model.dropout=0 ae_checkpoint=...
 ```
 
@@ -175,15 +177,15 @@ python scripts/train_mardm.py subset_frac=0.005 data.mirror_augment=false \
 `max_steps ≈ steps_per_s × budget_seconds`. Budget the AE (cheap, a few hours)
 and the generation branch so the **sum ≤ ~23h** — the 1-day-per-model rule.
 
-## What's reused from `rmg` (not forked)
+## What's reused from `shared` (not forked)
 
-- `rmg.data.HumanML3DDataset` + `collate` — wrapped by `EssentialDataset`.
-- `rmg.representation.{tplusr_to_h3d_features_with_quats, recover_joints_from_ric}`
+- `shared.data.HumanML3DDataset` + `collate` — wrapped by `EssentialDataset`.
+- `shared.geometry.{tplusr_to_h3d_features_with_quats, recover_joints_from_ric}`
   — the 263-D encode/decode primitives behind the essential representation.
-- `rmg.eval.{RealGuoEvaluator, fid, r_precision, mm_distance, diversity,
+- `shared.eval.{RealGuoEvaluator, fid, r_precision, mm_distance, diversity,
   multimodality}` — the metrics, shared across all reproductions.
-- `rmg.models.{Qwen3EmbeddingEncoder, RandomTextEncoder}` — text conditioning.
-- `rmg.utils.{EMA, Logger, build_scheduler, save_checkpoint, find_latest_checkpoint,
+- `shared.text.{Qwen3EmbeddingEncoder, RandomTextEncoder}` — text conditioning.
+- `shared.utils.{EMA, Logger, build_scheduler, save_checkpoint, find_latest_checkpoint,
   set_seed, ...}` — training-loop primitives.
 
 ## Caveats

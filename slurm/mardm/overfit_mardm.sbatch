@@ -16,7 +16,6 @@
 #
 # Hyperparameters (vs. a normal run):
 #   * subset_frac=0.005 (overridable via SUBSET_FRAC)
-#   * data.mirror_augment=false (don't perturb the small set)
 #   * data.preload=true         (encodes the ~56 clips into RAM once at init;
 #                                the train script auto-forces num_workers=0
 #                                because workers + preload is pickle-overhead
@@ -26,8 +25,8 @@
 #   * model.cond_drop_prob=0 (no CFG dropout — let it memorize text→motion)
 #   * model.dropout=0           (transformer dropout off)
 #
-# Submit:  sbatch slurm/overfit_mardm.sbatch
-# Override the subset: SUBSET_FRAC=0.01 sbatch slurm/overfit_mardm.sbatch
+# Submit:  sbatch slurm/mardm/overfit_mardm.sbatch
+# Override the subset: SUBSET_FRAC=0.01 sbatch slurm/mardm/overfit_mardm.sbatch
 # Override step counts: AE_STEPS=5000 GEN_STEPS=10000 sbatch ...
 
 set -euo pipefail
@@ -84,7 +83,6 @@ enroot start \
         python -u -m mardm.scripts.train_mardm_ae \\
             run_name='${AE_RUN}' \\
             subset_frac=${SUBSET_FRAC} \\
-            data.mirror_augment=false \\
             data.preload=true \\
             train.micro_batch_size=16 \\
             train.grad_accum=1 \\
@@ -99,7 +97,6 @@ enroot start \
             ae_checkpoint='${AE_OUT}/checkpoints/latest.pt' \\
             text_encoder.type=qwen3 \\
             subset_frac=${SUBSET_FRAC} \\
-            data.mirror_augment=false \\
             data.preload=true \\
             train.micro_batch_size=16 \\
             train.grad_accum=1 \\

@@ -2,8 +2,8 @@
 
 Orchestrates the trained generation branch + frozen AE + text encoder into the
 sampling pipeline, plus the eval bridge to 263-D. Kept separate from the model
-(`mardm.models`) and training (`scripts/train_mardm.py`) per the repo's
-models / training / tasks split; `scripts/evaluate_mardm.py` is a thin wrapper.
+(`mardm.models`) and training (`mardm.scripts.train_mardm`) per the repo's
+models / training / tasks split; `mardm.scripts.evaluate_mardm` is a thin wrapper.
 """
 
 from __future__ import annotations
