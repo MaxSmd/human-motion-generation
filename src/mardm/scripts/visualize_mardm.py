@@ -176,6 +176,7 @@ def _recon_sweep(mardm, ae, text_encoder, dataset, zf, mean, std, device,
     print("\n[sweep] teacher-forced latent reconstruction (1 step); "
           "rmse = pred vs true latent on masked tokens:", flush=True)
     agg: dict[float, list[float]] = {r: [] for r in ratios}
+    lat_std, lat_absmean = [], []
     for idx in range(n_clips):
         sample = dataset[idx]
         cid = sample.clip_id
@@ -183,6 +184,10 @@ def _recon_sweep(mardm, ae, text_encoder, dataset, zf, mean, std, device,
                              weights_only=False)["texts"][0]
         gt_norm = ((sample.x1 - mean) / std).unsqueeze(0).to(device)
         z_true = ae.encode(gt_norm).permute(0, 2, 1)          # (1, L, ae_dim)
+        # AE-latent scale check: the SiT head's prior is N(0,1), so well-
+        # conditioned flow matching wants these ~unit std. Far from 1 ⇒ P2.
+        lat_std.append(float(z_true.std()))
+        lat_absmean.append(float(z_true.abs().mean()))
         b, L, _ = z_true.shape
         cond = text_encoder.encode([caption], device=device)
         padding_mask = torch.zeros(b, L, dtype=torch.bool, device=device)
@@ -203,6 +208,9 @@ def _recon_sweep(mardm, ae, text_encoder, dataset, zf, mean, std, device,
               flush=True)
     print("[sweep]   MEAN: " + "  ".join(f"r={r:.2f}:{float(np.mean(agg[r])):.3f}" for r in ratios),
           flush=True)
+    print(f"[sweep]   AE-latent stats: std={float(np.mean(lat_std)):.3f} "
+          f"abs_mean={float(np.mean(lat_absmean)):.3f}  (SiT head wants std≈1; "
+          f"far from 1 ⇒ latent-scale bug, P2)", flush=True)
 
 
 @torch.no_grad()
