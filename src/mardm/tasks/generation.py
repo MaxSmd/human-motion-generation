@@ -41,6 +41,7 @@ def generate_h3d_features(
     skeleton: Skeleton,
     device: torch.device,
     humanml3d_repo: str | Path = "external/HumanML3D",
+    use_upstream: bool = False,
 ) -> tuple[list[Tensor], Tensor]:
     """Full text -> per-sample 263-D HumanML3D features (+ their lengths).
 
@@ -60,7 +61,8 @@ def generate_h3d_features(
     for i in range(len(texts)):
         dec_len = int(latent_lens[i]) * ds
         ess_i = essential[i, :dec_len]                       # (dec_len, 67) normalized
-        f = essential_to_h3d(ess_i, skeleton, mean=mean, std=std, humanml3d_repo=humanml3d_repo)
+        f = essential_to_h3d(ess_i, skeleton, mean=mean, std=std,
+                             humanml3d_repo=humanml3d_repo, use_upstream=use_upstream)
         feats.append(f)                                      # (dec_len - 1, 263)
         feat_lengths.append(f.shape[0])
     return feats, torch.tensor(feat_lengths, dtype=torch.long)

@@ -32,6 +32,7 @@ from shared.geometry import (
     Skeleton,
     recover_joints_from_ric,
     tplusr_to_h3d_features_with_quats,
+    tplusr_to_h3d_features_upstream,
 )
 
 # root(1+2+1) + (J-1)*3 local joint positions = 4 + 63
@@ -162,6 +163,7 @@ def essential_to_h3d(
     mean: Tensor | None = None,
     std: Tensor | None = None,
     humanml3d_repo: str | Path = "external/HumanML3D",
+    use_upstream: bool = False,
 ) -> Tensor:
     """Generated essential feature (L, 67) -> full (L-1, 263) for the Guo evaluator.
 
@@ -179,4 +181,6 @@ def essential_to_h3d(
     # `_ik_quaternions` lands on CPU (numpy roundtrip); pin everything to its
     # device so the downstream FK doesn't see a CUDA/CPU mismatch.
     translation = joints[:, 0, :].contiguous().to(quats.device)
+    if use_upstream:
+        return tplusr_to_h3d_features_upstream(translation, quats, skeleton)
     return tplusr_to_h3d_features_with_quats(translation, quats, skeleton)
