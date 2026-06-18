@@ -131,6 +131,8 @@ def evaluate_tokens(
     residual_model.eval()
     base_losses, residual_losses = [], []
     full_mask_losses, full_mask_accs, generated_base_accs = [], [], []
+    full_generation_acc_by_level: dict[int, list[float]] = {}
+    teacher_residual_acc_by_level: dict[int, list[float]] = {}
     residual_by_level: dict[int, list[float]] = {}
     for i, batch in enumerate(cached_batches):
         if i >= max_batches:
@@ -152,6 +154,20 @@ def evaluate_tokens(
             mask=token_mask,
         )
         generated_base_accs.append(float((generated_base[token_mask] == tok[:, 0][token_mask]).float().mean()))
+        generated_tokens = residual_model.generate_residuals(generated_base, cond=cond, guidance_scale=1.0, mask=token_mask)
+        teacher_residual_tokens = residual_model.generate_residuals(
+            tok[:, 0],
+            cond=cond,
+            guidance_scale=1.0,
+            mask=token_mask,
+        )
+        for level in range(tok.shape[1]):
+            full_generation_acc_by_level.setdefault(level, []).append(
+                float((generated_tokens[:, level][token_mask] == tok[:, level][token_mask]).float().mean())
+            )
+            teacher_residual_acc_by_level.setdefault(level, []).append(
+                float((teacher_residual_tokens[:, level][token_mask] == tok[:, level][token_mask]).float().mean())
+            )
         res_parts = [
             residual_model.training_loss(tok, level, cond=cond, valid_mask=token_mask, cond_drop_prob=0.0)
             for level in range(1, tok.shape[1])
@@ -174,6 +190,10 @@ def evaluate_tokens(
     }
     for level, values in residual_by_level.items():
         out[f"residual_ce_l{level}"] = sum(values) / max(len(values), 1)
+    for level, values in full_generation_acc_by_level.items():
+        out[f"generated_acc_l{level}"] = sum(values) / max(len(values), 1)
+    for level, values in teacher_residual_acc_by_level.items():
+        out[f"teacher_residual_acc_l{level}"] = sum(values) / max(len(values), 1)
     return out
 
 
@@ -384,6 +404,13 @@ def main() -> None:
     )
     if level_summary:
         print(f"[tok summary levels] {level_summary}")
+    acc_summary = " ".join(
+        f"{k}={v:.3f}"
+        for k, v in sorted(token_eval.items())
+        if k.startswith("generated_acc_l") or k.startswith("teacher_residual_acc_l")
+    )
+    if acc_summary:
+        print(f"[tok summary acc] {acc_summary}")
 
     with torch.no_grad():
         cond = text_encoder.encode(eval_batch.texts, device=device)
@@ -395,6 +422,7 @@ def main() -> None:
             guidance_scale=1.0,
             mask=eval_token_mask,
         )
+        base_only = vqvae.decode_from_tokens(base.unsqueeze(1), target_len=eval_x.shape[1])
         gen_tokens = residual_model.generate_residuals(base, cond=cond, guidance_scale=1.0, mask=eval_token_mask)
         gen = vqvae.decode_from_tokens(gen_tokens, target_len=eval_x.shape[1])
         teacher_residual_tokens = residual_model.generate_residuals(
@@ -416,10 +444,15 @@ def main() -> None:
         "vq_eval": vq_eval,
         "token_eval": token_eval,
         "sample_texts": eval_batch.texts,
+        "sample_cond": cond.detach().cpu(),
+        "sample_token_mask": eval_token_mask.detach().cpu(),
         "sample_real": eval_x.detach().cpu(),
         "sample_reconstruction": recon.detach().cpu(),
+        "sample_base_only": base_only.detach().cpu(),
         "sample_teacher_residual": teacher_residual.detach().cpu(),
         "sample_generated": gen.detach().cpu(),
+        "sample_true_tokens": tokens.detach().cpu(),
+        "sample_base_tokens": base.detach().cpu(),
         "sample_tokens": gen_tokens.detach().cpu(),
         "sample_teacher_residual_tokens": teacher_residual_tokens.detach().cpu(),
     }

@@ -26,11 +26,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--format", choices=["gif", "mp4"], default="gif")
     p.add_argument(
         "--view",
-        choices=["generated", "real", "reconstruction", "teacher_residual", "compare", "diagnostic"],
+        choices=["generated", "real", "reconstruction", "base_only", "teacher_residual", "compare", "diagnostic"],
         default="generated",
         help=(
             "What to render. 'compare' shows real | reconstruction | generated; "
-            "'diagnostic' also shows true-base/generated-residual."
+            "'diagnostic' also shows base-only and true-base/generated-residual."
         ),
     )
     return p.parse_args()
@@ -85,6 +85,7 @@ def main() -> None:
         "generated": "sample_generated",
         "real": "sample_real",
         "reconstruction": "sample_reconstruction",
+        "base_only": "sample_base_only",
         "teacher_residual": "sample_teacher_residual",
     }
     first_key = "sample_generated" if args.view in {"compare", "diagnostic"} else key_by_view[args.view]
@@ -107,6 +108,7 @@ def main() -> None:
         series = [
             ("real", _motion_from_checkpoint(ckpt, "sample_real")),
             ("reconstruction", _motion_from_checkpoint(ckpt, "sample_reconstruction")),
+            ("base only", _motion_from_checkpoint(ckpt, "sample_base_only")),
             ("true base + generated residual", _motion_from_checkpoint(ckpt, "sample_teacher_residual")),
             ("generated", _motion_from_checkpoint(ckpt, "sample_generated")),
         ]
