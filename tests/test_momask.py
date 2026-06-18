@@ -109,6 +109,7 @@ def test_momask_models_tokenize_predict_and_decode() -> None:
     assert out.recon.shape == x.shape
     assert out.tokens.shape == (B, 3, T)
     assert torch.isfinite(out.loss)
+    assert torch.isfinite(out.velocity_loss)
 
     cfg = TokenTransformerConfig(
         vocab_size=8,

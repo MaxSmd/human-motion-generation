@@ -28,6 +28,7 @@ class RVQVAEOutput:
     tokens: Tensor             # (B, Q, T_latent)
     loss: Tensor
     recon_loss: Tensor
+    velocity_loss: Tensor
     vq_loss: Tensor
     perplexity: Tensor
 
@@ -156,14 +157,18 @@ class MotionRVQVAE(nn.Module):
         num_res_blocks: int = 2,
         commitment_weight: float = 0.25,
         quantize_dropout_prob: float = 0.2,
+        velocity_loss_weight: float = 0.0,
     ) -> None:
         super().__init__()
         if downsample < 1 or downsample & (downsample - 1):
             raise ValueError("downsample must be a power of two")
+        if velocity_loss_weight < 0.0:
+            raise ValueError("velocity_loss_weight must be non-negative")
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.latent_dim = latent_dim
         self.downsample = downsample
+        self.velocity_loss_weight = velocity_loss_weight
 
         enc = [nn.Conv1d(input_dim, hidden_dim, kernel_size=3, padding=1), nn.GELU()]
         stride = downsample
@@ -221,12 +226,26 @@ class MotionRVQVAE(nn.Module):
             recon_loss = err.sum() / (mask.sum().clamp_min(1).to(err.dtype) * x.shape[-1])
         else:
             recon_loss = err.mean()
-        loss = recon_loss + vq.loss
+
+        if x.shape[1] > 1:
+            vel_err = ((recon[:, 1:] - recon[:, :-1]) - (x[:, 1:] - x[:, :-1])).abs()
+            if mask is not None:
+                vel_mask = (mask[:, 1:] & mask[:, :-1]).to(vel_err.dtype).unsqueeze(-1)
+                velocity_loss = (vel_err * vel_mask).sum() / (
+                    vel_mask.sum().clamp_min(1.0) * x.shape[-1]
+                )
+            else:
+                velocity_loss = vel_err.mean()
+        else:
+            velocity_loss = recon_loss.new_tensor(0.0)
+
+        loss = recon_loss + self.velocity_loss_weight * velocity_loss + vq.loss
         return RVQVAEOutput(
             recon=recon,
             tokens=vq.indices,
             loss=loss,
             recon_loss=recon_loss,
+            velocity_loss=velocity_loss,
             vq_loss=vq.loss,
             perplexity=vq.perplexity,
         )

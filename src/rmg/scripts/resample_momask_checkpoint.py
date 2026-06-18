@@ -36,6 +36,7 @@ def _build_models(args: dict, device: torch.device):
         downsample=int(args["downsample"]),
         num_res_blocks=int(args["vq_res_blocks"]),
         quantize_dropout_prob=float(args["quantize_dropout"]),
+        velocity_loss_weight=float(args.get("vq_velocity_weight", 0.0)),
     ).to(device)
     cfg = TokenTransformerConfig(
         vocab_size=int(args["codebook_size"]),

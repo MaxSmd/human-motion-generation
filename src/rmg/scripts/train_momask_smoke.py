@@ -64,6 +64,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--downsample", type=int, default=1)
     p.add_argument("--quantize-dropout", type=float, default=0.2)
     p.add_argument("--vq-commitment-weight", type=float, default=0.25)
+    p.add_argument(
+        "--vq-velocity-weight",
+        type=float,
+        default=0.0,
+        help="Weight for matching frame-to-frame feature velocities in the VQ-VAE loss.",
+    )
 
     p.add_argument("--text-dim", type=int, default=64)
     p.add_argument("--transformer-hidden-dim", type=int, default=64)
@@ -101,7 +107,7 @@ def token_mask_from_frame_mask(mask: torch.Tensor, token_len: int) -> torch.Tens
 @torch.no_grad()
 def evaluate_vq(vqvae: MotionRVQVAE, loader: DataLoader, device: torch.device, max_batches: int) -> dict[str, float]:
     vqvae.eval()
-    maes, losses, ppls = [], [], []
+    maes, losses, velocity_losses, ppls = [], [], [], []
     for i, batch in enumerate(loader):
         if i >= max_batches:
             break
@@ -110,11 +116,13 @@ def evaluate_vq(vqvae: MotionRVQVAE, loader: DataLoader, device: torch.device, m
         out = vqvae(x, mask=mask)
         maes.append(float(masked_mae(out.recon, x, mask)))
         losses.append(float(out.loss))
+        velocity_losses.append(float(out.velocity_loss))
         ppls.append(float(out.perplexity))
     vqvae.train()
     return {
         "loss": sum(losses) / max(len(losses), 1),
         "recon_mae": sum(maes) / max(len(maes), 1),
+        "velocity_loss": sum(velocity_losses) / max(len(velocity_losses), 1),
         "perplexity": sum(ppls) / max(len(ppls), 1),
     }
 
@@ -265,6 +273,7 @@ def main() -> None:
         num_res_blocks=args.vq_res_blocks,
         commitment_weight=args.vq_commitment_weight,
         quantize_dropout_prob=args.quantize_dropout,
+        velocity_loss_weight=args.vq_velocity_weight,
     ).to(device)
     vq_opt = torch.optim.AdamW(vqvae.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
@@ -284,6 +293,7 @@ def main() -> None:
             print(
                 f"[vq {step:04d}] loss={out.loss.item():.5f} "
                 f"recon_mae={out.recon_loss.item():.5f} "
+                f"vel={out.velocity_loss.item():.5f} "
                 f"vq={out.vq_loss.item():.5f} ppl={out.perplexity.item():.2f}",
                 flush=True,
             )
@@ -300,6 +310,7 @@ def main() -> None:
     print(
         f"[vq summary] first_train_recon_mae={first_recon:.5f} "
         f"eval_recon_mae={vq_eval['recon_mae']:.5f} "
+        f"eval_vel={vq_eval['velocity_loss']:.5f} "
         f"eval_loss={vq_eval['loss']:.5f} eval_ppl={vq_eval['perplexity']:.2f}"
     )
 
