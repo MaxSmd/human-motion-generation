@@ -26,10 +26,20 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--format", choices=["gif", "mp4"], default="gif")
     p.add_argument(
         "--view",
-        choices=["generated", "real", "reconstruction", "base_only", "teacher_residual", "compare", "diagnostic"],
+        choices=[
+            "generated",
+            "real",
+            "reconstruction",
+            "base_only",
+            "teacher_residual",
+            "compare",
+            "vq_compare",
+            "diagnostic",
+        ],
         default="generated",
         help=(
             "What to render. 'compare' shows real | reconstruction | generated; "
+            "'vq_compare' shows real | reconstruction; "
             "'diagnostic' also shows base-only and true-base/generated-residual."
         ),
     )
@@ -88,7 +98,12 @@ def main() -> None:
         "base_only": "sample_base_only",
         "teacher_residual": "sample_teacher_residual",
     }
-    first_key = "sample_generated" if args.view in {"compare", "diagnostic"} else key_by_view[args.view]
+    first_key = (
+        "sample_generated"
+        if args.view in {"compare", "diagnostic"}
+        else "sample_real" if args.view == "vq_compare"
+        else key_by_view[args.view]
+    )
     motion = _motion_from_checkpoint(ckpt, first_key)
     if not 0 <= args.sample < motion.shape[0]:
         raise ValueError(f"--sample must be in [0, {motion.shape[0] - 1}]")
@@ -103,6 +118,11 @@ def main() -> None:
             ("real", _motion_from_checkpoint(ckpt, "sample_real")),
             ("reconstruction", _motion_from_checkpoint(ckpt, "sample_reconstruction")),
             ("generated", _motion_from_checkpoint(ckpt, "sample_generated")),
+        ]
+    elif args.view == "vq_compare":
+        series = [
+            ("real", _motion_from_checkpoint(ckpt, "sample_real")),
+            ("reconstruction", _motion_from_checkpoint(ckpt, "sample_reconstruction")),
         ]
     elif args.view == "diagnostic":
         series = [

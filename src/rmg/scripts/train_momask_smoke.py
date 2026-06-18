@@ -46,6 +46,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--min-seq-len", type=int, default=20)
     p.add_argument("--vq-steps", type=int, default=30)
     p.add_argument("--token-steps", type=int, default=20)
+    p.add_argument("--vq-only", action="store_true", help="Train/evaluate only the VQ-VAE tokenizer, then save.")
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--weight-decay", type=float, default=0.0)
     p.add_argument("--seed", type=int, default=0)
@@ -62,6 +63,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--vq-res-blocks", type=int, default=1)
     p.add_argument("--downsample", type=int, default=1)
     p.add_argument("--quantize-dropout", type=float, default=0.2)
+    p.add_argument("--vq-commitment-weight", type=float, default=0.25)
 
     p.add_argument("--text-dim", type=int, default=64)
     p.add_argument("--transformer-hidden-dim", type=int, default=64)
@@ -261,6 +263,7 @@ def main() -> None:
         codebook_size=args.codebook_size,
         downsample=args.downsample,
         num_res_blocks=args.vq_res_blocks,
+        commitment_weight=args.vq_commitment_weight,
         quantize_dropout_prob=args.quantize_dropout,
     ).to(device)
     vq_opt = torch.optim.AdamW(vqvae.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -292,12 +295,30 @@ def main() -> None:
     with torch.no_grad():
         eval_out = vqvae(eval_x, mask=eval_mask)
         tokens = eval_out.tokens.detach()
+        recon = eval_out.recon.detach()
         eval_token_mask = token_mask_from_frame_mask(eval_mask, tokens.shape[-1])
     print(
         f"[vq summary] first_train_recon_mae={first_recon:.5f} "
         f"eval_recon_mae={vq_eval['recon_mae']:.5f} "
         f"eval_loss={vq_eval['loss']:.5f} eval_ppl={vq_eval['perplexity']:.2f}"
     )
+
+    if args.vq_only:
+        ckpt = {
+            "args": vars(args),
+            "vqvae": vqvae.state_dict(),
+            "vq_optimizer": vq_opt.state_dict(),
+            "vq_eval": vq_eval,
+            "sample_texts": eval_batch.texts,
+            "sample_token_mask": eval_token_mask.detach().cpu(),
+            "sample_real": eval_x.detach().cpu(),
+            "sample_reconstruction": recon.detach().cpu(),
+            "sample_true_tokens": tokens.detach().cpu(),
+        }
+        out_path = output_dir / "momask_vq_latest.pt"
+        torch.save(ckpt, out_path)
+        print(f"[save] {out_path}")
+        return
 
     text_encoder = RandomTextEncoder(text_dim=args.text_dim)
     cached_batches = cache_token_batches(vqvae, text_encoder, loader, device)
