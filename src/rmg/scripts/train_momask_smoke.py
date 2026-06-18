@@ -71,8 +71,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--transformer-dropout", type=float, default=0.0)
     p.add_argument("--base-cond-drop", type=float, default=0.1)
     p.add_argument("--residual-cond-drop", type=float, default=0.2)
+    p.add_argument(
+        "--base-full-mask-prob",
+        type=float,
+        default=0.3,
+        help="Probability that base-token training masks every valid token, matching generation startup.",
+    )
     p.add_argument("--generation-steps", type=int, default=4)
     p.add_argument("--shared-residual-head", action="store_true")
+    p.add_argument("--live-token-crops", action="store_true",
+                   help="Train token models from the live dataset instead of cached fixed VQ tokens.")
     return p.parse_args()
 
 
@@ -111,28 +119,39 @@ def evaluate_vq(vqvae: MotionRVQVAE, loader: DataLoader, device: torch.device, m
 
 @torch.no_grad()
 def evaluate_tokens(
-    vqvae: MotionRVQVAE,
     masked_model: MaskedMotionTransformer,
     residual_model: ResidualTransformer,
-    text_encoder: RandomTextEncoder,
-    loader: DataLoader,
+    cached_batches: list[dict[str, torch.Tensor | list[str]]],
     device: torch.device,
     max_batches: int,
+    generation_steps: int,
 ) -> dict[str, float]:
     was_training = (masked_model.training, residual_model.training)
     masked_model.eval()
     residual_model.eval()
     base_losses, residual_losses = [], []
+    full_mask_losses, full_mask_accs, generated_base_accs = [], [], []
     residual_by_level: dict[int, list[float]] = {}
-    for i, batch in enumerate(loader):
+    for i, batch in enumerate(cached_batches):
         if i >= max_batches:
             break
-        x = batch.x1.to(device)
-        frame_mask = batch.mask.to(device)
-        cond = text_encoder.encode(batch.texts, device=device)
-        tok = vqvae.encode_to_tokens(x)
-        token_mask = token_mask_from_frame_mask(frame_mask, tok.shape[-1])
+        tok = batch["tokens"].to(device)  # type: ignore[index, union-attr]
+        token_mask = batch["token_mask"].to(device)  # type: ignore[index, union-attr]
+        cond = batch["cond"].to(device)  # type: ignore[index, union-attr]
         base = masked_model.training_loss(tok[:, 0], cond=cond, valid_mask=token_mask, cond_drop_prob=0.0)
+        full_masked = torch.full_like(tok[:, 0], masked_model.mask_token_id)
+        full_logits = masked_model(full_masked, cond=cond, mask=token_mask)
+        full_pred = full_logits.argmax(dim=-1)
+        full_mask_losses.append(float(F.cross_entropy(full_logits[token_mask], tok[:, 0][token_mask])))
+        full_mask_accs.append(float((full_pred[token_mask] == tok[:, 0][token_mask]).float().mean()))
+        generated_base = masked_model.generate(
+            cond=cond,
+            seq_len=tok.shape[-1],
+            steps=generation_steps,
+            guidance_scale=1.0,
+            mask=token_mask,
+        )
+        generated_base_accs.append(float((generated_base[token_mask] == tok[:, 0][token_mask]).float().mean()))
         res_parts = [
             residual_model.training_loss(tok, level, cond=cond, valid_mask=token_mask, cond_drop_prob=0.0)
             for level in range(1, tok.shape[1])
@@ -149,10 +168,43 @@ def evaluate_tokens(
     out = {
         "base_ce": sum(base_losses) / max(len(base_losses), 1),
         "residual_ce": sum(residual_losses) / max(len(residual_losses), 1),
+        "base_full_mask_ce": sum(full_mask_losses) / max(len(full_mask_losses), 1),
+        "base_full_mask_acc": sum(full_mask_accs) / max(len(full_mask_accs), 1),
+        "base_generate_acc": sum(generated_base_accs) / max(len(generated_base_accs), 1),
     }
     for level, values in residual_by_level.items():
         out[f"residual_ce_l{level}"] = sum(values) / max(len(values), 1)
     return out
+
+
+@torch.no_grad()
+def cache_token_batches(
+    vqvae: MotionRVQVAE,
+    text_encoder: RandomTextEncoder,
+    loader: DataLoader,
+    device: torch.device,
+) -> list[dict[str, torch.Tensor | list[str]]]:
+    vqvae.eval()
+    cached = []
+    for batch in loader:
+        x = batch.x1.to(device)
+        frame_mask = batch.mask.to(device)
+        tokens = vqvae.encode_to_tokens(x).cpu()
+        token_mask = token_mask_from_frame_mask(frame_mask, tokens.shape[-1]).cpu()
+        cond = text_encoder.encode(batch.texts, device=device).cpu()
+        cached.append({
+            "tokens": tokens,
+            "token_mask": token_mask,
+            "cond": cond,
+            "texts": list(batch.texts),
+        })
+    return cached
+
+
+def cycle_cached(cached_batches: list[dict[str, torch.Tensor | list[str]]]):
+    while True:
+        for batch in cached_batches:
+            yield batch
 
 
 def main() -> None:
@@ -228,6 +280,14 @@ def main() -> None:
     )
 
     text_encoder = RandomTextEncoder(text_dim=args.text_dim)
+    cached_batches = cache_token_batches(vqvae, text_encoder, loader, device)
+    cached_iter = cycle_cached(cached_batches)
+    if args.live_token_crops:
+        print("[token data] live random crops from dataset")
+    else:
+        n_cached = sum(int(batch["tokens"].shape[0]) for batch in cached_batches)  # type: ignore[index, union-attr]
+        print(f"[token data] cached fixed VQ tokens batches={len(cached_batches)} samples={n_cached}")
+
     cfg = TokenTransformerConfig(
         vocab_size=args.codebook_size,
         text_dim=args.text_dim,
@@ -252,18 +312,30 @@ def main() -> None:
 
     vqvae.eval()
     for step in range(1, args.token_steps + 1):
-        batch = next(batches)
-        x = batch.x1.to(device)
-        mask = batch.mask.to(device)
-        cond = text_encoder.encode(batch.texts, device=device)
+        if args.live_token_crops:
+            batch = next(batches)
+            x = batch.x1.to(device)
+            mask = batch.mask.to(device)
+            cond = text_encoder.encode(batch.texts, device=device)
+            with torch.no_grad():
+                tok = vqvae.encode_to_tokens(x)
+            token_mask = token_mask_from_frame_mask(mask, tok.shape[-1])
+        else:
+            cached = next(cached_iter)
+            tok = cached["tokens"].to(device)  # type: ignore[index, union-attr]
+            token_mask = cached["token_mask"].to(device)  # type: ignore[index, union-attr]
+            cond = cached["cond"].to(device)  # type: ignore[index, union-attr]
+
         with torch.no_grad():
-            tok = vqvae.encode_to_tokens(x)
-        token_mask = token_mask_from_frame_mask(mask, tok.shape[-1])
+            tok = tok.long()
+            token_mask = token_mask.bool()
+            cond = cond.float()
         base_loss = masked_model.training_loss(
             tok[:, 0],
             cond=cond,
             valid_mask=token_mask,
             cond_drop_prob=args.base_cond_drop,
+            force_full_mask=bool(torch.rand(()) < args.base_full_mask_prob),
         )
         residual_parts = [
             residual_model.training_loss(
@@ -293,17 +365,19 @@ def main() -> None:
             )
 
     token_eval = evaluate_tokens(
-        vqvae,
         masked_model,
         residual_model,
-        text_encoder,
-        loader,
+        cached_batches,
         device,
         args.eval_batches,
+        args.generation_steps,
     )
     print(
         f"[tok summary] eval_base_ce={token_eval['base_ce']:.5f} "
-        f"eval_residual_ce={token_eval['residual_ce']:.5f}"
+        f"eval_residual_ce={token_eval['residual_ce']:.5f} "
+        f"full_mask_ce={token_eval['base_full_mask_ce']:.5f} "
+        f"full_mask_acc={token_eval['base_full_mask_acc']:.3f} "
+        f"generate_base_acc={token_eval['base_generate_acc']:.3f}"
     )
     level_summary = " ".join(
         f"{k}={v:.5f}" for k, v in sorted(token_eval.items()) if k.startswith("residual_ce_l")
@@ -313,6 +387,7 @@ def main() -> None:
 
     with torch.no_grad():
         cond = text_encoder.encode(eval_batch.texts, device=device)
+        recon = vqvae(eval_x, mask=eval_mask).recon
         base = masked_model.generate(
             cond=cond,
             seq_len=tokens.shape[-1],
@@ -322,6 +397,13 @@ def main() -> None:
         )
         gen_tokens = residual_model.generate_residuals(base, cond=cond, guidance_scale=1.0, mask=eval_token_mask)
         gen = vqvae.decode_from_tokens(gen_tokens, target_len=eval_x.shape[1])
+        teacher_residual_tokens = residual_model.generate_residuals(
+            tokens[:, 0],
+            cond=cond,
+            guidance_scale=1.0,
+            mask=eval_token_mask,
+        )
+        teacher_residual = vqvae.decode_from_tokens(teacher_residual_tokens, target_len=eval_x.shape[1])
     print(f"[generate] tokens={tuple(gen_tokens.shape)} motion={tuple(gen.shape)} finite={bool(torch.isfinite(gen).all())}")
 
     ckpt = {
@@ -334,8 +416,12 @@ def main() -> None:
         "vq_eval": vq_eval,
         "token_eval": token_eval,
         "sample_texts": eval_batch.texts,
+        "sample_real": eval_x.detach().cpu(),
+        "sample_reconstruction": recon.detach().cpu(),
+        "sample_teacher_residual": teacher_residual.detach().cpu(),
         "sample_generated": gen.detach().cpu(),
         "sample_tokens": gen_tokens.detach().cpu(),
+        "sample_teacher_residual_tokens": teacher_residual_tokens.detach().cpu(),
     }
     out_path = output_dir / "momask_smoke_latest.pt"
     torch.save(ckpt, out_path)

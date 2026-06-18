@@ -125,8 +125,10 @@ def test_momask_models_tokenize_predict_and_decode() -> None:
     residual = ResidualTransformer(cfg, num_quantizers=3)
 
     base_loss = masked.training_loss(out.tokens[:, 0], cond=cond, valid_mask=mask)
+    full_base_loss = masked.training_loss(out.tokens[:, 0], cond=cond, valid_mask=mask, force_full_mask=True)
     res_loss = residual.training_loss(out.tokens, target_level=1, cond=cond, valid_mask=mask)
     assert torch.isfinite(base_loss)
+    assert torch.isfinite(full_base_loss)
     assert torch.isfinite(res_loss)
 
     base = masked.generate(cond=cond, seq_len=T, steps=2, guidance_scale=1.0, mask=mask)

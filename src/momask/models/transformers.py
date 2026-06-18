@@ -104,10 +104,14 @@ class MaskedMotionTransformer(_TransformerBackbone):
         cond: Tensor | None = None,
         valid_mask: Tensor | None = None,
         cond_drop_prob: float = 0.1,
+        force_full_mask: bool = False,
     ) -> Tensor:
         B, T = tokens.shape
         device = tokens.device
-        ratio = torch.rand(B, device=device).clamp_min(1.0 / max(T, 1))
+        if force_full_mask:
+            ratio = torch.ones(B, device=device)
+        else:
+            ratio = torch.rand(B, device=device).clamp_min(1.0 / max(T, 1))
         masked = tokens.clone()
         predict_mask = torch.zeros(B, T, dtype=torch.bool, device=device)
         for i in range(B):
