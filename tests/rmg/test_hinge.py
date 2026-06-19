@@ -82,7 +82,9 @@ def test_sampler_project_fn_keeps_joint_in_range() -> None:
 
     joint = 3
     ranges = parse_ranges([{"joint": joint, "axis": "z", "min_deg": 0, "max_deg": 10}])
-    proj = build_hinge_projector(ranges, num_frames=T, num_joints=J, dtype=torch.float64)
+    # toy 5-joint skeleton: address the raw quaternion index (no SMPL chain remap)
+    proj = build_hinge_projector(ranges, num_frames=T, num_joints=J, dtype=torch.float64,
+                                 remap_to_controller=False)
     assert proj is not None
 
     out = sampler.sample(model, shape=(1, T), num_steps=20, dtype=torch.float64, project_fn=proj)

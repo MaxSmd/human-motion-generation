@@ -29,7 +29,7 @@ import torch
 from torch import Tensor
 
 from shared.geometry.quaternions import normalize_quaternions, quat_to_upper_hemisphere
-from shared.geometry.skeleton import JOINT_NAMES, NUM_JOINTS
+from shared.geometry.skeleton import JOINT_NAMES, NUM_JOINTS, ROOT_JOINT, T2M_KINEMATIC_CHAINS
 
 # Layout constants for the quaternion-on-S^3 representations (tr / trp). The
 # translation occupies the first 3 dims; each joint quaternion is 4 contiguous
@@ -80,6 +80,51 @@ def _resolve_joint(joint: int | str) -> int:
     if not 0 <= idx < NUM_JOINTS:
         raise ValueError(f"joint index {idx} out of range [0, {NUM_JOINTS})")
     return idx
+
+
+# ---------------------------------------------------------------------------
+# Anatomical joint → controlling quaternion (per-chain FK off-by-one).
+#
+# RMG/HumanML3D forward kinematics (skeleton.forward_kinematics) uses a
+# per-chain convention: the offset of `chain[i]` is rotated by the running
+# rotation *after* multiplying in `quats[chain[i]]`. As a result, `quats[j]`
+# orients the bone *leading into* joint j (the parent→j segment), NOT the bend
+# at j. The anatomical bend at joint j — the angle between its incoming and
+# outgoing bones — is governed by the quaternion of the NEXT joint along its
+# kinematic chain (its child). Concretely the L_Elbow bend is controlled by
+# quats[L_Wrist], the L_Knee bend by quats[L_Ankle], etc.
+#
+# Constraints are authored anatomically ("hold/limit the elbow"), so we remap
+# joint → controller before touching the state. Without this, pinning quats[j]
+# only re-aims the segment *into* j and leaves the bend free (the bug the
+# elbow demo exposed). End-effectors have no outgoing bone and so no
+# representable bend; the root quaternion is global orientation, not a bend.
+# ---------------------------------------------------------------------------
+
+
+def bend_controller_index(joint: int | str) -> int:
+    """Index of the quaternion that controls the anatomical bend at `joint`.
+
+    See the module note on the per-chain FK convention. Raises if `joint` is the
+    root (global orientation, not a bend) or a kinematic end-effector (wrists,
+    ankles, feet, head — no outgoing bone in the 22-joint skeleton).
+    """
+    j = _resolve_joint(joint)
+    if j == ROOT_JOINT:
+        raise ValueError(
+            "the root (pelvis) quaternion is global orientation, not a bend — "
+            "it has no controllable joint angle"
+        )
+    for chain in T2M_KINEMATIC_CHAINS:
+        if j in chain:
+            pos = chain.index(j)
+            if pos + 1 < len(chain):
+                return chain[pos + 1]
+            break  # j is the last joint on its chain → end-effector
+    raise ValueError(
+        f"{JOINT_NAMES[j]!r} is a kinematic end-effector — its bend is not "
+        "representable in the 22-joint skeleton; constrain its parent instead"
+    )
 
 
 def _resolve_axis(axis: str | tuple[float, float, float] | Tensor):
@@ -140,6 +185,7 @@ def build_inpaint_targets(
     num_joints: int = NUM_JOINTS,
     device: torch.device | None = None,
     dtype: torch.dtype = torch.float32,
+    remap_to_controller: bool = True,
 ) -> tuple[Tensor, Tensor]:
     """Build (values, mask) tensors of shape (T, 3 + 4*num_joints).
 
@@ -147,12 +193,17 @@ def build_inpaint_targets(
     frame window; `values` holds the target quaternion there (zeros elsewhere,
     unused). Pass both to `RiemannianEulerSampler.sample(fixed_values=, fixed_mask=)`.
     Returns empty tensors with all-False mask when `constraints` is empty.
+
+    `remap_to_controller` (default True): the constraint's anatomical joint is
+    mapped to the quaternion that actually controls its bend (see
+    `bend_controller_index`). Set False to address the raw quaternion index
+    directly (e.g. for tests or to pin global root orientation).
     """
     ambient = 3 + 4 * num_joints
     values = torch.zeros(num_frames, ambient, device=device, dtype=dtype)
     mask = torch.zeros(num_frames, ambient, device=device, dtype=torch.bool)
     for c in constraints:
-        j = _resolve_joint(c.joint)
+        j = bend_controller_index(c.joint) if remap_to_controller else _resolve_joint(c.joint)
         lo, hi = 3 + 4 * j, 3 + 4 * (j + 1)
         fs, fe = c.frame_window(num_frames)
         if fe <= fs:
@@ -303,6 +354,7 @@ def build_hinge_projector(
     num_joints: int = NUM_JOINTS,
     device: torch.device | None = None,
     dtype: torch.dtype = torch.float32,
+    remap_to_controller: bool = True,
 ) -> Callable[[Tensor], Tensor] | None:
     """Compile hinge limits into a projector `fn(x) -> x` for the sampler.
 
@@ -310,10 +362,14 @@ def build_hinge_projector(
     frame window) onto its hinge submanifold; pass it as
     `RiemannianEulerSampler.sample(project_fn=...)`. Returns None when there are
     no effective constraints (so the sampler skips the hook entirely).
+
+    `remap_to_controller` (default True): the constraint's anatomical joint is
+    mapped to the quaternion that actually controls its bend (see
+    `bend_controller_index`). Set False to address the raw quaternion index.
     """
     specs = []
     for c in constraints:
-        j = _resolve_joint(c.joint)
+        j = bend_controller_index(c.joint) if remap_to_controller else _resolve_joint(c.joint)
         lo, hi = 3 + 4 * j, 3 + 4 * (j + 1)
         fs, fe = c.frame_window(num_frames)
         if fe <= fs:

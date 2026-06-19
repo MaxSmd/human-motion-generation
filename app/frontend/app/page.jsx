@@ -15,6 +15,7 @@ import ClusterGate from "@/components/ClusterGate";
 
 // three.js / r3f canvas — client-only (no SSR).
 const RoomEditor = dynamic(() => import("@/components/RoomEditor"), { ssr: false });
+const StudioTab = dynamic(() => import("@/components/StudioTab"), { ssr: false });
 
 export default function Home() {
   const [health, setHealth] = useState(null);
@@ -71,6 +72,7 @@ export default function Home() {
         { id: "analysis", n: "04", label: "Analysis", sub: "metrics · plots" },
         { id: "constraints", n: "05", label: "Constraints", sub: "fixed joint angles", soon: constraintsSoon },
         { id: "room", n: "06", label: "Room", sub: "scene · objects · spawn", soon: constraintsSoon },
+        { id: "studio", n: "07", label: "Studio", sub: "constraints · live eval", soon: constraintsSoon },
       ];
     return [
       { id: "generate", n: "01", label: "Generate", sub: "text → motion" },
@@ -78,6 +80,7 @@ export default function Home() {
       { id: "training", n: "03", label: "Training", sub: "sample scrubber" },
       { id: "constraints", n: "04", label: "Constraints", sub: "fixed joint angles", soon: constraintsSoon },
       { id: "room", n: "05", label: "Room", sub: "scene · objects · spawn", soon: constraintsSoon },
+      { id: "studio", n: "06", label: "Studio", sub: "constraints · live eval", soon: constraintsSoon },
     ];
   }, [clusterMode, constraintsSoon]);
 
@@ -146,6 +149,12 @@ export default function Home() {
             <MardmUnsupported feature="Room" />
           ) : (
             <RoomEditor clusterMode={clusterMode} checkpoints={checkpoints} />
+          ))}
+        {tab === "studio" &&
+          (model === "mardm" ? (
+            <MardmUnsupported feature="Studio" />
+          ) : (
+            <StudioTab clusterMode={clusterMode} checkpoints={checkpoints} />
           ))}
       </div>
     </>

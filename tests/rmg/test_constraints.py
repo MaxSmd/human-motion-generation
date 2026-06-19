@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 
+import pytest
 import torch
 
 from rmg.flow import (
@@ -18,6 +19,7 @@ from rmg.flow import (
     SamplerCfg,
     WrappedGaussianPrior,
     axis_angle_to_quat,
+    bend_controller_index,
     build_inpaint_targets,
     parse_constraints,
     rest_pose_mu,
@@ -45,7 +47,9 @@ def test_build_inpaint_targets_layout() -> None:
     values, mask = build_inpaint_targets([c], num_frames=T, num_joints=J)
     assert values.shape == (T, 3 + 4 * J)
     assert mask.dtype == torch.bool
-    j = 18  # L_Elbow index
+    # the L_Elbow *bend* is controlled by L_Wrist (index 20) under HumanML3D's
+    # per-chain FK, so that's the quaternion slot the constraint must pin.
+    j = 20
     lo, hi = 3 + 4 * j, 3 + 4 * (j + 1)
     # masked exactly on the joint's 4 quat dims over [5, 20)
     assert mask[5:20, lo:hi].all()
@@ -90,7 +94,9 @@ def test_sampler_pins_constrained_joint() -> None:
 
     pin_joint = 2
     c = JointAngleConstraint(joint=pin_joint, axis="x", angle_deg=90.0)
-    values, mask = build_inpaint_targets([c], num_frames=T, num_joints=J, dtype=torch.float64)
+    # toy 5-joint skeleton: address the raw quaternion index (no SMPL chain remap)
+    values, mask = build_inpaint_targets([c], num_frames=T, num_joints=J, dtype=torch.float64,
+                                         remap_to_controller=False)
 
     out = sampler.sample(model, shape=(1, T), num_steps=20, dtype=torch.float64,
                          fixed_values=values, fixed_mask=mask)
@@ -104,3 +110,36 @@ def test_sampler_pins_constrained_joint() -> None:
     # an unconstrained joint is generally NOT the target (it tracked the oracle)
     free_lo = 3 + 4 * 1
     assert not torch.allclose(out[0, :, free_lo:free_lo + 4], q_target.expand(T, 4), atol=1e-3)
+
+
+def test_bend_controller_index_mapping() -> None:
+    # bend at joint J is controlled by the next joint along its kinematic chain
+    assert bend_controller_index("L_Elbow") == 20  # L_Wrist
+    assert bend_controller_index("R_Elbow") == 21  # R_Wrist
+    assert bend_controller_index("L_Knee") == 7    # L_Ankle
+    assert bend_controller_index("R_Knee") == 8    # R_Ankle
+    assert bend_controller_index("L_Shoulder") == 18  # L_Elbow
+    assert bend_controller_index("Neck") == 15     # Head
+    assert bend_controller_index("Spine3") == 12   # Neck
+    assert bend_controller_index("L_Ankle") == 10  # L_Foot (toe) — ankle has a child
+    # true end-effectors have no outgoing bone → no representable bend
+    for ee in ("L_Wrist", "R_Wrist", "L_Foot", "R_Foot", "Head"):
+        with pytest.raises(ValueError):
+            bend_controller_index(ee)
+    # root quaternion is global orientation, not a bend
+    with pytest.raises(ValueError):
+        bend_controller_index("pelvis")
+
+
+def test_inpaint_remaps_anatomical_joint_to_controller() -> None:
+    """A constraint authored on L_Elbow must pin L_Wrist (its bend controller),
+    NOT the elbow's own quaternion — the off-by-one the elbow demo exposed."""
+    J, T = 22, 10
+    c = JointAngleConstraint(joint="L_Elbow", axis="z", angle_deg=90.0)
+    values, mask = build_inpaint_targets([c], num_frames=T, num_joints=J)
+    lo18, lo20 = 3 + 4 * 18, 3 + 4 * 20
+    assert not mask[:, lo18:lo18 + 4].any()  # elbow's own quat left free
+    assert mask[:, lo20:lo20 + 4].all()      # wrist quat (bend controller) pinned
+    # raw addressing still available for advanced/raw-index use
+    _, m_raw = build_inpaint_targets([c], num_frames=T, num_joints=J, remap_to_controller=False)
+    assert m_raw[:, lo18:lo18 + 4].all()
