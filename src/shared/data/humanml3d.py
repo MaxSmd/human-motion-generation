@@ -162,6 +162,7 @@ class HumanML3DDataset(Dataset):
         subset_fraction: float = 1.0,
         subset_seed: int = 0,
         subset_n: int = 0,
+        preload: bool = False,
     ) -> None:
         if split not in ("train", "val", "test"):
             raise ValueError(f"split must be one of train/val/test, got {split}")
@@ -210,6 +211,21 @@ class HumanML3DDataset(Dataset):
 
         self.representation: ClipRepresentation = representation
 
+        # Optional RAM cache of the raw clips (translation, quats, texts). Reading
+        # + decompressing from the zip every step is the main CPU cost and stalls
+        # the GPU at grad-accum boundaries; caching kills it (the crop/mirror/encode
+        # still run per step, so augmentation is unchanged). Built once in the
+        # parent process; DataLoader workers inherit it via fork (copy-on-write, so
+        # no per-worker duplication). ~0.6GB unmirrored / ~1.2GB mirrored.
+        self._cache: dict[str, tuple[Tensor, Tensor, list[str]]] | None = None
+        if preload:
+            zf = self._open_zip()
+            self._cache = {cid: read_clip(zf, cid) for cid in self.clip_ids}
+            # Drop the open zip handle: everything's in RAM now, and an open
+            # BufferedReader isn't picklable (breaks 'spawn' DataLoader workers).
+            self._zip.close()
+            self._zip = None
+
     def _open_zip(self) -> zipfile.ZipFile:
         if self._zip is None:
             self._zip = zipfile.ZipFile(self.zip_path, mode="r")
@@ -220,7 +236,13 @@ class HumanML3DDataset(Dataset):
 
     def __getitem__(self, idx: int) -> HumanML3DSample:
         clip_id = self.clip_ids[idx]
-        translation, quats, texts = read_clip(self._open_zip(), clip_id)
+        if self._cache is not None:
+            # Clone so the per-step crop/mirror/normalize never mutate the shared
+            # cache (cheap — a clip is only a few hundred frames).
+            tr, q, texts = self._cache[clip_id]
+            translation, quats = tr.clone(), q.clone()
+        else:
+            translation, quats, texts = read_clip(self._open_zip(), clip_id)
 
         translation, quats, T = random_crop(translation, quats, self.max_seq_len)
         if T < self.min_seq_len:

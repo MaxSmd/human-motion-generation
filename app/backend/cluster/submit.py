@@ -169,11 +169,16 @@ def build_train(params: dict) -> tuple[str, dict[str, str], str, str]:
         ("data.subset_fraction", params.get("subset_fraction")),
         ("data.subset_seed", params.get("subset_seed")),
         ("train.max_steps", params.get("max_steps")),
+        ("train.micro_batch_size", params.get("micro_batch_size")),
+        ("train.grad_accum", params.get("grad_accum")),
         ("train.sample_every", params.get("sample_every")),
         ("train.ckpt_every", params.get("ckpt_every")),
         ("train.optimizer.lr", params.get("lr")),
         ("train.guidance_scale", params.get("guidance")),
         ("train.precision", params.get("precision")),
+        # RAM-cache the encoded features (kills the per-step encode pipeline that
+        # otherwise starves the GPU). Hydra wants a lowercase bool; only sent when on.
+        ("data.preload", "true" if params.get("preload") else None),
         ("representation", params.get("representation")),
     ], params.get("overrides"))
     if ov:

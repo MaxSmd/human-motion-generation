@@ -162,11 +162,14 @@ class TrainRequest(BaseModel):
     representation: str | None = None
     run_name: str | None = None
     max_steps: int | None = None
+    micro_batch_size: int | None = None   # per-step batch (memory ∝ this)
+    grad_accum: int | None = None         # micro-steps per optimizer step (BS = micro × accum)
     sample_every: int | None = None   # steps between periodic sample dumps
     ckpt_every: int | None = None     # steps between checkpoint saves
     subset_n: int | None = None
     subset_fraction: float | None = None
     subset_seed: int | None = None
+    preload: bool | None = None       # cache encoded features in RAM (throughput)
     lr: float | None = None
     guidance: float | None = None
     precision: str | None = None

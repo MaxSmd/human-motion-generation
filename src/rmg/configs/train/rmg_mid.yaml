@@ -8,14 +8,14 @@
 # the cluster's 24h walltime because the job manager auto-resubmits (resume from
 # latest.pt) until the `.complete` marker is written at max_steps. Eval FID along
 # the way from any numbered checkpoint and stop early if it has plateaued.
-#
-# If micro_batch_size=32 OOMs on the 24g GPU, drop to micro 16 + grad_accum 16
-# (same effective BS 256, ~same throughput).
 
 preset: rmg_mid
 max_steps: 300_000
-micro_batch_size: 32
-grad_accum: 8                  # effective BS = 256
+# Effective BS stays 256 (paper Table 7); micro 64 fills the 24g GPU (≈17GB at
+# 112M) and halves the micro-steps per optimizer step vs 32/8. Drop to 32/8 if
+# you OOM (e.g. fragmentation or a tighter GPU).
+micro_batch_size: 64
+grad_accum: 4                  # effective BS = 256
 
 optimizer:
   name: AdamW

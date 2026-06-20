@@ -44,6 +44,7 @@ class HumanML3DDataset(_BaseHumanML3DDataset):
         subset_fraction: float = 1.0,
         subset_seed: int = 0,
         subset_n: int = 0,
+        preload: bool = False,
     ) -> None:
         super().__init__(
             root,
@@ -57,4 +58,5 @@ class HumanML3DDataset(_BaseHumanML3DDataset):
             subset_fraction=subset_fraction,
             subset_seed=subset_seed,
             subset_n=subset_n,
+            preload=preload,
         )

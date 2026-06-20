@@ -42,19 +42,24 @@ export default function ModelTab({ model = "rmg" }) {
 // motion but cost more per step (base 150k → small 200k → mid 300k; the paper's
 // 462M ran 600k). All ride the 24h walltime via auto-resubmit, so you can also
 // eval FID at checkpoints and stop early once it plateaus.
+// `subset_n: 0` = full data; effective BS = micro_batch_size × grad_accum (kept
+// at 256 per the paper). micro_batch_size sizes GPU memory — small/mid use 64 to
+// fill the 24g GPU (≈11GB / ≈17GB) and run faster than micro 32; base keeps its
+// reference 32×8. `partition: "24g"` is required for the big-batch runs; `preload`
+// RAM-caches the dataset for throughput on full runs.
 const TRAIN_RECIPES = [
-  { key: "smoke",  label: "smoke test",      hint: "16 clips · 300 steps · ~minutes",
-    cfg: { model_preset: "dit_base",  train_preset: "rmg_base",  subset_n: 16, max_steps: 300,    sample_every: 100,   ckpt_every: 200 } },
-  { key: "base",   label: "base · 25M full", hint: "full data · 150k · ~3.5 days",
-    cfg: { model_preset: "dit_base",  train_preset: "rmg_base",  subset_n: 0,  max_steps: 150000, sample_every: 10000, ckpt_every: 10000 } },
-  { key: "small",  label: "small · 50M full", hint: "full data · 200k",
-    cfg: { model_preset: "dit_small", train_preset: "rmg_small", subset_n: 0,  max_steps: 200000, sample_every: 10000, ckpt_every: 10000 } },
-  { key: "mid",    label: "mid · 112M full", hint: "full data · 300k · recommended",
-    cfg: { model_preset: "dit_mid",   train_preset: "rmg_mid",   subset_n: 0,  max_steps: 300000, sample_every: 10000, ckpt_every: 10000 } },
+  { key: "smoke",  label: "smoke test",      hint: "16 clips · 300 steps · ~minutes · 12g ok",
+    cfg: { model_preset: "dit_base",  train_preset: "rmg_base",  subset_n: 16, max_steps: 300,    micro_batch_size: 16, grad_accum: 1, sample_every: 100,   ckpt_every: 200,   partition: "",    preload: false } },
+  { key: "base",   label: "base · 25M full", hint: "full data · 150k · BS 256 (32×8) · ~4GB · fits 12g",
+    cfg: { model_preset: "dit_base",  train_preset: "rmg_base",  subset_n: 0,  max_steps: 150000, micro_batch_size: 32, grad_accum: 8, sample_every: 10000, ckpt_every: 10000, partition: "12g", preload: true } },
+  { key: "small",  label: "small · 50M full", hint: "full data · 200k · BS 256 (64×4) · ~11GB",
+    cfg: { model_preset: "dit_small", train_preset: "rmg_small", subset_n: 0,  max_steps: 200000, micro_batch_size: 64, grad_accum: 4, sample_every: 10000, ckpt_every: 10000, partition: "24g", preload: true } },
+  { key: "mid",    label: "mid · 112M full", hint: "full data · 300k · BS 256 (64×4) · ~17GB · recommended",
+    cfg: { model_preset: "dit_mid",   train_preset: "rmg_mid",   subset_n: 0,  max_steps: 300000, micro_batch_size: 64, grad_accum: 4, sample_every: 10000, ckpt_every: 10000, partition: "24g", preload: true } },
 ];
 
 function RmgTrain() {
-  const [form, setForm] = useState({ model_preset: "dit_base", train_preset: "rmg_base", subset_n: 16, max_steps: 15000, sample_every: 1000, ckpt_every: 5000, overrides: "" });
+  const [form, setForm] = useState({ model_preset: "dit_base", train_preset: "rmg_base", subset_n: 16, max_steps: 15000, micro_batch_size: 32, grad_accum: 8, partition: "", preload: false, sample_every: 1000, ckpt_every: 5000, overrides: "" });
   const [preview, setPreview] = useState(null);
   const [pErr, setPErr] = useState(null);
   const { job, error, submitting, run } = useVizJob(api.submitTrain);
@@ -90,9 +95,17 @@ function RmgTrain() {
           <Field label="train preset"><select className="field-input" value={form.train_preset} onChange={set("train_preset")}><option>rmg_base</option><option>rmg_small</option><option>rmg_mid</option><option>rmg_large</option></select></Field>
           <Field label="subset_n (0 = full dataset)"><input type="number" className="field-input" value={form.subset_n} onChange={set("subset_n")} /></Field>
           <Field label="max_steps"><input type="number" className="field-input" value={form.max_steps} onChange={set("max_steps")} /></Field>
+          <Field label="micro_batch_size (GPU mem)"><input type="number" className="field-input" value={form.micro_batch_size} onChange={set("micro_batch_size")} /></Field>
+          <Field label="grad_accum (BS = micro × accum)"><input type="number" className="field-input" value={form.grad_accum} onChange={set("grad_accum")} /></Field>
+          <Field label="partition"><select className="field-input" value={form.partition} onChange={set("partition")}><option value="">auto</option><option value="24g">24g</option><option value="12g">12g</option></select></Field>
+          <Field label="effective batch"><div className="field-input flex items-center text-[var(--muted)]">{(form.micro_batch_size || 0) * (form.grad_accum || 0)}{(form.micro_batch_size * form.grad_accum) !== 256 ? " ⚠ ≠256" : ""}</div></Field>
           <Field label="sample_every (steps/sample)"><input type="number" className="field-input" value={form.sample_every} onChange={set("sample_every")} /></Field>
           <Field label="ckpt_every (steps/save)"><input type="number" className="field-input" value={form.ckpt_every} onChange={set("ckpt_every")} /></Field>
         </div>
+        <label className="flex items-center gap-2 text-[12px] text-slate-300">
+          <input type="checkbox" checked={!!form.preload} onChange={(e) => setForm((f) => ({ ...f, preload: e.target.checked }))} />
+          preload dataset into RAM <span className="text-[var(--muted)]">— faster steps on full-dataset runs</span>
+        </label>
         <Field label="extra overrides (hydra, space-sep)">
           <input className="field-input" placeholder="train.optimizer.lr=1e-4 train.precision=bf16" value={form.overrides} onChange={set("overrides")} />
         </Field>

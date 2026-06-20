@@ -10,8 +10,12 @@
 
 preset: rmg_small
 max_steps: 200_000
-micro_batch_size: 32
-grad_accum: 8                  # effective BS = 256
+# Effective BS stays 256 (paper Table 7), but we use a bigger micro-batch to fill
+# the 24g GPU: at 50M, micro-BS 32 used only ~6.5GB. micro 64 ≈ 11GB and halves
+# the micro-steps per optimizer step (throughput). Push to 128/2 (~21GB) if you
+# want to use more memory and don't hit OOM; drop to 32/8 on a 12g GPU.
+micro_batch_size: 64
+grad_accum: 4                  # effective BS = 256
 
 optimizer:
   name: AdamW

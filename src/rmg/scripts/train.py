@@ -86,6 +86,7 @@ def _build_dataset(cfg: DictConfig, split: str, representation: Representation) 
         subset_fraction=float(cfg.data.get("subset_fraction", 1.0)),
         subset_seed=int(cfg.data.get("subset_seed", 0)),
         subset_n=int(cfg.data.get("subset_n", 0)),
+        preload=bool(cfg.data.get("preload", False)),
     )
 
 

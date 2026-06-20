@@ -32,3 +32,7 @@ num_workers: 4
 pin_memory: true
 persistent_workers: true
 prefetch_factor: 4
+# Cache the raw clips in RAM at dataset init (~0.6GB unmirrored / ~1.2GB mirrored)
+# so the per-step zip read/decompress doesn't stall the GPU. Off by default (keeps
+# tiny smoke runs instant); flip on (or set data.preload=true) for full-data runs.
+preload: false
