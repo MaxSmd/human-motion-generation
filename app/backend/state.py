@@ -25,11 +25,9 @@ from rmg.flow import (
     RiemannianEulerSampler,
     SamplerCfg,
     WrappedGaussianPrior,
-    build_hinge_projector,
-    build_inpaint_targets,
+    build_bend_projector,
     build_room_energy_fn,
-    parse_constraints,
-    parse_ranges,
+    parse_bends,
     parse_scene,
     place_motion,
 )
@@ -172,10 +170,11 @@ class AppState:
     ) -> Tensor:
         """Text → (T, ambient_dim) sample on the manifold.
 
-        `constraints` are sampling-time joint-angle pins (inpainting); `ranges`
-        are hinge limits (swing-twist projection each ODE step); `scene` adds
-        euclidean room/obstacle guidance + exact spawn placement. All apply only
-        to the quaternion-on-S^3 representations (tr/trp).
+        `constraints` are exact bend-angle pins, `ranges` are bend min/max limits
+        — both projected onto the joint's feasible bend each ODE step (see
+        flow.constraints); `scene` adds euclidean room/obstacle guidance + exact
+        spawn placement. All apply only to the quaternion-on-S^3 representations
+        (tr/trp).
         """
         gen = torch.Generator(device=self.device).manual_seed(int(seed))
         cond = bundle.text_encoder.encode([text], device=self.device)
@@ -190,14 +189,13 @@ class AppState:
                     f"{bundle.representation_name!r}."
                 )
             num_joints = int(bundle.cfg.representation.get("num_joints", 22))
-            if constraints:
-                fixed_values, fixed_mask = build_inpaint_targets(
-                    parse_constraints(constraints),
-                    num_frames=int(num_frames), num_joints=num_joints, device=self.device,
-                )
-            if ranges:
-                project_fn = build_hinge_projector(
-                    parse_ranges(ranges),
+            # Both pins (exact bend) and ranges (bend min/max) are bend-angle
+            # constraints projected each ODE step — see flow.constraints. Each
+            # acts on the joint's controller quaternion (per-chain off-by-one).
+            bend_specs = [*parse_bends(constraints), *parse_bends(ranges)]
+            if bend_specs:
+                project_fn = build_bend_projector(
+                    bend_specs, self.skeleton(),
                     num_frames=int(num_frames), num_joints=num_joints, device=self.device,
                 )
             if scene_obj and room_guidance:

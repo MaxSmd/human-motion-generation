@@ -31,21 +31,21 @@ const FALLBACK = [
   "L_Wrist", "R_Wrist",
 ].map((name, index) => ({ index, name, parent: index === 0 ? -1 : 0 }));
 
-const AXES = ["x", "y", "z"];
 let _pid = 0;
 let _rid = 0;
 
+// A constraint is the BEND ANGLE at a joint (angle between its two bones, 0 =
+// straight) — axis-free. A pin fixes it exactly; a range limits it to [min,max].
 function toConstraints(pins) {
   return pins.map((p) => ({
-    joint: p.joint, axis: p.axis, angle_deg: Number(p.angle_deg),
+    joint: p.joint, bend_deg: Number(p.bend_deg),
     frame_start: Number(p.frame_start) || 0,
     frame_end: p.frame_end === "" ? null : Number(p.frame_end),
   }));
 }
 function toRanges(ranges) {
   return ranges.map((r) => ({
-    joint: r.joint, axis: r.axis, min_deg: Number(r.min_deg), max_deg: Number(r.max_deg),
-    swing_max_deg: Number(r.swing_max_deg) || 0,
+    joint: r.joint, bend_min: Number(r.bend_min), bend_max: Number(r.bend_max),
     frame_start: Number(r.frame_start) || 0,
     frame_end: r.frame_end === "" ? null : Number(r.frame_end),
   }));
@@ -113,14 +113,14 @@ export default function StudioTab({ checkpoints = [], clusterMode }) {
   const upsertPin = (patch) =>
     setPins((ps) => {
       const i = ps.findIndex((p) => p.joint === selName);
-      if (i < 0) return [...ps, { id: ++_pid, joint: selName, axis: "z", angle_deg: 90, frame_start: 0, frame_end: "", ...patch }];
+      if (i < 0) return [...ps, { id: ++_pid, joint: selName, bend_deg: 90, frame_start: 0, frame_end: "", ...patch }];
       const n = [...ps]; n[i] = { ...n[i], ...patch }; return n;
     });
   const removePin = () => setPins((ps) => ps.filter((p) => p.joint !== selName));
   const upsertHinge = (patch) =>
     setRanges((rs) => {
       const i = rs.findIndex((r) => r.joint === selName);
-      if (i < 0) return [...rs, { id: ++_rid, joint: selName, axis: "x", min_deg: 0, max_deg: 10, swing_max_deg: 0, frame_start: 0, frame_end: "", ...patch }];
+      if (i < 0) return [...rs, { id: ++_rid, joint: selName, bend_min: 0, bend_max: 90, frame_start: 0, frame_end: "", ...patch }];
       const n = [...rs]; n[i] = { ...n[i], ...patch }; return n;
     });
   const removeHinge = () => setRanges((rs) => rs.filter((r) => r.joint !== selName));
@@ -138,6 +138,7 @@ export default function StudioTab({ checkpoints = [], clusterMode }) {
             selected={selected}
             onSelect={setSelected}
             jointNames={jointNames}
+            parents={parents}
             onFrameChange={setFrame}
           />
         </div>
@@ -215,7 +216,7 @@ function JointEditor({ selName, pin, hinge, numFrames, upsertPin, removePin, ups
     return (
       <section className="surface p-5">
         <div className="label">joint editor</div>
-        <p className="mt-3 text-[13px] text-[var(--muted)]">Click a joint in the viewport to pin it or set a hinge range.</p>
+        <p className="mt-3 text-[13px] text-[var(--muted)]">Click a joint in the viewport to pin its bend or set a bend range.</p>
       </section>
     );
   }
@@ -227,12 +228,12 @@ function JointEditor({ selName, pin, hinge, numFrames, upsertPin, removePin, ups
           <div className="display text-base font-bold text-[var(--signal)]">{selName}</div>
         </div>
         <div className="flex gap-1">
-          {["pin", "hinge"].map((t) => (
+          {["pin", "range"].map((t) => (
             <button key={t} onClick={() => setTab(t)}
               className={`rounded-md border px-3 py-1 text-[11px] font-semibold uppercase tracking-widest transition ${
                 tab === t ? "border-[var(--signal)] bg-[var(--signal-dim)] text-[var(--signal)]" : "border-[var(--hairline)] text-[var(--muted)] hover:text-slate-200"
               }`}>
-              {t}{((t === "pin" && pin) || (t === "hinge" && hinge)) ? " •" : ""}
+              {t}{((t === "pin" && pin) || (t === "range" && hinge)) ? " •" : ""}
             </button>
           ))}
         </div>
@@ -248,22 +249,21 @@ function JointEditor({ selName, pin, hinge, numFrames, upsertPin, removePin, ups
 }
 
 function PinEditor({ pin, numFrames, upsertPin, removePin }) {
-  const axis = pin?.axis ?? "z";
-  const angle = pin?.angle_deg ?? 90;
+  const bend = pin?.bend_deg ?? 90;
   return (
     <div className="space-y-4">
       <p className="text-[12px] text-[var(--muted)]">
-        Holds this joint at a fixed relative rotation during sampling (inpainting on its S³ factor).
+        Holds this joint at a fixed bend angle each sampling step — the angle between its two bones
+        (0° = straight). Twist and bend direction stay free.
       </p>
       <div className="flex items-center gap-5">
-        <AngleDial value={Number(angle)} onChange={(v) => upsertPin({ angle_deg: v })} color="#fbbf24" />
+        <AngleDial value={Number(bend)} onChange={(v) => upsertPin({ bend_deg: v })} color="#fbbf24" min={0} max={180} />
         <div className="flex-1 space-y-3">
-          <AxisRow axis={axis} onPick={(a) => upsertPin({ axis: a })} color="#fbbf24" label="rotation axis" />
           <div>
-            <div className="mb-1 flex justify-between"><span className="label">angle</span>
-              <span className="font-mono text-sm text-[var(--amber)]">{Number(angle)}°</span></div>
-            <input type="range" min="-180" max="180" step="5" value={angle}
-              onChange={(e) => upsertPin({ angle_deg: Number(e.target.value) })} className="w-full accent-[var(--amber)]" />
+            <div className="mb-1 flex justify-between"><span className="label">bend angle</span>
+              <span className="font-mono text-sm text-[var(--amber)]">{Number(bend)}°</span></div>
+            <input type="range" min="0" max="180" step="5" value={bend}
+              onChange={(e) => upsertPin({ bend_deg: Number(e.target.value) })} className="w-full accent-[var(--amber)]" />
           </div>
         </div>
       </div>
@@ -276,46 +276,24 @@ function PinEditor({ pin, numFrames, upsertPin, removePin }) {
 }
 
 function HingeEditor({ hinge, numFrames, upsertHinge, removeHinge }) {
-  const axis = hinge?.axis ?? "x";
-  const mn = hinge?.min_deg ?? 0;
-  const mx = hinge?.max_deg ?? 10;
+  const mn = hinge?.bend_min ?? 0;
+  const mx = hinge?.bend_max ?? 90;
   return (
     <div className="space-y-4">
       <p className="text-[12px] text-[var(--muted)]">
-        Clamps the joint's twist into [min, max] about the hinge axis each sampling step (swing-twist projection).
+        Limits the joint's bend angle to [min, max] each sampling step (0° = straight). The motion
+        bends freely within the range; anything outside is projected back in.
       </p>
-      <AxisRow axis={axis} onPick={(a) => upsertHinge({ axis: a })} color="#34d399" label="hinge axis" />
       <div className="grid grid-cols-2 gap-3">
-        <label className="block"><span className="label mb-1 block">min twist (°)</span>
-          <input type="number" className="field-input" value={mn} onChange={(e) => upsertHinge({ min_deg: Number(e.target.value) })} /></label>
-        <label className="block"><span className="label mb-1 block">max twist (°)</span>
-          <input type="number" className="field-input" value={mx} onChange={(e) => upsertHinge({ max_deg: Number(e.target.value) })} /></label>
+        <label className="block"><span className="label mb-1 block">min bend (°)</span>
+          <input type="number" min="0" max="180" className="field-input" value={mn} onChange={(e) => upsertHinge({ bend_min: Number(e.target.value) })} /></label>
+        <label className="block"><span className="label mb-1 block">max bend (°)</span>
+          <input type="number" min="0" max="180" className="field-input" value={mx} onChange={(e) => upsertHinge({ bend_max: Number(e.target.value) })} /></label>
       </div>
-      <label className="block"><span className="label mb-1 block">swing cap (°) <span className="text-[var(--muted)]">0 = pure hinge</span></span>
-        <input type="number" className="field-input" value={hinge?.swing_max_deg ?? 0} onChange={(e) => upsertHinge({ swing_max_deg: Number(e.target.value) })} /></label>
       <FrameWindow c={hinge} numFrames={numFrames} onChange={(patch) => upsertHinge(patch)} />
       {hinge && (
         <button onClick={removeHinge} className="text-[11px] text-[var(--muted)] hover:text-[var(--amber)]">remove hinge</button>
       )}
-    </div>
-  );
-}
-
-function AxisRow({ axis, onPick, color, label }) {
-  return (
-    <div>
-      <span className="label mb-1 block">{label}</span>
-      <div className="flex gap-1.5">
-        {AXES.map((a) => (
-          <button key={a} type="button" onClick={() => onPick(a)}
-            className="flex-1 rounded-md border px-2 py-1.5 font-mono text-[12px] uppercase transition"
-            style={axis === a
-              ? { borderColor: color, color, background: "rgba(255,255,255,0.04)" }
-              : { borderColor: "var(--hairline)", color: "var(--muted)" }}>
-            {a}
-          </button>
-        ))}
-      </div>
     </div>
   );
 }
@@ -334,7 +312,7 @@ function FrameWindow({ c, numFrames, onChange }) {
 }
 
 // ───────────────────────────────────────── drag-dial for "relative angle"
-function AngleDial({ value, onChange, color = "#22d3ee", size = 96 }) {
+function AngleDial({ value, onChange, color = "#22d3ee", size = 96, min = -180, max = 180 }) {
   const r = size / 2;
   const rad = (Number(value) * Math.PI) / 180;
   // 0° points up; clockwise positive. Convert to screen coords.
@@ -346,7 +324,7 @@ function AngleDial({ value, onChange, color = "#22d3ee", size = 96 }) {
     const cx = e.clientX - rect.left - r;
     const cy = e.clientY - rect.top - r;
     let deg = (Math.atan2(cx, -cy) * 180) / Math.PI; // up = 0, clockwise +
-    deg = Math.round(deg / 5) * 5;
+    deg = Math.max(min, Math.min(max, Math.round(deg / 5) * 5));
     onChange(deg);
   }
   return (
@@ -371,9 +349,9 @@ function AngleDial({ value, onChange, color = "#22d3ee", size = 96 }) {
 function ConstraintList({ pins, ranges, jointNames, onPick, onRemovePin, onRemoveHinge }) {
   const rows = [
     ...pins.map((p) => ({ key: `p${p.id}`, joint: p.joint, kind: "pin", color: "#fbbf24",
-      desc: `${p.axis} · ${p.angle_deg}° · ${winLabel(p)}`, remove: () => onRemovePin(p.joint) })),
-    ...ranges.map((r) => ({ key: `r${r.id}`, joint: r.joint, kind: "hinge", color: "#34d399",
-      desc: `${r.axis} · [${r.min_deg},${r.max_deg}]° · ${winLabel(r)}`, remove: () => onRemoveHinge(r.joint) })),
+      desc: `bend ${p.bend_deg}° · ${winLabel(p)}`, remove: () => onRemovePin(p.joint) })),
+    ...ranges.map((r) => ({ key: `r${r.id}`, joint: r.joint, kind: "range", color: "#34d399",
+      desc: `bend [${r.bend_min},${r.bend_max}]° · ${winLabel(r)}`, remove: () => onRemoveHinge(r.joint) })),
   ];
   return (
     <section className="surface p-5">

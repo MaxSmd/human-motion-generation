@@ -1,10 +1,11 @@
 "use client";
 
-// Functional constraint editor for RMG. V1 supports FIXED JOINT ANGLES applied
-// during sampling only (no fine-tuning): each pinned joint's quaternion is held
-// at an axis+angle target over a frame range. Because RMG lives on
-// R^3 × (S^3)^J, a pin is just inpainting that joint's S^3 factor — the backend
-// (RiemannianEulerSampler) overwrites it after every ODE step.
+// Functional constraint editor for RMG. Constraints act on the BEND ANGLE at a
+// joint — the angle between its two bones (0° = straight) — applied during
+// sampling only (no fine-tuning). A pin fixes the bend; a range limits it to
+// [min, max]. The backend (RiemannianEulerSampler) projects the joint's
+// controller quaternion onto the feasible bend after every ODE step. The bend is
+// axis-free: twist and bend direction stay free for the model.
 //
 // Mode-aware like GenerateTab: local mode calls POST /generate directly; cluster
 // mode submits a mode=prompt viz job (constraints forwarded to visualize.py).
@@ -24,13 +25,11 @@ const FALLBACK_JOINTS = [
   "L_Wrist", "R_Wrist",
 ].map((name, index) => ({ index, name }));
 
-const AXES = ["x", "y", "z"];
 let _pid = 0;
 const newPin = () => ({
   id: ++_pid,
   joint: "L_Elbow",
-  axis: "z",
-  angle_deg: 90,
+  bend_deg: 90,
   frame_start: 0,
   frame_end: "", // "" ⇒ to last frame
 });
@@ -38,9 +37,8 @@ let _rid = 0;
 const newRange = () => ({
   id: ++_rid,
   joint: "L_Knee",
-  axis: "x",
-  min_deg: 0,
-  max_deg: 10,
+  bend_min: 0,
+  bend_max: 90,
   frame_start: 0,
   frame_end: "",
 });
@@ -48,8 +46,7 @@ const newRange = () => ({
 function pinsToConstraints(pins) {
   return pins.map((p) => ({
     joint: p.joint,
-    axis: p.axis,
-    angle_deg: Number(p.angle_deg),
+    bend_deg: Number(p.bend_deg),
     frame_start: Number(p.frame_start) || 0,
     frame_end: p.frame_end === "" ? null : Number(p.frame_end),
   }));
@@ -58,9 +55,8 @@ function pinsToConstraints(pins) {
 function rangesToPayload(ranges) {
   return ranges.map((r) => ({
     joint: r.joint,
-    axis: r.axis,
-    min_deg: Number(r.min_deg),
-    max_deg: Number(r.max_deg),
+    bend_min: Number(r.bend_min),
+    bend_max: Number(r.bend_max),
     frame_start: Number(r.frame_start) || 0,
     frame_end: r.frame_end === "" ? null : Number(r.frame_end),
   }));
@@ -100,7 +96,7 @@ function ConstraintEditor({ joints, pins, setPins }) {
       <div className="flex items-center justify-between">
         <div>
           <div className="display text-base font-bold text-white">Fixed joint angles</div>
-          <div className="label mt-0.5">held during sampling · axis + angle · per frame range</div>
+          <div className="label mt-0.5">bend held during sampling · 0° = straight · per frame range</div>
         </div>
         <button
           type="button"
@@ -131,46 +127,24 @@ function ConstraintEditor({ joints, pins, setPins }) {
               </button>
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
-              <label className="block">
-                <span className="label mb-1 block">joint</span>
-                <select className="field-input" value={p.joint} onChange={(e) => set(p.id, "joint", e.target.value)}>
-                  {joints.map((j) => (
-                    <option key={j.name} value={j.name}>{j.name}</option>
-                  ))}
-                </select>
-              </label>
-
-              <div>
-                <span className="label mb-1 block">axis</span>
-                <div className="flex gap-1.5">
-                  {AXES.map((a) => (
-                    <button
-                      key={a}
-                      type="button"
-                      onClick={() => set(p.id, "axis", a)}
-                      className={`flex-1 rounded-md border px-2 py-1.5 font-mono text-[12px] uppercase transition ${
-                        p.axis === a
-                          ? "border-[var(--signal)] bg-[var(--signal-dim)] text-[var(--signal)]"
-                          : "border-[var(--hairline)] text-[var(--muted)] hover:text-slate-200"
-                      }`}
-                    >
-                      {a}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
+            <label className="block">
+              <span className="label mb-1 block">joint</span>
+              <select className="field-input" value={p.joint} onChange={(e) => set(p.id, "joint", e.target.value)}>
+                {joints.map((j) => (
+                  <option key={j.name} value={j.name}>{j.name}</option>
+                ))}
+              </select>
+            </label>
 
             <div className="mt-3">
               <div className="mb-1 flex items-center justify-between">
-                <span className="label">angle</span>
-                <span className="font-mono text-sm text-[var(--signal)]">{Number(p.angle_deg)}°</span>
+                <span className="label">bend angle <span className="text-[var(--muted)]">(0° = straight)</span></span>
+                <span className="font-mono text-sm text-[var(--signal)]">{Number(p.bend_deg)}°</span>
               </div>
               <input
-                type="range" min="-180" max="180" step="5"
-                value={p.angle_deg}
-                onChange={(e) => set(p.id, "angle_deg", Number(e.target.value))}
+                type="range" min="0" max="180" step="5"
+                value={p.bend_deg}
+                onChange={(e) => set(p.id, "bend_deg", Number(e.target.value))}
                 className="w-full accent-[var(--signal)]"
               />
             </div>
@@ -204,8 +178,8 @@ function RangeEditor({ joints, ranges, setRanges }) {
     <section className="surface mt-5 p-5">
       <div className="flex items-center justify-between">
         <div>
-          <div className="display text-base font-bold text-white">Joint ranges (hinge limits)</div>
-          <div className="label mt-0.5">swing-twist projection · twist ∈ [min, max] about the hinge axis</div>
+          <div className="display text-base font-bold text-white">Joint ranges (bend limits)</div>
+          <div className="label mt-0.5">bend ∈ [min, max] · projected each sampling step · 0° = straight</div>
         </div>
         <button
           type="button"
@@ -217,7 +191,7 @@ function RangeEditor({ joints, ranges, setRanges }) {
       </div>
 
       {ranges.length === 0 && (
-        <p className="label mt-4">No hinge limits. Add one to clamp a joint (e.g. knee ≤ 10°) without fixing it.</p>
+        <p className="label mt-4">No bend limits. Add one to clamp a joint's bend (e.g. knee ≤ 90°) without fixing it.</p>
       )}
 
       <div className="mt-4 space-y-3">
@@ -233,40 +207,23 @@ function RangeEditor({ joints, ranges, setRanges }) {
               </button>
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
-              <label className="block">
-                <span className="label mb-1 block">joint</span>
-                <select className="field-input" value={r.joint} onChange={(e) => set(r.id, "joint", e.target.value)}>
-                  {joints.map((j) => <option key={j.name} value={j.name}>{j.name}</option>)}
-                </select>
-              </label>
-              <div>
-                <span className="label mb-1 block">hinge axis</span>
-                <div className="flex gap-1.5">
-                  {AXES.map((a) => (
-                    <button key={a} type="button" onClick={() => set(r.id, "axis", a)}
-                      className={`flex-1 rounded-md border px-2 py-1.5 font-mono text-[12px] uppercase transition ${
-                        r.axis === a
-                          ? "border-[var(--signal)] bg-[var(--signal-dim)] text-[var(--signal)]"
-                          : "border-[var(--hairline)] text-[var(--muted)] hover:text-slate-200"
-                      }`}>
-                      {a}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
+            <label className="block">
+              <span className="label mb-1 block">joint</span>
+              <select className="field-input" value={r.joint} onChange={(e) => set(r.id, "joint", e.target.value)}>
+                {joints.map((j) => <option key={j.name} value={j.name}>{j.name}</option>)}
+              </select>
+            </label>
 
             <div className="mt-3 grid grid-cols-2 gap-3">
               <label className="block">
-                <span className="label mb-1 block">min angle (°)</span>
-                <input type="number" className="field-input" value={r.min_deg}
-                  onChange={(e) => set(r.id, "min_deg", e.target.value)} />
+                <span className="label mb-1 block">min bend (°)</span>
+                <input type="number" min="0" max="180" className="field-input" value={r.bend_min}
+                  onChange={(e) => set(r.id, "bend_min", e.target.value)} />
               </label>
               <label className="block">
-                <span className="label mb-1 block">max angle (°)</span>
-                <input type="number" className="field-input" value={r.max_deg}
-                  onChange={(e) => set(r.id, "max_deg", e.target.value)} />
+                <span className="label mb-1 block">max bend (°)</span>
+                <input type="number" min="0" max="180" className="field-input" value={r.bend_max}
+                  onChange={(e) => set(r.id, "bend_max", e.target.value)} />
               </label>
             </div>
 

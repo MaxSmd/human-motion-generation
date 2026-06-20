@@ -56,11 +56,9 @@ from rmg.flow import (  # noqa: E402
     RiemannianEulerSampler,
     SamplerCfg,
     WrappedGaussianPrior,
-    build_hinge_projector,
-    build_inpaint_targets,
+    build_bend_projector,
     build_room_energy_fn,
-    parse_constraints,
-    parse_ranges,
+    parse_bends,
     parse_scene,
     place_motion,
 )
@@ -434,14 +432,12 @@ def main(cfg: DictConfig) -> None:
                     f"({CONSTRAINABLE_REPRESENTATIONS}); got {cfg.representation.name!r}."
                 )
             nj = int(representation.num_joints)
-            if c_specs:
-                fixed_values, fixed_mask = build_inpaint_targets(
-                    parse_constraints(c_specs), num_frames=n_frames, num_joints=nj, device=device)
-                print(f"[visualize] applying {len(c_specs)} fixed-angle constraint(s): {c_specs}", flush=True)
-            if r_specs:
-                project_fn = build_hinge_projector(
-                    parse_ranges(r_specs), num_frames=n_frames, num_joints=nj, device=device)
-                print(f"[visualize] applying {len(r_specs)} hinge range(s): {r_specs}", flush=True)
+            bend_specs = [*parse_bends(c_specs), *parse_bends(r_specs)]
+            if bend_specs:
+                project_fn = build_bend_projector(
+                    bend_specs, skel, num_frames=n_frames, num_joints=nj, device=device)
+                print(f"[visualize] applying {len(c_specs)} bend pin(s) + {len(r_specs)} bend range(s): "
+                      f"{c_specs} {r_specs}", flush=True)
             if scene_obj:
                 import os
                 guidance_weight = float(os.environ.get("RMG_ROOM_GUIDANCE", cfg.viz.get("room_guidance", 0.0)))

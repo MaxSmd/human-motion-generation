@@ -29,7 +29,13 @@ import torch
 from torch import Tensor
 
 from shared.geometry.quaternions import normalize_quaternions, quat_to_upper_hemisphere
-from shared.geometry.skeleton import JOINT_NAMES, NUM_JOINTS, ROOT_JOINT, T2M_KINEMATIC_CHAINS
+from shared.geometry.skeleton import (
+    JOINT_NAMES,
+    NUM_JOINTS,
+    ROOT_JOINT,
+    T2M_KINEMATIC_CHAINS,
+    quat_rotate,
+)
 
 # Layout constants for the quaternion-on-S^3 representations (tr / trp). The
 # translation occupies the first 3 dims; each joint quaternion is 4 contiguous
@@ -386,6 +392,156 @@ def build_hinge_projector(
         x = x.clone()
         for lo, hi, fs, fe, a, mn, mx, sm in specs:
             x[:, fs:fe, lo:hi] = swing_twist_clamp(x[:, fs:fe, lo:hi], a, mn, mx, sm)
+        return x
+
+    return project
+
+
+# ---------------------------------------------------------------------------
+# BEND ANGLE constraints (the anatomical interface).
+#
+# A "bend" is the angle between a joint's incoming bone (parent→joint) and its
+# outgoing bone (joint→child): 0° = straight, larger = more flexed. This is the
+# intuitive, axis-free quantity ("elbow at 90°") and is exactly what the FK
+# interior-angle plots measure. A fixed angle is just the degenerate range
+# min == max, so both "pin to θ" and "limit to [lo, hi]" use ONE projector.
+#
+# Geometry: the bend at joint j is governed by quats[child(j)] =: q (the
+# per-chain off-by-one, see bend_controller_index). With u = incoming rest bone
+# and v = outgoing rest bone (both unit), the current outgoing direction is
+# d = q·v and the bend is α = angle(u, d) — independent of all other joints and
+# of the global pose. We clamp α into [min, max] by rotating d within the (u, d)
+# plane (axis n = u×d) by β−α, i.e. q ← Δ ⊗ q with Δ = quat(n, β−α). Because Δ
+# acts only on the outgoing direction, the joint's TWIST about its own bone and
+# the bend DIRECTION are preserved — the model keeps everything except the bend
+# magnitude. Applied as a projection each ODE step, like the hinge limits.
+# ---------------------------------------------------------------------------
+
+
+def bend_clamp(
+    q: Tensor,
+    u: Tensor,
+    v: Tensor,
+    min_rad: float,
+    max_rad: float,
+    eps: float = 1e-6,
+) -> Tensor:
+    """Project controller quaternion(s) `q` (..., 4) so the bend angle between
+    incoming bone `u` (3,) and rotated outgoing bone `q·v` (v: (3,)) lies in
+    [min_rad, max_rad]. Preserves bend direction and twist about v. Unit out.
+    """
+    q = normalize_quaternions(q)
+    u = u.to(device=q.device, dtype=q.dtype)
+    v = v.to(device=q.device, dtype=q.dtype)
+    u = u / torch.linalg.vector_norm(u).clamp_min(eps)
+    v = v / torch.linalg.vector_norm(v).clamp_min(eps)
+
+    ushape = u.expand(*q.shape[:-1], 3)
+    d = quat_rotate(q, v.expand(*q.shape[:-1], 3))           # current outgoing dir
+    cos_a = (d * ushape).sum(-1, keepdim=True).clamp(-1.0, 1.0)
+    alpha = torch.acos(cos_a)                                # current bend (...,1)
+    beta = alpha.clamp(min_rad, max_rad)
+
+    n = torch.cross(ushape, d, dim=-1)                       # bend-plane normal = u×d
+    n_norm = torch.linalg.vector_norm(n, dim=-1, keepdim=True)
+    axis = n / n_norm.clamp_min(eps)
+    half = 0.5 * (beta - alpha)
+    delta = torch.cat([torch.cos(half), torch.sin(half) * axis], dim=-1)
+    q_new = normalize_quaternions(_quat_mul(delta, q))
+    # bone (anti)parallel to u ⇒ bend direction undefined: leave q untouched.
+    return torch.where(n_norm < eps, q, q_new)
+
+
+@dataclass
+class BendConstraint:
+    """Constrain the bend angle at one joint into [min_deg, max_deg] over a frame
+    window. Fixed angle = min_deg == max_deg. Applied as a per-step projection.
+
+    Attributes:
+        joint: joint index (0..J-1) or SMPL name (e.g. "L_Elbow").
+        min_deg / max_deg: allowed bend range (0 = straight). For an exact pin,
+            set both equal (or use `from_dict` with `bend_deg`).
+        frame_start / frame_end: half-open window; end None/≤0 ⇒ to last frame.
+    """
+
+    joint: int | str
+    min_deg: float = 0.0
+    max_deg: float = 0.0
+    frame_start: int = 0
+    frame_end: int | None = None
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "BendConstraint":
+        # Preferred keys: `bend_deg` (exact) or `bend_min`/`bend_max` (range).
+        # Legacy keys are also accepted so the existing axis-based frontend keeps
+        # working with corrected bend semantics: `angle_deg` → exact bend,
+        # `min_deg`/`max_deg` → bend range. `axis`/`swing_max_deg` are ignored
+        # (a bend angle is axis-free).
+        if d.get("bend_deg") is not None:
+            lo = hi = float(d["bend_deg"])
+        elif d.get("angle_deg") is not None:
+            lo = hi = float(d["angle_deg"])
+        elif d.get("bend_min") is not None or d.get("bend_max") is not None:
+            lo = float(d.get("bend_min", 0.0))
+            hi = float(d.get("bend_max", lo))
+        else:
+            lo = float(d.get("min_deg", 0.0))
+            hi = float(d.get("max_deg", lo))
+        return cls(
+            joint=d["joint"],
+            min_deg=lo,
+            max_deg=hi,
+            frame_start=int(d.get("frame_start", 0)),
+            frame_end=(int(d["frame_end"]) if d.get("frame_end") not in (None, "", -1) else None),
+        )
+
+    def frame_window(self, num_frames: int) -> tuple[int, int]:
+        return _clamp_window(self.frame_start, self.frame_end, num_frames)
+
+
+def parse_bends(specs: list[dict] | None) -> list[BendConstraint]:
+    """Parse a list of JSON-ish bend-angle dicts into objects."""
+    if not specs:
+        return []
+    return [BendConstraint.from_dict(s) for s in specs]
+
+
+def build_bend_projector(
+    constraints: list[BendConstraint],
+    skeleton: "Skeleton",
+    num_frames: int,
+    num_joints: int = NUM_JOINTS,
+    device: torch.device | None = None,
+    dtype: torch.dtype = torch.float32,
+) -> Callable[[Tensor], Tensor] | None:
+    """Compile bend-angle constraints into a projector `fn(x) -> x`.
+
+    Needs the `skeleton` for the rest-bone offsets that define each joint's bend.
+    For each constraint, clamps the bend at the joint (acting on its controller
+    quaternion — `bend_controller_index`) into [min, max] every ODE step. Pass
+    the result as `RiemannianEulerSampler.sample(project_fn=...)`. Returns None
+    when there are no effective constraints.
+    """
+    offsets = skeleton.offsets.to(device=device, dtype=dtype)
+    specs = []
+    for c in constraints:
+        j = _resolve_joint(c.joint)
+        ctrl = bend_controller_index(j)
+        lo, hi = 3 + 4 * ctrl, 3 + 4 * (ctrl + 1)
+        fs, fe = c.frame_window(num_frames)
+        if fe <= fs:
+            continue
+        u = offsets[j]        # incoming bone: parent(j) → j
+        v = offsets[ctrl]     # outgoing bone: j → child(j) == ctrl
+        specs.append((lo, hi, fs, fe, u, v,
+                      math.radians(c.min_deg), math.radians(c.max_deg)))
+    if not specs:
+        return None
+
+    def project(x: Tensor) -> Tensor:
+        x = x.clone()
+        for lo, hi, fs, fe, u, v, mn, mx in specs:
+            x[:, fs:fe, lo:hi] = bend_clamp(x[:, fs:fe, lo:hi], u, v, mn, mx)
         return x
 
     return project

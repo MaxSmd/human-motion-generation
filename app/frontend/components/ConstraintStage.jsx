@@ -22,23 +22,30 @@ const CHAINS = [
   [9, 13, 16, 18, 20],
 ];
 
-const AXIS_VEC = { x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
-// Orthonormal in-plane basis (u, v) for the disc perpendicular to each axis.
-const AXIS_BASIS = {
-  x: [[0, 1, 0], [0, 0, 1]],
-  y: [[0, 0, 1], [1, 0, 0]],
-  z: [[1, 0, 0], [0, 1, 0]],
-};
+// ── bend-gizmo geometry ───────────────────────────────────────────────────
+// A constraint is the bend angle at a joint, drawn in the real plane of its two
+// bones: 0° = straight (continuation of the incoming bone), sweeping toward the
+// outgoing bone. Basis (u, v): u = incoming direction, v ⟂ u toward the child.
+const _sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+const _dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const _len = (a) => Math.hypot(a[0], a[1], a[2]);
+const _norm = (a) => { const l = _len(a) || 1; return [a[0] / l, a[1] / l, a[2] / l]; };
 
-function arcPoints(center, axis, fromDeg, toDeg, radius = 0.16, segs = 36) {
-  const [u, v] = AXIS_BASIS[axis] || AXIS_BASIS.z;
+function bendBasis(parentPos, jointPos, childPos) {
+  const u = _norm(_sub(jointPos, parentPos));          // incoming bone dir
+  const out = _norm(_sub(childPos, jointPos));         // outgoing bone dir
+  let w = _sub(out, [u[0] * _dot(out, u), u[1] * _dot(out, u), u[2] * _dot(out, u)]);
+  if (_len(w) < 1e-4) w = Math.abs(u[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0]; // straight: any ⟂
+  w = _norm(_sub(w, [u[0] * _dot(w, u), u[1] * _dot(w, u), u[2] * _dot(w, u)]));
+  return [u, w];
+}
+function bendArc(center, u, v, fromDeg, toDeg, radius = 0.18, segs = 36) {
   const a0 = (fromDeg * Math.PI) / 180;
   const a1 = (toDeg * Math.PI) / 180;
   const pts = [];
   for (let i = 0; i <= segs; i++) {
     const t = a0 + ((a1 - a0) * i) / segs;
-    const c = Math.cos(t);
-    const s = Math.sin(t);
+    const c = Math.cos(t), s = Math.sin(t);
     pts.push([
       center[0] + radius * (c * u[0] + s * v[0]),
       center[1] + radius * (c * u[1] + s * v[1]),
@@ -47,10 +54,8 @@ function arcPoints(center, axis, fromDeg, toDeg, radius = 0.16, segs = 36) {
   }
   return pts;
 }
-function radial(center, axis, deg, radius = 0.16) {
-  return arcPoints(center, axis, deg, deg, radius, 1).length
-    ? [center, arcPoints(center, axis, deg, deg, radius, 1)[1]]
-    : [center, center];
+function bendRadial(center, u, v, deg, radius = 0.18) {
+  return [center, bendArc(center, u, v, deg, deg, radius, 1)[1]];
 }
 
 export default function ConstraintStage({
@@ -62,6 +67,7 @@ export default function ConstraintStage({
   selected, // joint index or null
   onSelect,
   jointNames = [],
+  parents = [],
   onFrameChange,
 }) {
   const [frame, setFrame] = useState(0);
@@ -135,7 +141,7 @@ export default function ConstraintStage({
             onSelect={onSelect}
             setHovered={setHovered}
           />
-          <ConstraintGizmos joints={joints} frame={frame} pins={pins} ranges={ranges} jointNames={jointNames} T={T} />
+          <ConstraintGizmos joints={joints} frame={frame} pins={pins} ranges={ranges} jointNames={jointNames} parents={parents} T={T} />
 
           <PlaybackDriver playing={playing} speed={speed} fps={fps} count={T} frame={frame} setFrame={setFrame} />
           <OrbitControls makeDefault enableDamping dampingFactor={0.1} maxPolarAngle={Math.PI / 2.05} />
@@ -213,44 +219,55 @@ function SkeletonFrame({ joints, frame, selected, hovered, constrained, onSelect
   );
 }
 
-// Pin → swept arc (0 → angle) + a tick at the target. Hinge → min↔max wedge.
-function ConstraintGizmos({ joints, frame, pins, ranges, jointNames, T }) {
+// Pin → swept bend arc (0 → bend) + tick at the target. Range → min↔max wedge.
+// Both drawn in the joint's real bone plane (incoming bone = 0°, straight).
+function ConstraintGizmos({ joints, frame, pins, ranges, jointNames, parents = [], T }) {
   const { shape, data } = joints;
   const [, J] = shape;
-  const pos = (name) => {
-    const j = jointNames.findIndex((n) => n === name);
-    if (j < 0) return null;
+  const posIdx = (j) => {
+    if (j == null || j < 0) return null;
     const o = (frame * J + j) * 3;
     return [data[o], data[o + 1], data[o + 2]];
   };
-  const active = (c) => {
-    const s = Number(c.frame_start) || 0;
-    const e = c.frame_end === "" || c.frame_end == null ? T : Number(c.frame_end);
+  const idxOf = (name) => jointNames.findIndex((n) => n === name);
+  const childOf = (j) => parents.findIndex((p) => p === j);
+  // Basis for the bend at the named joint; null if parent/child unavailable.
+  const basisFor = (name) => {
+    const j = idxOf(name);
+    if (j < 0) return null;
+    const c = posIdx(j), par = posIdx(parents[j]), ch = posIdx(childOf(j));
+    if (!c || !par || !ch) return null;
+    const [u, v] = bendBasis(par, c, ch);
+    return { c, u, v };
+  };
+  const active = (con) => {
+    const s = Number(con.frame_start) || 0;
+    const e = con.frame_end === "" || con.frame_end == null ? T : Number(con.frame_end);
     return frame >= s && frame < e;
   };
   return (
     <group>
       {pins.map((p) => {
-        const c = pos(p.joint);
-        if (!c || !active(p)) return null;
-        const a = Number(p.angle_deg) || 0;
+        const b = basisFor(p.joint);
+        if (!b || !active(p)) return null;
+        const a = Number(p.bend_deg) || 0;
         return (
           <group key={`pin-${p.id}`}>
-            <Line points={arcPoints(c, p.axis, 0, a, 0.16)} color="#fbbf24" lineWidth={2.5} />
-            <Line points={radial(c, p.axis, a, 0.16)} color="#fbbf24" lineWidth={1.5} />
+            <Line points={bendArc(b.c, b.u, b.v, 0, a)} color="#fbbf24" lineWidth={2.5} />
+            <Line points={bendRadial(b.c, b.u, b.v, a)} color="#fbbf24" lineWidth={1.5} />
           </group>
         );
       })}
       {ranges.map((r) => {
-        const c = pos(r.joint);
-        if (!c || !active(r)) return null;
-        const mn = Number(r.min_deg) || 0;
-        const mx = Number(r.max_deg) || 0;
+        const b = basisFor(r.joint);
+        if (!b || !active(r)) return null;
+        const mn = Number(r.bend_min) || 0;
+        const mx = Number(r.bend_max) || 0;
         return (
-          <group key={`hinge-${r.id}`}>
-            <Line points={arcPoints(c, r.axis, mn, mx, 0.18)} color="#34d399" lineWidth={3} />
-            <Line points={radial(c, r.axis, mn, 0.18)} color="#34d399" lineWidth={1.5} />
-            <Line points={radial(c, r.axis, mx, 0.18)} color="#34d399" lineWidth={1.5} />
+          <group key={`range-${r.id}`}>
+            <Line points={bendArc(b.c, b.u, b.v, mn, mx)} color="#34d399" lineWidth={3} />
+            <Line points={bendRadial(b.c, b.u, b.v, mn)} color="#34d399" lineWidth={1.5} />
+            <Line points={bendRadial(b.c, b.u, b.v, mx)} color="#34d399" lineWidth={1.5} />
           </group>
         );
       })}
