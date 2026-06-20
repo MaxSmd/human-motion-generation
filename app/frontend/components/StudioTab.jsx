@@ -23,6 +23,7 @@ import { api } from "@/lib/api";
 import { loadNpy } from "@/lib/npy";
 import { analyzeMotion, jointHoldStability, childrenFromParents } from "@/lib/motionMetrics";
 import ConstraintStage from "./ConstraintStage";
+import ConstraintAnalysis from "./ConstraintAnalysis";
 
 const FALLBACK = [
   "pelvis", "L_Hip", "R_Hip", "Spine1", "L_Knee", "R_Knee", "Spine2",
@@ -64,6 +65,7 @@ export default function StudioTab({ checkpoints = [], clusterMode }) {
   const [joints, setJoints] = useState(null);
   const [metrics, setMetrics] = useState(null);
   const [baseline, setBaseline] = useState(null); // metrics of last unconstrained sample
+  const [baselineJoints, setBaselineJoints] = useState(null); // joints of last ◇ baseline
   const [, setFrame] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
@@ -95,9 +97,17 @@ export default function StudioTab({ checkpoints = [], clusterMode }) {
         : `${apiBase()}${res.joints_npy_url}`;
       const npy = await loadNpy(npyUrl);
       const m = analyzeMotion(npy, 20);
-      setJoints(npy);
       setMetrics(m);
-      if (asBaseline) setBaseline(m);
+      if (asBaseline) {
+        // a baseline run is the unconstrained reference — keep its joints for the
+        // free-vs-constrained overlay, but don't replace the constrained clip in
+        // the viewport unless there's nothing shown yet.
+        setBaseline(m);
+        setBaselineJoints(npy);
+        setJoints((cur) => cur ?? npy);
+      } else {
+        setJoints(npy);
+      }
     } catch (err) {
       setError(err.message);
     } finally {
@@ -126,6 +136,7 @@ export default function StudioTab({ checkpoints = [], clusterMode }) {
   const removeHinge = () => setRanges((rs) => rs.filter((r) => r.joint !== selName));
 
   return (
+    <div className="space-y-5">
     <div className="grid gap-5 lg:grid-cols-[1.15fr_1fr]">
       {/* ── LEFT: viewport + eval fields ───────────────────────────────── */}
       <div className="space-y-4">
@@ -200,6 +211,19 @@ export default function StudioTab({ checkpoints = [], clusterMode }) {
           onRemovePin={(name) => setPins((ps) => ps.filter((p) => p.joint !== name))}
           onRemoveHinge={(name) => setRanges((rs) => rs.filter((r) => r.joint !== name))} />
       </div>
+    </div>
+
+    {/* ── constraint analysis: realized bend vs target, over time ───────── */}
+    <ConstraintAnalysis
+      joints={joints}
+      baselineJoints={baselineJoints}
+      pins={pins}
+      ranges={ranges}
+      parents={parents}
+      children={children}
+      jointNames={jointNames}
+      fps={20}
+    />
     </div>
   );
 }

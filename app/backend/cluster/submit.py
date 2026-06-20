@@ -39,6 +39,28 @@ def _runs_root(kind: str) -> str:
     return f"{ssh.abs_remote(cfgmod.cluster_runs_dir())}/{cfgmod.cluster_model()}/{kind}"
 
 
+def train_run_dir(run_name: str) -> str:
+    """Abs path of a train run's output dir — where `train.py` writes its
+    `.progress` / `.complete` markers (output_dir = MGEN_RUNS_DIR/run_name and the
+    sbatch sets MGEN_RUNS_DIR = the train runs root)."""
+    return f"{_runs_root('train')}/{run_name}"
+
+
+def sbatch_flags_for_train(params: dict) -> list[str]:
+    """SBATCH CLI overrides for a train job (these override the directives baked
+    into rmg/train.sbatch). Bigger presets default to the 24g partition for GPU
+    memory headroom; `partition` / `walltime` params override either default."""
+    flags: list[str] = []
+    partition = params.get("partition")
+    if not partition and params.get("model_preset") in ("dit_small", "dit_mid", "dit_large"):
+        partition = "24g"
+    if partition:
+        flags.append(f"--partition={partition}")
+    if params.get("walltime"):
+        flags.append(f"--time={params['walltime']}")
+    return flags
+
+
 def render_command(
     script: str, env: dict[str, str], job_name: str, sbatch_flags: list[str] | None = None
 ) -> str:

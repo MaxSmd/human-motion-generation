@@ -21,6 +21,7 @@ The training loop:
 
 from __future__ import annotations
 
+import signal
 import time
 from contextlib import nullcontext
 from pathlib import Path
@@ -157,6 +158,25 @@ def _infinite(loader: DataLoader):
 
 
 # ---------------------------------------------------------------------------
+# Graceful pre-walltime stop
+# ---------------------------------------------------------------------------
+
+# SLURM (and the job manager's resubmit machinery) deliver SIGTERM/SIGUSR1 a
+# little before the 24h walltime kill. We catch them, flush one last checkpoint,
+# and exit cleanly WITHOUT writing the `.complete` marker — so the next
+# resubmission resumes from latest.pt. The frequent latest.pt saves already cap
+# the worst-case loss to a few hundred steps even on a hard kill; this just makes
+# the graceful case lossless.
+_STOP_REQUESTED = False
+
+
+def _request_stop(signum, _frame) -> None:
+    global _STOP_REQUESTED
+    _STOP_REQUESTED = True
+    print(f"[train] caught signal {signum} — will checkpoint and exit at next step boundary")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -165,6 +185,10 @@ def _infinite(loader: DataLoader):
 def main(cfg: DictConfig) -> None:
     output_dir = Path(cfg.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Catch the pre-walltime / resubmit signals (see `_request_stop`).
+    for _sig in (signal.SIGTERM, signal.SIGUSR1):
+        signal.signal(_sig, _request_stop)
 
     set_seed(cfg.seed, deterministic=cfg.deterministic)
 
@@ -315,7 +339,11 @@ def main(cfg: DictConfig) -> None:
         # latest.pt updates much more often than the numbered checkpoints so
         # that a 24h wallclock kill loses at most a few hundred steps. The
         # numbered ckpt-*.pt files are durable history for analysis / rollback.
-        latest_every = max(1, int(cfg.train.ckpt_every) // 10)
+        # `train.latest_every` decouples the cheap latest.pt cadence from the
+        # heavy numbered cadence (a big model's numbered ckpt is GBs, so we keep
+        # those sparse but still snapshot latest.pt frequently); defaults to
+        # ckpt_every//10 to preserve the original behaviour.
+        latest_every = int(cfg.train.get("latest_every", 0)) or max(1, int(cfg.train.ckpt_every) // 10)
         save_latest = step % latest_every == 0 or step == cfg.train.max_steps
         save_numbered = step % cfg.train.ckpt_every == 0 or step == cfg.train.max_steps
 
@@ -340,6 +368,9 @@ def main(cfg: DictConfig) -> None:
                     output_dir / "checkpoints" / "latest.pt",
                     state_dict_payload,
                 )
+                # Cheap progress beacon the job manager reads (over SSH) to gate
+                # auto-resubmit: it resumes only while this keeps advancing.
+                (output_dir / ".progress").write_text(str(step))
 
         # ------------------------- periodic samples -------------------------
         if step % cfg.train.sample_every == 0:
@@ -360,8 +391,36 @@ def main(cfg: DictConfig) -> None:
             sample_path.parent.mkdir(parents=True, exist_ok=True)
             torch.save({"texts": sample_texts, "samples": samples.cpu()}, sample_path)
 
+        # ------------------------- graceful stop -------------------------
+        # Pre-walltime signal: flush latest.pt (if this step didn't already) and
+        # exit without the `.complete` marker so the next job resumes here.
+        if _STOP_REQUESTED:
+            if not save_latest:
+                save_checkpoint(
+                    output_dir / "checkpoints" / "latest.pt",
+                    TrainState(
+                        step=step,
+                        model=model.state_dict(),
+                        ema=ema.state_dict(),
+                        optimizer=opt.state_dict(),
+                        scheduler=sched.state_dict(),
+                        scaler=scaler.state_dict() if scaler is not None else None,
+                        rng=collect_rng_state(),
+                        extras={"wandb_run_id": logger.wandb_run_id},
+                    ),
+                )
+                (output_dir / ".progress").write_text(str(step))
+            print(f"[train] stopping early at step {step} (signal) — resumable from latest.pt")
+            break
+
     logger.close()
-    print(f"[train] done at step {step}")
+    if step >= cfg.train.max_steps:
+        # Durable "training finished" marker. The job manager checks for this to
+        # decide done-vs-resubmit, so it must only be written on real completion.
+        (output_dir / ".complete").write_text(str(step))
+        print(f"[train] done at step {step} (.complete written)")
+    else:
+        print(f"[train] exited at step {step} / {cfg.train.max_steps} (not complete)")
 
 
 if __name__ == "__main__":

@@ -150,6 +150,59 @@ export function jointHoldStability(joints, jointIdx, parents, children, win) {
   return { meanAngle: mean, stdDeg: Math.sqrt(variance), n: angles.length };
 }
 
+// Per-frame anatomical bend angle (deg) at a joint — the angle between its
+// incoming (parent→joint) and outgoing (joint→child) bones, 0° = straight. This
+// is the EXACT quantity the pin/hinge constraints act on, recovered from the
+// position .npy alone, so plotting it over time shows whether the constraint is
+// actually holding (and how the free/baseline clip behaved). NaN for frames with
+// a degenerate bone; null for joints with no child (end-effectors).
+export function bendSeries(joints, jointIdx, parents, children) {
+  const { shape, data } = joints;
+  const [T, J] = shape;
+  const child = children[jointIdx];
+  const parent = parents[jointIdx];
+  if (child == null || parent == null || parent < 0) return null;
+
+  const out = new Float64Array(T).fill(NaN);
+  for (let f = 0; f < T; f++) {
+    const a = sub(jointAt(data, J, f, jointIdx), jointAt(data, J, f, parent)); // parent→joint
+    const b = sub(jointAt(data, J, f, child), jointAt(data, J, f, jointIdx)); // joint→child
+    const na = mag(a), nb = mag(b);
+    if (na < 1e-6 || nb < 1e-6) continue;
+    const cos = Math.max(-1, Math.min(1, (a[0] * b[0] + a[1] * b[1] + a[2] * b[2]) / (na * nb)));
+    out[f] = (Math.acos(cos) * 180) / Math.PI;
+  }
+  return out;
+}
+
+// How well a pin/hinge held over its active window, judged from the realized
+// bend series. `target` is either { bend } (pin) or { min, max } (hinge). Returns
+// satisfaction fraction (frames within tol/band), mean & max signed violation in
+// degrees, and the mean realized bend — the numbers behind the trace chart.
+export function constraintSatisfaction(series, win, target, tolDeg = 5) {
+  const lo = Math.max(0, win?.start ?? 0);
+  const hi = Math.min(series.length, win?.end ?? series.length);
+  let ok = 0, n = 0, sumBend = 0, sumViol = 0, maxViol = 0;
+  for (let f = lo; f < hi; f++) {
+    const v = series[f];
+    if (Number.isNaN(v)) continue;
+    n++;
+    sumBend += v;
+    let viol;
+    if (target.bend != null) {
+      viol = Math.abs(v - target.bend);
+      if (viol <= tolDeg) ok++;
+    } else {
+      viol = v < target.min ? target.min - v : v > target.max ? v - target.max : 0;
+      if (viol <= tolDeg) ok++;
+    }
+    sumViol += viol;
+    if (viol > maxViol) maxViol = viol;
+  }
+  if (!n) return null;
+  return { frac: ok / n, n, meanBend: sumBend / n, meanViol: sumViol / n, maxViol };
+}
+
 // First child of each joint, derived from the parent table (for the hold proxy).
 export function childrenFromParents(parents) {
   const children = new Array(parents.length).fill(null);

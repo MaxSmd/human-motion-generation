@@ -157,8 +157,8 @@ class VizRequest(BaseModel):
 
 
 class TrainRequest(BaseModel):
-    model_preset: str = "dit_base"   # dit_base | dit_large
-    train_preset: str = "rmg_base"   # rmg_base | rmg_large
+    model_preset: str = "dit_base"   # dit_base | dit_small | dit_mid | dit_large
+    train_preset: str = "rmg_base"   # rmg_base | rmg_small | rmg_mid | rmg_large
     representation: str | None = None
     run_name: str | None = None
     max_steps: int | None = None
@@ -171,6 +171,13 @@ class TrainRequest(BaseModel):
     guidance: float | None = None
     precision: str | None = None
     overrides: str | None = None     # extra free-form hydra args
+    # Cluster placement (SBATCH overrides). partition defaults to 24g for the
+    # bigger dit_mid/dit_large presets; walltime defaults to the sbatch's 23:55:00.
+    partition: str | None = None
+    walltime: str | None = None
+    # Ride out the 24h walltime: resume the run across resubmissions until it
+    # writes its `.complete` marker. On by default for train jobs.
+    auto_resubmit: bool = True
     # MARDM-only: two-stage training. stage ∈ {ae, gen}; gen needs an AE ckpt.
     stage: str | None = None
     ae_checkpoint: str | None = None
@@ -211,11 +218,13 @@ def submit_viz(req: VizRequest) -> dict:
 @router.post("/jobs/train/preview")
 def preview_train(req: TrainRequest) -> dict:
     _require_mode()
+    params = req.model_dump()
     try:
-        script, env, job_name, run_name = submit.build_train(req.model_dump())
+        script, env, job_name, run_name = submit.build_train(params)
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
-    return {"command": submit.render_command(script, env, job_name), "run_name": run_name}
+    flags = submit.sbatch_flags_for_train(params)  # mirror what enqueue will submit
+    return {"command": submit.render_command(script, env, job_name, flags), "run_name": run_name}
 
 
 @router.post("/jobs/train")
@@ -259,6 +268,59 @@ def cancel_job(job_id: str) -> dict:
     if not ok:
         raise HTTPException(404, f"no cancellable job {job_id}")
     return {"cancelled": job_id}
+
+
+@router.post("/jobs/{job_id}/pause")
+def pause_job(job_id: str) -> dict:
+    """Interrupt a running train job and free the single cluster slot WITHOUT
+    losing the run (resume() picks up from latest.pt). For making room to run
+    ad-hoc eval/viz while a long training is in flight."""
+    _require_online()
+    ok = jobsmod.get_manager().pause(job_id)
+    if not ok:
+        raise HTTPException(409, f"job {job_id} is not a pausable (running/pending) train job")
+    return {"paused": job_id}
+
+
+@router.post("/jobs/{job_id}/resume")
+def resume_job(job_id: str) -> dict:
+    """Re-queue a paused train job (re-submits the same run_name → resumes from
+    latest.pt). Starts now if the slot is free, else waits in the local queue."""
+    _require_online()
+    ok = jobsmod.get_manager().resume(job_id)
+    if not ok:
+        raise HTTPException(409, f"job {job_id} is not paused")
+    return {"resumed": job_id}
+
+
+@router.get("/jobs/{job_id}/progress")
+def job_progress(job_id: str) -> dict:
+    """Live training progress: step / max_steps / completion + resubmit cycles,
+    enriched with the latest loss + throughput + ETA from the run's metrics.csv."""
+    _require_online()
+    prog = jobsmod.get_manager().train_progress(job_id)
+    if prog is None:
+        raise HTTPException(404, f"no train job {job_id}")
+    # Best-effort metrics tail: latest loss + steps/s → ETA. Never fatal.
+    if prog.get("run_name"):
+        try:
+            m = curvesmod.fetch_metrics(prog["run_name"])
+            cols, rows = m.get("columns", []), m.get("rows", [])
+            if cols and rows:
+                last = dict(zip(cols, rows[-1]))
+                prog["loss"] = last.get("loss")
+                prog["steps_per_s"] = last.get("steps_per_s")
+                live_step = last.get("step")
+                if live_step is not None:
+                    prog["step"] = int(live_step)  # metrics logs more often than ckpts
+                sps, step, ms = last.get("steps_per_s"), prog.get("step"), prog.get("max_steps")
+                if sps and step is not None and ms:
+                    prog["eta_seconds"] = max(0, int((ms - step) / sps)) if sps > 0 else None
+        except FileNotFoundError:
+            pass
+    if prog.get("max_steps") and prog.get("step") is not None:
+        prog["pct"] = round(100.0 * prog["step"] / prog["max_steps"], 1)
+    return prog
 
 
 @router.get("/jobs/{job_id}/log")

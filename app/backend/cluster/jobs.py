@@ -9,6 +9,7 @@ backend restart (we reconcile against sacct on the next poll).
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import threading
 import time
@@ -19,6 +20,11 @@ from .. import cache, config as cfgmod
 from . import squeue, ssh, submit
 
 POLL_INTERVAL = 5.0
+
+# Safety cap on how many times a single train job auto-resubmits across walltime
+# cycles (a multi-day 300k-step run needs dozens). Beyond this we stop and surface
+# the job as failed rather than looping forever.
+MAX_RESUBMITS = int(os.environ.get("RMG_MAX_RESUBMITS", "60"))
 
 # The cluster allows ONE job at a time. Extra jobs wait in a LOCAL queue (state
 # "queued", not yet sbatch'd); the queue-runner promotes the next only when the
@@ -57,6 +63,14 @@ class ClusterJob:
     queue_pos: int | None = None  # 1-based position among queued jobs (computed on read)
     submitted_at: float = 0.0
     updated_at: float = 0.0
+    # SBATCH CLI overrides (partition/walltime); reused on every (re)submit.
+    sbatch_flags: list = field(default_factory=list)
+    # Auto-resubmit across the cluster's 24h walltime (train jobs only). The job
+    # keeps the SAME run_name → train.py resumes from latest.pt each cycle, until
+    # it writes the `.complete` marker.
+    auto_resubmit: bool = False
+    resubmit_count: int = 0
+    last_resubmit_step: int = -1  # progress step at the last resubmit (loop guard)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -141,10 +155,15 @@ class JobManager:
         builder = submit.builder_for(cfgmod.cluster_model(), kind)
         # Build now → validates params + resolves remote paths (raises on error).
         script, env, job_name, run_name = builder(params)
+        # Train jobs carry partition/walltime overrides and opt into auto-resubmit
+        # so a multi-day run survives the cluster's 24h walltime untended.
+        sbatch_flags = submit.sbatch_flags_for_train(params) if kind == "train" else []
+        auto_resubmit = kind == "train" and params.get("auto_resubmit", True)
         job = ClusterJob(
             id=secrets.token_hex(6), kind=kind, mode=params.get("mode", ""),
             params=params, script=script, env=env, job_name=job_name, run_name=run_name,
-            command=submit.render_command(script, env, job_name),
+            command=submit.render_command(script, env, job_name, sbatch_flags),
+            sbatch_flags=sbatch_flags, auto_resubmit=auto_resubmit,
             state="queued", submitted_at=time.time(), updated_at=time.time(),
         )
         with self._lock:
@@ -169,7 +188,7 @@ class JobManager:
     def _start(self, job: ClusterJob) -> None:
         """sbatch a claimed job (its command was built at enqueue)."""
         try:
-            job.slurm_id = submit._submit(job.script, job.env, job.job_name)
+            job.slurm_id = submit._submit(job.script, job.env, job.job_name, job.sbatch_flags)
             job.state = "pending"
         except Exception as e:  # noqa: BLE001
             job.state, job.error = "failed", str(e)
@@ -195,9 +214,12 @@ class JobManager:
         job = self.get(job_id)
         if not job:
             return False
-        if job.state == "queued":  # local-only; nothing on the cluster to scancel
+        # queued (never sbatch'd) and paused (already scancelled) have nothing
+        # live on the cluster — just retire them locally.
+        if job.state in ("queued", "paused"):
             job.state, job.updated_at = "cancelled", time.time()
             self._save()
+            self._maybe_start_next()
             return True
         if not job.slurm_id:
             return False
@@ -207,6 +229,85 @@ class JobManager:
         self._save()
         self._maybe_start_next()  # slot freed → start the next queued job
         return True
+
+    # ------------------------------------------------------------ pause / resume
+
+    def pause(self, job_id: str) -> bool:
+        """Interrupt a running/pending TRAIN job and free the single cluster slot
+        (for ad-hoc eval/viz) WITHOUT losing the run: scancel it but keep its
+        identity (run_name, resubmit counters) so `resume()` can pick up from
+        latest.pt. Auto-resubmit will NOT relaunch it while paused."""
+        job = self.get(job_id)
+        if not job or job.kind != "train":
+            return False
+        if job.state not in ("pending", "running"):
+            return False
+        # Order matters: flip to 'paused' FIRST so the poller's on-cluster guard
+        # skips this job and can't race the imminent CANCELLED sacct state into a
+        # resubmit. Then scancel (sends SIGTERM → train.py flushes a final
+        # checkpoint), then let any queued job take the freed slot.
+        job.state = "paused"
+        job.updated_at = time.time()
+        if job.slurm_id:
+            ssh.run(f"scancel {shlex.quote(job.slurm_id)}", timeout=15, check=False)
+        self._save()
+        self._maybe_start_next()
+        return True
+
+    def resume(self, job_id: str) -> bool:
+        """Re-queue a paused train job. It re-submits under the SAME run_name, so
+        train.py auto-resumes from latest.pt; resubmit counters are preserved.
+        Starts immediately if the slot is free, else waits in the local queue."""
+        job = self.get(job_id)
+        if not job or job.state != "paused":
+            return False
+        job.slurm_id = None      # a fresh sbatch id is assigned on (re)start
+        job.state = "queued"
+        job.error = None
+        job.updated_at = time.time()
+        self._save()
+        self._maybe_start_next()
+        return True
+
+    def train_progress(self, job_id: str) -> dict | None:
+        """Live progress for a train job: checkpointed step + completion marker +
+        max_steps (from the run's saved config), in one SSH round-trip. Returns
+        None if the job is unknown or not a train job."""
+        job = self.get(job_id)
+        if not job or job.kind != "train":
+            return None
+        out = {
+            "id": job.id, "run_name": job.run_name, "state": job.state,
+            "slurm_id": job.slurm_id, "resubmit_count": job.resubmit_count,
+            "step": None, "complete": False, "max_steps": None,
+        }
+        if not job.run_name:
+            return out
+        rundir = shlex.quote(submit.train_run_dir(job.run_name))
+        sep = "\x1e"
+        cmd = (
+            f"cat {rundir}/.progress 2>/dev/null; printf '{sep}'; "
+            f"test -f {rundir}/.complete && printf DONE; printf '{sep}'; "
+            f"cat {rundir}/config.json 2>/dev/null"
+        )
+        try:
+            raw = ssh.run(cmd, timeout=20, check=False).stdout
+        except ssh.SSHError:
+            return out  # transient — caller keeps last known values
+        parts = (raw.split(sep) + ["", "", ""])[:3]
+        prog, comp, cfg_text = parts
+        if prog.strip().isdigit():
+            out["step"] = int(prog.strip())
+        out["complete"] = "DONE" in comp
+        # max_steps: prefer the value the user submitted, else the saved config.
+        ms = job.params.get("max_steps")
+        if ms in (None, "", 0):
+            try:
+                ms = json.loads(cfg_text)["train"]["max_steps"] if cfg_text.strip() else None
+            except (ValueError, KeyError, TypeError):
+                ms = None
+        out["max_steps"] = int(ms) if ms not in (None, "", 0) else None
+        return out
 
     def log_tail(self, job_id: str, lines: int = 300) -> str:
         """Tail the job's SLURM stdout AND stderr (rmg_*.sbatch write both under
@@ -260,6 +361,11 @@ class JobManager:
 
         changed = False
         for job in active:
+            # The snapshot above may be stale: a job can leave the on-cluster set
+            # between snapshot and here (e.g. the user paused/cancelled it). Skip
+            # it so we never resubmit or re-classify a job that's no longer ours.
+            if job.state not in _ON_CLUSTER:
+                continue
             slurm_state = states.get(job.slurm_id)
             if not slurm_state:
                 continue
@@ -267,6 +373,17 @@ class JobManager:
                 job.state, changed = "pending", True
             elif slurm_state in _SLURM_RUNNING and job.state != "running":
                 job.state, changed = "running", True
+            elif (
+                job.kind == "train" and job.auto_resubmit
+                and slurm_state in (_SLURM_OK | _SLURM_FAIL | _SLURM_CANCEL)
+                and job.state not in ("done", "failed")
+            ):
+                # A train job left the cluster (walltime TIMEOUT, node fail, or a
+                # clean exit). Decide done-vs-resume from the on-disk markers.
+                # (User scancels never reach here: cancel() flips state out of the
+                # on-cluster set before the next poll.)
+                if self._handle_train_end(job, slurm_state):
+                    changed = True
             elif slurm_state in _SLURM_OK and job.state not in ("pulling", "done"):
                 if job.kind == "viz":
                     job.state = "pulling"
@@ -285,6 +402,64 @@ class JobManager:
             self._save()
             # A job may have just finished (done/failed/cancelled) → free the slot.
             self._maybe_start_next()
+
+    # --------------------------------------------------------------- auto-resubmit
+
+    def _train_markers(self, job: ClusterJob) -> tuple[int, bool]:
+        """Read a train run's `.progress` (latest saved step) and `.complete`
+        (training reached max_steps) markers in one SSH round-trip. Returns
+        (step, complete); step is -1 if no checkpoint has landed yet. Raises
+        ssh.SSHError on a transient connection failure so the caller can punt."""
+        rundir = shlex.quote(submit.train_run_dir(job.run_name))
+        # `|` separates the two fields; both halves may be empty.
+        cmd = (
+            f"cat {rundir}/.progress 2>/dev/null || true; printf '|'; "
+            f"test -f {rundir}/.complete && printf DONE || true"
+        )
+        out = ssh.run(cmd, timeout=20, check=False).stdout
+        prog, _, comp = out.partition("|")
+        prog = prog.strip()
+        return (int(prog) if prog.isdigit() else -1), ("DONE" in comp)
+
+    def _handle_train_end(self, job: ClusterJob, slurm_state: str) -> bool:
+        """A train job left the cluster. Mark it done if `.complete` exists, else
+        resubmit it (resume from latest.pt under the same run_name) to ride out the
+        24h walltime. Returns True if the job's state changed, False if we punted
+        on a transient SSH error (re-decided on the next poll)."""
+        try:
+            step, complete = self._train_markers(job)
+        except ssh.SSHError:
+            return False  # VPN blip — leave state as-is, retry next poll
+
+        if complete:
+            job.state, job.error = "done", None
+            return True
+
+        # Loop guards: stop if we've hit the cap, or made no progress since the
+        # last resubmit (a crash that never checkpoints would otherwise spin).
+        if job.resubmit_count >= MAX_RESUBMITS:
+            job.state = "failed"
+            job.error = f"slurm: {slurm_state}; resubmit cap {MAX_RESUBMITS} hit at step {step}"
+            return True
+        if step <= job.last_resubmit_step:
+            job.state = "failed"
+            job.error = (
+                f"slurm: {slurm_state}; not resubmitting — no checkpoint progress "
+                f"since last submit (step {step} ≤ {job.last_resubmit_step})"
+            )
+            return True
+
+        # Resume: re-sbatch the SAME script/env/flags → same run_name → train.py
+        # auto-resumes from latest.pt.
+        try:
+            job.slurm_id = submit._submit(job.script, job.env, job.job_name, job.sbatch_flags)
+            job.state, job.error = "pending", None
+            job.resubmit_count += 1
+            job.last_resubmit_step = step
+        except Exception as e:  # noqa: BLE001
+            job.state = "failed"
+            job.error = f"resubmit after {slurm_state} failed: {e}"
+        return True
 
     # ----------------------------------------------------------------- pull media
 
