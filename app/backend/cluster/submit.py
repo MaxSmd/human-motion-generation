@@ -49,7 +49,10 @@ def train_run_dir(run_name: str) -> str:
 def sbatch_flags_for_train(params: dict) -> list[str]:
     """SBATCH CLI overrides for a train job (these override the directives baked
     into rmg/train.sbatch). Bigger presets default to the 24g partition for GPU
-    memory headroom; `partition` / `walltime` params override either default."""
+    memory headroom; `partition` / `walltime` params override either default.
+    `sbatch_extra` is free-form (`--constraint=…`, `--gres=…`, `--exclude=…`,
+    `--nodelist=…`) — e.g. to pin a 12g job onto a Turing+ node and avoid the
+    sm_61 TITAN Xp cards the CUDA-13 container can't run."""
     flags: list[str] = []
     partition = params.get("partition")
     if not partition and params.get("model_preset") in ("dit_small", "dit_mid", "dit_large"):
@@ -58,6 +61,8 @@ def sbatch_flags_for_train(params: dict) -> list[str]:
         flags.append(f"--partition={partition}")
     if params.get("walltime"):
         flags.append(f"--time={params['walltime']}")
+    if params.get("sbatch_extra"):
+        flags.extend(shlex.split(str(params["sbatch_extra"])))
     return flags
 
 

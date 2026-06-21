@@ -230,6 +230,18 @@ class JobManager:
         self._maybe_start_next()  # slot freed → start the next queued job
         return True
 
+    def delete(self, job_id: str) -> bool:
+        """Remove a TERMINAL job (done/failed/cancelled) from the registry — pure
+        history cleanup. Refuses to delete a live job (cancel it first), so it can
+        never orphan something still on the cluster."""
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if not job or job.state not in ("done", "failed", "cancelled"):
+                return False
+            del self._jobs[job_id]
+        self._save()
+        return True
+
     # ------------------------------------------------------------ pause / resume
 
     def pause(self, job_id: str) -> bool:

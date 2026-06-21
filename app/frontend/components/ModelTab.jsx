@@ -63,7 +63,7 @@ const TRAIN_RECIPES = [
 ];
 
 function RmgTrain() {
-  const [form, setForm] = useState({ model_preset: "dit_base", train_preset: "rmg_base", subset_n: 16, max_steps: 15000, micro_batch_size: 32, grad_accum: 8, partition: "", preload: false, sample_every: 1000, ckpt_every: 5000, overrides: "" });
+  const [form, setForm] = useState({ model_preset: "dit_base", train_preset: "rmg_base", subset_n: 16, max_steps: 15000, micro_batch_size: 32, grad_accum: 8, partition: "", sbatch_extra: "", preload: false, sample_every: 1000, ckpt_every: 5000, overrides: "" });
   const [preview, setPreview] = useState(null);
   const [pErr, setPErr] = useState(null);
   const { job, error, submitting, run } = useVizJob(api.submitTrain);
@@ -110,6 +110,9 @@ function RmgTrain() {
           <input type="checkbox" checked={!!form.preload} onChange={(e) => setForm((f) => ({ ...f, preload: e.target.checked }))} />
           preload dataset into RAM <span className="text-[var(--muted)]">— faster steps on full-dataset runs</span>
         </label>
+        <Field label="extra sbatch flags (node targeting)">
+          <input className="field-input" placeholder="--gres=gpu:RTX2080Ti:1   (pin to sm_75 nodes)   or   --exclude=dortmund,jena,ulm" value={form.sbatch_extra} onChange={set("sbatch_extra")} />
+        </Field>
         <Field label="extra overrides (hydra, space-sep)">
           <input className="field-input" placeholder="train.optimizer.lr=1e-4 train.precision=bf16" value={form.overrides} onChange={set("overrides")} />
         </Field>

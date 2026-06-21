@@ -325,6 +325,9 @@ function JobRow({ job, onChange }) {
           {LIVE.has(job.state) && (
             <button onClick={async () => { await api.cancelJob(job.id); onChange?.(); }} className="rounded border border-rose-500/40 px-2 py-0.5 text-[10px] text-rose-300 hover:bg-rose-500/10">cancel</button>
           )}
+          {!LIVE.has(job.state) && (
+            <button title="remove from list" onClick={async () => { await api.deleteJob(job.id); onChange?.(); }} className="rounded border border-[var(--hairline-strong)] px-2 py-0.5 text-[10px] text-slate-400 hover:border-rose-500/40 hover:text-rose-300">✕</button>
+          )}
         </span>
       </div>
       {meta && <JobMeta job={job} />}

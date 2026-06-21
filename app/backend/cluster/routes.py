@@ -178,6 +178,9 @@ class TrainRequest(BaseModel):
     # bigger dit_mid/dit_large presets; walltime defaults to the sbatch's 23:55:00.
     partition: str | None = None
     walltime: str | None = None
+    # Free-form extra SBATCH flags, e.g. "--constraint=turing" or
+    # "--exclude=titanxp-node" to keep a 12g job off the sm_61 cards.
+    sbatch_extra: str | None = None
     # Ride out the 24h walltime: resume the run across resubmissions until it
     # writes its `.complete` marker. On by default for train jobs.
     auto_resubmit: bool = True
@@ -271,6 +274,16 @@ def cancel_job(job_id: str) -> dict:
     if not ok:
         raise HTTPException(404, f"no cancellable job {job_id}")
     return {"cancelled": job_id}
+
+
+@router.delete("/jobs/{job_id}")
+def delete_job(job_id: str) -> dict:
+    """Remove a finished/failed/cancelled job from the list (history cleanup).
+    Live jobs must be cancelled first."""
+    ok = jobsmod.get_manager().delete(job_id)
+    if not ok:
+        raise HTTPException(409, f"job {job_id} is unknown or still live — cancel it first")
+    return {"deleted": job_id}
 
 
 @router.post("/jobs/{job_id}/pause")

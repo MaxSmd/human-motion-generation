@@ -70,6 +70,7 @@ export const api = {
   job: (id) => req(`/cluster/jobs/${id}`),
   jobLog: (id, lines = 200) => req(`/cluster/jobs/${id}/log?lines=${lines}`),
   cancelJob: (id) => req(`/cluster/jobs/${id}/cancel`, { method: "POST" }),
+  deleteJob: (id) => req(`/cluster/jobs/${id}`, { method: "DELETE" }),
   pauseJob: (id) => req(`/cluster/jobs/${id}/pause`, { method: "POST" }),
   resumeJob: (id) => req(`/cluster/jobs/${id}/resume`, { method: "POST" }),
   jobProgress: (id) => req(`/cluster/jobs/${id}/progress`),
