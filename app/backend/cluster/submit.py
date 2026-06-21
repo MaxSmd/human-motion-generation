@@ -61,8 +61,14 @@ def sbatch_flags_for_train(params: dict) -> list[str]:
         flags.append(f"--partition={partition}")
     if params.get("walltime"):
         flags.append(f"--time={params['walltime']}")
-    if params.get("sbatch_extra"):
-        flags.extend(shlex.split(str(params["sbatch_extra"])))
+    # The 12g partition is mixed-GPU and only its RTX 2080 Ti nodes (sm_75) can run
+    # the CUDA-13 container — TITAN Xp/X (sm_61/52) crash with "no kernel image".
+    # Auto-pin 12g jobs to the compatible cards unless the user set their own gres.
+    extra = str(params.get("sbatch_extra") or "")
+    if partition == "12g" and "gres" not in extra:
+        flags.append("--gres=gpu:RTX2080Ti:1")
+    if extra:
+        flags.extend(shlex.split(extra))
     return flags
 
 
