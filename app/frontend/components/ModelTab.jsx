@@ -43,22 +43,22 @@ export default function ModelTab({ model = "rmg" }) {
 // 462M ran 600k). All ride the 24h walltime via auto-resubmit, so you can also
 // eval FID at checkpoints and stop early once it plateaus.
 // `subset_n: 0` = full data; effective BS = micro_batch_size × grad_accum (kept
-// at 256 per the paper). micro_batch_size sizes GPU memory — small/mid use 64 to
-// fill the 24g GPU (≈11GB / ≈17GB) and run faster than micro 32; base keeps its
-// reference 32×8. `partition: "24g"` is required for the big-batch runs. `preload`
-// (RAM-cache the dataset) is OFF by default — it only helps when the GPU is data-
-// starved (low util), and on NFS it adds a slow, silent startup re-paid each
-// resubmit; turn it on per-run if the GPU is idling on I/O.
+// at 256 per the paper). micro_batch_size is tuned PER CARD to clear the cluster's
+// "≥50% GPU memory or cancelled" policy: on 24g, mid uses 128×2 (~78%); on the
+// 11GB 2080 Ti (12g), small/mid stay at 32×8 (micro 64 OOMs an 11GB card). 12g
+// auto-pins to the sm_75 RTX 2080 Ti nodes. Verify the real % with `jobstats
+// <id>` on the first run and nudge micro_batch_size if needed. `preload` is OFF
+// (only helps a data-starved GPU; ~6s on this cluster so harmless either way).
 const TRAIN_RECIPES = [
   { key: "smoke",  label: "smoke test",      hint: "16 clips · 300 steps · ~minutes · 12g ok",
-    cfg: { model_preset: "dit_base",  train_preset: "rmg_base",  subset_n: 16, max_steps: 300,    micro_batch_size: 16, grad_accum: 1, sample_every: 100,   ckpt_every: 200,   partition: "",    preload: false } },
-  { key: "base",   label: "base · 25M full", hint: "full data · 150k · BS 256 (32×8) · ~4GB · fits 12g",
-    cfg: { model_preset: "dit_base",  train_preset: "rmg_base",  subset_n: 0,  max_steps: 150000, micro_batch_size: 32, grad_accum: 8, sample_every: 10000, ckpt_every: 10000, partition: "12g", preload: false } },
-  { key: "small",  label: "small · 50M full", hint: "full data · 200k · BS 256 (64×4) · ~11GB",
-    cfg: { model_preset: "dit_small", train_preset: "rmg_small", subset_n: 0,  max_steps: 200000, micro_batch_size: 64, grad_accum: 4, sample_every: 10000, ckpt_every: 10000, partition: "24g", preload: false } },
-  { key: "mid",    label: "mid · 112M full", hint: "full data · 300k · BS 256 (64×4) · ~17GB · recommended",
-    cfg: { model_preset: "dit_mid",   train_preset: "rmg_mid",   subset_n: 0,  max_steps: 300000, micro_batch_size: 64, grad_accum: 4, sample_every: 10000, ckpt_every: 10000, partition: "24g", preload: false } },
-  { key: "full",   label: "full · 462M", hint: "full data · 600k · BS 256 (16×16) · paper model (FID ~0.04) · very slow on 1 GPU — watch the ETA",
+    cfg: { model_preset: "dit_base",  train_preset: "rmg_base",  subset_n: 16, max_steps: 300,    micro_batch_size: 16, grad_accum: 1,  sample_every: 100,   ckpt_every: 200,   partition: "",    preload: false } },
+  { key: "base",   label: "base · 25M · 12g", hint: "full data · 150k · BS 256 (128×2) · ~10GB on 2080Ti (~85%)",
+    cfg: { model_preset: "dit_base",  train_preset: "rmg_base",  subset_n: 0,  max_steps: 150000, micro_batch_size: 128, grad_accum: 2, sample_every: 10000, ckpt_every: 10000, partition: "12g", preload: false } },
+  { key: "small",  label: "small · 50M · 12g", hint: "full data · 200k · BS 256 (32×8) · ~6.5GB on 2080Ti (~59%)",
+    cfg: { model_preset: "dit_small", train_preset: "rmg_small", subset_n: 0,  max_steps: 200000, micro_batch_size: 32, grad_accum: 8,  sample_every: 10000, ckpt_every: 10000, partition: "12g", preload: false } },
+  { key: "mid",    label: "mid · 112M · 24g", hint: "full data · 300k · BS 256 (128×2) · ~18.6GB on 24g (~78%) · recommended",
+    cfg: { model_preset: "dit_mid",   train_preset: "rmg_mid",   subset_n: 0,  max_steps: 300000, micro_batch_size: 128, grad_accum: 2, sample_every: 10000, ckpt_every: 10000, partition: "24g", preload: false } },
+  { key: "full",   label: "full · 462M · 24g", hint: "full data · 600k · BS 256 (16×16) · ~15GB (~62%) · paper FID ~0.04 · very slow on 1 GPU",
     cfg: { model_preset: "dit_large", train_preset: "rmg_large", subset_n: 0,  max_steps: 600000, micro_batch_size: 16, grad_accum: 16, sample_every: 10000, ckpt_every: 10000, partition: "24g", preload: false } },
 ];
 
