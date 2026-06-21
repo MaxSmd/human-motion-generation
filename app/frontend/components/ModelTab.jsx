@@ -58,6 +58,8 @@ const TRAIN_RECIPES = [
     cfg: { model_preset: "dit_small", train_preset: "rmg_small", subset_n: 0,  max_steps: 200000, micro_batch_size: 64, grad_accum: 4, sample_every: 10000, ckpt_every: 10000, partition: "24g", preload: false } },
   { key: "mid",    label: "mid · 112M full", hint: "full data · 300k · BS 256 (64×4) · ~17GB · recommended",
     cfg: { model_preset: "dit_mid",   train_preset: "rmg_mid",   subset_n: 0,  max_steps: 300000, micro_batch_size: 64, grad_accum: 4, sample_every: 10000, ckpt_every: 10000, partition: "24g", preload: false } },
+  { key: "full",   label: "full · 462M", hint: "full data · 600k · BS 256 (16×16) · paper model (FID ~0.04) · very slow on 1 GPU — watch the ETA",
+    cfg: { model_preset: "dit_large", train_preset: "rmg_large", subset_n: 0,  max_steps: 600000, micro_batch_size: 16, grad_accum: 16, sample_every: 10000, ckpt_every: 10000, partition: "24g", preload: false } },
 ];
 
 function RmgTrain() {
