@@ -471,6 +471,17 @@ class JobManager:
         remote = f"{ssh.abs_remote(cfgmod.cluster_runs_dir())}/{cfgmod.cluster_model()}/viz/{job.run_name}/viz/"
         local = cache.media_dir() / "jobs" / job.id
         local.mkdir(parents=True, exist_ok=True)
+        # The job can complete without writing a viz/ dir (e.g. all requested clip
+        # ids missing from the dataset). rsync would then fail with an opaque
+        # "change_dir … No such file or directory (code 23)"; probe first so we can
+        # surface a useful reason instead.
+        probe = ssh.run(f"test -d {shlex.quote(remote)}", timeout=15, check=False)
+        if not probe.ok:
+            job.state, job.error = "failed", (
+                "job completed but wrote no viz/ output — likely no valid clips/prompts. "
+                "Check the job log (the 'log' button)."
+            )
+            return
         try:
             ssh.rsync_pull(remote, str(local), timeout=180)
         except ssh.SSHError as e:

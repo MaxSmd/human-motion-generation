@@ -52,7 +52,7 @@ enroot start \
         set -euo pipefail
         cd ${REPO}
         pip install -e . --no-deps --quiet
-        python -m rmg.scripts.train \\
+        python -u -m rmg.scripts.train \\
             model=${MODEL_PRESET} \\
             train=${PRESET} \\
             text_encoder.type=${TEXT_ENCODER} \\

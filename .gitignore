@@ -16,6 +16,8 @@ dist/
 
 # backend rendered-media cache (server/cache.py)
 .media/
+# durable backend state (job registry + active-model flag) — docker bind mount
+.appstate/
 
 # experiment outputs
 runs/

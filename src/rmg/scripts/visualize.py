@@ -388,16 +388,27 @@ def main(cfg: DictConfig) -> None:
         # ---- Real packed clips → FK → render ----
         clip_ids = [c.strip() for c in str(cfg.viz.clips).split(",") if c.strip()]
         manifest: list[dict] = []
+        skipped: list[str] = []
         for cid in clip_ids:
             try:
                 translation, quats, caption = _load_real_clip(data_root, cid)
             except KeyError:
                 print(f"[visualize] clip {cid!r} not in packed zip — skipping", flush=True)
+                skipped.append(cid)
                 continue
             joints = forward_kinematics(skel, quats, translation).numpy()
             gif = _render(joints, out_dir / f"real-{cid}.mp4",
                           title=f"[{cid}] {caption[:60]}", fps=int(cfg.viz.fps))
             manifest.append({"file": gif.name, "kind": "gt", "clip_id": cid, "caption": caption})
+        # Fail loudly if nothing rendered (e.g. all clip ids invalid) rather than
+        # exiting 0 with no output dir — that left the app pulling a non-existent
+        # viz/ and surfacing a cryptic rsync error. A non-zero exit makes the job
+        # show FAILED with this clear reason in the log.
+        if not manifest:
+            raise ValueError(
+                f"no requested clips were found in the packed dataset "
+                f"({data_root}): {skipped or clip_ids}. Pick ids from the GT browser."
+            )
         _write_manifest(out_dir, manifest)
         return
 

@@ -219,8 +219,21 @@ class HumanML3DDataset(Dataset):
         # no per-worker duplication). ~0.6GB unmirrored / ~1.2GB mirrored.
         self._cache: dict[str, tuple[Tensor, Tensor, list[str]]] | None = None
         if preload:
+            # This reads EVERY clip up front (synchronously, in this process). On a
+            # networked filesystem that can take minutes — print progress so the job
+            # never looks silently hung. Worth it only when data loading is the
+            # bottleneck (low GPU util); if the GPU is already busy, leave it off.
+            import time as _time
+            n = len(self.clip_ids)
+            print(f"[dataset] preloading {n} clips into RAM…", flush=True)
+            t0 = _time.time()
             zf = self._open_zip()
-            self._cache = {cid: read_clip(zf, cid) for cid in self.clip_ids}
+            self._cache = {}
+            for i, cid in enumerate(self.clip_ids, 1):
+                self._cache[cid] = read_clip(zf, cid)
+                if i % 2000 == 0 or i == n:
+                    print(f"[dataset]   {i}/{n} ({_time.time() - t0:.0f}s)", flush=True)
+            print(f"[dataset] preloaded {n} clips in {_time.time() - t0:.0f}s", flush=True)
             # Drop the open zip handle: everything's in RAM now, and an open
             # BufferedReader isn't picklable (breaks 'spawn' DataLoader workers).
             self._zip.close()

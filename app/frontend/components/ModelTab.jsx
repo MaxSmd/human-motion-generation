@@ -45,17 +45,19 @@ export default function ModelTab({ model = "rmg" }) {
 // `subset_n: 0` = full data; effective BS = micro_batch_size × grad_accum (kept
 // at 256 per the paper). micro_batch_size sizes GPU memory — small/mid use 64 to
 // fill the 24g GPU (≈11GB / ≈17GB) and run faster than micro 32; base keeps its
-// reference 32×8. `partition: "24g"` is required for the big-batch runs; `preload`
-// RAM-caches the dataset for throughput on full runs.
+// reference 32×8. `partition: "24g"` is required for the big-batch runs. `preload`
+// (RAM-cache the dataset) is OFF by default — it only helps when the GPU is data-
+// starved (low util), and on NFS it adds a slow, silent startup re-paid each
+// resubmit; turn it on per-run if the GPU is idling on I/O.
 const TRAIN_RECIPES = [
   { key: "smoke",  label: "smoke test",      hint: "16 clips · 300 steps · ~minutes · 12g ok",
     cfg: { model_preset: "dit_base",  train_preset: "rmg_base",  subset_n: 16, max_steps: 300,    micro_batch_size: 16, grad_accum: 1, sample_every: 100,   ckpt_every: 200,   partition: "",    preload: false } },
   { key: "base",   label: "base · 25M full", hint: "full data · 150k · BS 256 (32×8) · ~4GB · fits 12g",
-    cfg: { model_preset: "dit_base",  train_preset: "rmg_base",  subset_n: 0,  max_steps: 150000, micro_batch_size: 32, grad_accum: 8, sample_every: 10000, ckpt_every: 10000, partition: "12g", preload: true } },
+    cfg: { model_preset: "dit_base",  train_preset: "rmg_base",  subset_n: 0,  max_steps: 150000, micro_batch_size: 32, grad_accum: 8, sample_every: 10000, ckpt_every: 10000, partition: "12g", preload: false } },
   { key: "small",  label: "small · 50M full", hint: "full data · 200k · BS 256 (64×4) · ~11GB",
-    cfg: { model_preset: "dit_small", train_preset: "rmg_small", subset_n: 0,  max_steps: 200000, micro_batch_size: 64, grad_accum: 4, sample_every: 10000, ckpt_every: 10000, partition: "24g", preload: true } },
+    cfg: { model_preset: "dit_small", train_preset: "rmg_small", subset_n: 0,  max_steps: 200000, micro_batch_size: 64, grad_accum: 4, sample_every: 10000, ckpt_every: 10000, partition: "24g", preload: false } },
   { key: "mid",    label: "mid · 112M full", hint: "full data · 300k · BS 256 (64×4) · ~17GB · recommended",
-    cfg: { model_preset: "dit_mid",   train_preset: "rmg_mid",   subset_n: 0,  max_steps: 300000, micro_batch_size: 64, grad_accum: 4, sample_every: 10000, ckpt_every: 10000, partition: "24g", preload: true } },
+    cfg: { model_preset: "dit_mid",   train_preset: "rmg_mid",   subset_n: 0,  max_steps: 300000, micro_batch_size: 64, grad_accum: 4, sample_every: 10000, ckpt_every: 10000, partition: "24g", preload: false } },
 ];
 
 function RmgTrain() {

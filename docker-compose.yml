@@ -35,13 +35,18 @@ services:
       MGEN_RUNS_DIR: /data/runs
       MGEN_DATA_ROOT: /data/humanml3d_packed
       MGEN_MEDIA_DIR: /data/media
-      MGEN_JOBS_STATE: /data/media/jobs.json
+      # Job registry (+ the active-model flag beside it) lives on a HOST bind mount,
+      # not the rmg-media named volume — so `docker compose down -v` / volume prune /
+      # a Docker Desktop reset can't wipe your job history. The media cache stays in
+      # the named volume below (it's regenerable by re-running viz).
+      MGEN_JOBS_STATE: /data/state/jobs.json
     volumes:
       # Your SSH config + keys + known_hosts → cluster auth (read-only).
       - ${HOME}/.ssh:/root/.ssh:ro
       - ./runs:/data/runs
       - ./external/data/humanml3d_packed:/data/humanml3d_packed
-      - rmg-media:/data/media
+      - ./.appstate:/data/state          # durable: job history + active-model flag
+      - rmg-media:/data/media            # regenerable media cache
     # GPU host: uncomment, and rebuild with TORCH_INDEX_URL set to a CUDA wheel.
     # deploy:
     #   resources:
