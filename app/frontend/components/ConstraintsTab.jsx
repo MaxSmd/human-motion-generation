@@ -18,7 +18,7 @@ import VizJobResult from "./VizJobResult";
 import { useVizJob } from "@/lib/useVizJob";
 
 // Fallback joint list (SMPL 22) if /meta/joints can't be reached.
-const FALLBACK_JOINTS = [
+export const FALLBACK_JOINTS = [
   "pelvis", "L_Hip", "R_Hip", "Spine1", "L_Knee", "R_Knee", "Spine2",
   "L_Ankle", "R_Ankle", "Spine3", "L_Foot", "R_Foot", "Neck", "L_Collar",
   "R_Collar", "Head", "L_Shoulder", "R_Shoulder", "L_Elbow", "R_Elbow",
@@ -43,7 +43,7 @@ const newRange = () => ({
   frame_end: "",
 });
 
-function pinsToConstraints(pins) {
+export function pinsToConstraints(pins) {
   return pins.map((p) => ({
     joint: p.joint,
     bend_deg: Number(p.bend_deg),
@@ -52,7 +52,7 @@ function pinsToConstraints(pins) {
   }));
 }
 
-function rangesToPayload(ranges) {
+export function rangesToPayload(ranges) {
   return ranges.map((r) => ({
     joint: r.joint,
     bend_min: Number(r.bend_min),
@@ -87,7 +87,7 @@ export default function ConstraintsTab({ checkpoints = [], clusterMode }) {
 
 // ───────────────────────────────────────────── the shared pin editor
 
-function ConstraintEditor({ joints, pins, setPins }) {
+export function ConstraintEditor({ joints, pins, setPins }) {
   const set = (id, k, v) => setPins((ps) => ps.map((p) => (p.id === id ? { ...p, [k]: v } : p)));
   const remove = (id) => setPins((ps) => ps.filter((p) => p.id !== id));
 
@@ -170,7 +170,7 @@ function ConstraintEditor({ joints, pins, setPins }) {
 
 // ───────────────────────────────────────────── the hinge-limit editor
 
-function RangeEditor({ joints, ranges, setRanges }) {
+export function RangeEditor({ joints, ranges, setRanges }) {
   const set = (id, k, v) => setRanges((rs) => rs.map((r) => (r.id === id ? { ...r, [k]: v } : r)));
   const remove = (id) => setRanges((rs) => rs.filter((r) => r.id !== id));
 

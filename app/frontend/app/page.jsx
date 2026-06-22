@@ -1,21 +1,12 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import dynamic from "next/dynamic";
 import { api } from "@/lib/api";
-import GenerateTab from "@/components/GenerateTab";
-import GTBrowserTab from "@/components/GTBrowserTab";
-import TrainingViewerTab from "@/components/TrainingViewerTab";
-import ConstraintsTab from "@/components/ConstraintsTab";
-import ClusterTab from "@/components/ClusterTab";
-import VisualizeTab from "@/components/VisualizeTab";
-import ModelTab from "@/components/ModelTab";
-import AnalysisTab from "@/components/AnalysisTab";
+import CreateWorkspace from "@/components/CreateWorkspace";
+import LibraryWorkspace from "@/components/LibraryWorkspace";
+import LabWorkspace from "@/components/LabWorkspace";
+import SystemDrawer from "@/components/SystemDrawer";
 import ClusterGate from "@/components/ClusterGate";
-
-// three.js / r3f canvas — client-only (no SSR).
-const RoomEditor = dynamic(() => import("@/components/RoomEditor"), { ssr: false });
-const StudioTab = dynamic(() => import("@/components/StudioTab"), { ssr: false });
 
 export default function Home() {
   const [health, setHealth] = useState(null);
@@ -24,6 +15,7 @@ export default function Home() {
   const [clusterStatus, setClusterStatus] = useState(null);
   const [queue, setQueue] = useState(null);
   const [modelInfo, setModelInfo] = useState(null); // { active, models, tasks }
+  const [systemOpen, setSystemOpen] = useState(false);
 
   useEffect(() => {
     api.health().then(setHealth).catch((e) => setConnError(e.message));
@@ -59,39 +51,22 @@ export default function Home() {
     return () => clearInterval(t);
   }, [clusterMode]);
 
-  // Constraints (fixed joint angles) is implemented for RMG; still roadmap-only
-  // for MARDM, so show the V2 badge when MARDM is the active model.
-  const constraintsSoon = model === "mardm";
+  // Three intent-based workspaces. Lab (train/eval/analysis) is cluster-only;
+  // local mode keeps Create + Library.
   const tabs = useMemo(() => {
-    if (clusterMode)
-      return [
-        { id: "cluster", n: "00", label: "Cluster", sub: "jobs · squeue" },
-        { id: "generate", n: "01", label: "Generate", sub: "text → motion" },
-        { id: "visualize", n: "02", label: "Visualize", sub: "GT · compare · samples" },
-        { id: "model", n: "03", label: "Model", sub: "train · eval" },
-        { id: "analysis", n: "04", label: "Analysis", sub: "metrics · plots" },
-        { id: "constraints", n: "05", label: "Constraints", sub: "fixed joint angles", soon: constraintsSoon },
-        { id: "room", n: "06", label: "Room", sub: "scene · objects · spawn", soon: constraintsSoon },
-        { id: "studio", n: "07", label: "Studio", sub: "constraints · live eval", soon: constraintsSoon },
-      ];
-    return [
-      { id: "generate", n: "01", label: "Generate", sub: "text → motion" },
-      { id: "gt", n: "02", label: "Ground Truth", sub: "dataset browser" },
-      { id: "training", n: "03", label: "Training", sub: "sample scrubber" },
-      { id: "constraints", n: "04", label: "Constraints", sub: "fixed joint angles", soon: constraintsSoon },
-      { id: "room", n: "05", label: "Room", sub: "scene · objects · spawn", soon: constraintsSoon },
-      { id: "studio", n: "06", label: "Studio", sub: "constraints · live eval", soon: constraintsSoon },
+    const base = [
+      { id: "create", n: "01", label: "Create", sub: "prompt · constraints · scene" },
+      { id: "library", n: "02", label: "Library", sub: "render · ground truth · samples" },
     ];
-  }, [clusterMode, constraintsSoon]);
-
-  const [tab, setTab] = useState("generate");
-  useEffect(() => {
-    if (clusterMode) setTab("cluster");
+    if (clusterMode) base.push({ id: "lab", n: "03", label: "Lab", sub: "train · eval · analysis" });
+    return base;
   }, [clusterMode]);
+
+  const [tab, setTab] = useState("create");
 
   const panel = (
     <>
-      <nav className="mb-8 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+      <nav className="mb-8 grid grid-cols-2 gap-2 sm:grid-cols-3">
         {tabs.map((t) => {
           const active = tab === t.id;
           return (
@@ -104,16 +79,9 @@ export default function Home() {
                   : "border-[var(--hairline)] hover:border-[var(--hairline-strong)]"
               }`}
             >
-              <div className="flex items-center justify-between">
-                <span className={`font-mono text-[11px] tracking-widest ${active ? "text-[var(--signal)]" : "text-[var(--muted)]"}`}>
-                  {t.n}
-                </span>
-                {t.soon && (
-                  <span className="rounded-full border border-[var(--amber)]/40 px-1.5 py-0.5 text-[9px] font-semibold tracking-wider text-[var(--amber)]">
-                    V2
-                  </span>
-                )}
-              </div>
+              <span className={`font-mono text-[11px] tracking-widest ${active ? "text-[var(--signal)]" : "text-[var(--muted)]"}`}>
+                {t.n}
+              </span>
               <div className={`display mt-1.5 text-base font-bold ${active ? "text-white" : "text-slate-300"}`}>
                 {t.label}
               </div>
@@ -124,38 +92,14 @@ export default function Home() {
         })}
       </nav>
 
+      {clusterMode && <SystemDrawer status={clusterStatus} open={systemOpen} onClose={() => setSystemOpen(false)} />}
+
       <div key={tab} className="animate-fade-up">
-        {tab === "cluster" && <ClusterTab status={clusterStatus} />}
-        {tab === "generate" &&
-          (model === "mardm" ? (
-            <MardmUnsupported feature="Generate" />
-          ) : (
-            <GenerateTab checkpoints={checkpoints} clusterMode={clusterMode} />
-          ))}
-        {tab === "visualize" &&
-          (model === "mardm" ? <MardmUnsupported feature="Visualize" /> : <VisualizeTab />)}
-        {tab === "model" && <ModelTab model={model} />}
-        {tab === "analysis" && <AnalysisTab />}
-        {tab === "gt" && <GTBrowserTab clusterMode={clusterMode} />}
-        {tab === "training" && <TrainingViewerTab clusterMode={clusterMode} />}
-        {tab === "constraints" &&
-          (model === "mardm" ? (
-            <MardmUnsupported feature="Constraints" />
-          ) : (
-            <ConstraintsTab checkpoints={checkpoints} clusterMode={clusterMode} />
-          ))}
-        {tab === "room" &&
-          (model === "mardm" ? (
-            <MardmUnsupported feature="Room" />
-          ) : (
-            <RoomEditor clusterMode={clusterMode} checkpoints={checkpoints} />
-          ))}
-        {tab === "studio" &&
-          (model === "mardm" ? (
-            <MardmUnsupported feature="Studio" />
-          ) : (
-            <StudioTab clusterMode={clusterMode} checkpoints={checkpoints} />
-          ))}
+        {tab === "create" &&
+          (model === "mardm" ? <MardmUnsupported feature="Create" /> : <CreateWorkspace clusterMode={clusterMode} checkpoints={checkpoints} />)}
+        {tab === "library" &&
+          (model === "mardm" ? <MardmUnsupported feature="Library" /> : <LibraryWorkspace clusterMode={clusterMode} />)}
+        {tab === "lab" && <LabWorkspace model={model} />}
       </div>
     </>
   );
@@ -171,14 +115,26 @@ export default function Home() {
               <span className="ml-3 align-middle text-lg font-semibold text-[var(--muted)]">motion instrument</span>
             </h1>
             <p className="mt-3 max-w-md text-[13px] leading-relaxed text-[var(--muted)]">
-              Drive the SLURM cluster: prompt the model, browse ground-truth clips,
-              scrub training samples, and launch viz / train / eval jobs.
+              Author motion with constraints &amp; scenes, browse the dataset, and run
+              training / eval on the SLURM cluster — each with its own history.
             </p>
           </div>
           <div className="flex flex-col items-end gap-3">
-            {clusterMode && (
-              <ModelToggle model={model} models={modelInfo?.models} onChange={changeModel} />
-            )}
+            <div className="flex items-center gap-2">
+              {clusterMode && (
+                <>
+                  <ModelToggle model={model} models={modelInfo?.models} onChange={changeModel} />
+                  <button
+                    onClick={() => setSystemOpen((o) => !o)}
+                    className={`surface flex items-center gap-1.5 px-3 py-2 text-[11px] uppercase tracking-widest transition ${systemOpen ? "border-[var(--signal)] text-[var(--signal)]" : "text-[var(--muted)] hover:text-slate-200"}`}
+                    title="cluster monitor: status · squeue · jobs"
+                  >
+                    <span className="dot" style={{ color: clusterStatus?.state === "online" ? "var(--signal)" : "var(--amber)" }} />
+                    system
+                  </button>
+                </>
+              )}
+            </div>
             <Telemetry health={health} error={connError} cluster={clusterStatus} clusterMode={clusterMode} queue={queue} />
           </div>
         </header>
@@ -201,7 +157,7 @@ function MardmUnsupported({ feature }) {
       <p className="max-w-sm text-[13px] leading-relaxed text-[var(--muted)]">
         MARDM has no standalone viz/generate pipeline yet — its only generation
         path runs inside evaluation. Use{" "}
-        <span className="text-[var(--signal)]">Model ▸ Evaluate</span> to score a
+        <span className="text-[var(--signal)]">Lab ▸ Evaluate</span> to score a
         MARDM checkpoint, or switch the model back to{" "}
         <span className="text-[var(--signal)]">rmg</span>.
       </p>
