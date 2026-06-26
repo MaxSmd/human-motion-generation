@@ -4,7 +4,7 @@
 #SBATCH --qos=students_normal
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
-#SBATCH --time=00:10:00
+#SBATCH --time=00:30:00
 #SBATCH --output=slurm/logs/rmg-ckpt-health-%j.out
 #SBATCH --error=slurm/logs/rmg-ckpt-health-%j.err
 #
@@ -45,46 +45,47 @@ enroot start \
         set -euo pipefail
         cd '"${REPO}"'
         python -u - <<"PY"
-import os, torch
+import os, glob, torch
 
-ckpt = os.environ["CKPT"]
-print(f"[ckpt-health] loading {ckpt}", flush=True)
-p = torch.load(ckpt, map_location="cpu", weights_only=False)
-step = p.get("step")
-print(f"[ckpt-health] step = {step}", flush=True)
+# CKPT may be: a single file, a comma-separated list, a glob, or a directory
+# (scans ckpt-*.pt inside, step-sorted). Multiple checkpoints -> one compact
+# summary line each so you can bisect to the last healthy step in one job.
+raw = os.environ["CKPT"]
+paths = []
+for entry in raw.split(","):
+    entry = entry.strip()
+    if not entry:
+        continue
+    if os.path.isdir(entry):
+        paths.extend(sorted(glob.glob(os.path.join(entry, "ckpt-*.pt"))))
+    else:
+        paths.extend(sorted(glob.glob(entry)) or [entry])
+if not paths:
+    raise SystemExit(f"[ckpt-health] no checkpoints matched: {raw}")
 
-def report(name, d):
+def count_bad(d):
     if not d:
-        print(f"[ckpt-health] {name}: (absent)", flush=True)
-        return
-    floats = {k: v for k, v in d.items()
-              if torch.is_tensor(v) and torch.is_floating_point(v)}
-    bad = [k for k, v in floats.items() if not torch.isfinite(v).all()]
-    print(f"[ckpt-health] {name}: {len(floats)} float tensors, "
-          f"{len(bad)} non-finite", flush=True)
-    for k in bad[:8]:
-        v = floats[k]
-        nbad = int((~torch.isfinite(v)).sum())
-        print(f"    NONFINITE {k}: {tuple(v.shape)} "
-              f"({nbad}/{v.numel()} bad)", flush=True)
-    # Show the magnitude range of a healthy-looking tensor for sanity.
-    finite_keys = [k for k in floats if k not in set(bad)]
-    if finite_keys:
-        k0 = finite_keys[0]
-        v0 = floats[k0]
-        print(f"    sample finite tensor {k0}: "
-              f"min={v0.min().item():.3e} max={v0.max().item():.3e}", flush=True)
+        return 0, 0
+    floats = [v for v in d.values()
+              if torch.is_tensor(v) and torch.is_floating_point(v)]
+    bad = sum(1 for v in floats if not torch.isfinite(v).all())
+    return bad, len(floats)
 
-report("model", p.get("model"))
-ema = p.get("ema")
-report("ema.shadow", ema.get("shadow") if ema else None)
-
-# Optimizer Adam moment buffers — NaN here means a NaN gradient was applied,
-# which pinpoints divergence even if a later step partially recovered params.
-opt = p.get("optimizer")
-if opt and "state" in opt:
-    exp_avg = {f"state[{i}].exp_avg": s["exp_avg"]
-               for i, s in opt["state"].items() if "exp_avg" in s}
-    report("optimizer.exp_avg", exp_avg)
+print(f"[ckpt-health] scanning {len(paths)} checkpoint(s)", flush=True)
+for path in paths:
+    p = torch.load(path, map_location="cpu", weights_only=False)
+    step = p.get("step")
+    mb, mt = count_bad(p.get("model"))
+    ema = p.get("ema")
+    eb, et = count_bad(ema.get("shadow") if ema else None)
+    opt = p.get("optimizer")
+    ob = ot = 0
+    if opt and "state" in opt:
+        exp = {i: s["exp_avg"] for i, s in opt["state"].items() if "exp_avg" in s}
+        ob, ot = count_bad(exp)
+    tag = "OK " if (mb == 0 and eb == 0) else "BAD"
+    print(f"[ckpt-health] {tag} step={step} {os.path.basename(path)} "
+          f"model={mb}/{mt} ema={eb}/{et} opt_exp_avg={ob}/{ot}", flush=True)
+    del p
 PY
     '
