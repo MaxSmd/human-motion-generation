@@ -50,7 +50,8 @@ import os, torch
 ckpt = os.environ["CKPT"]
 print(f"[ckpt-health] loading {ckpt}", flush=True)
 p = torch.load(ckpt, map_location="cpu", weights_only=False)
-print(f"[ckpt-health] step = {p.get(\"step\")}", flush=True)
+step = p.get("step")
+print(f"[ckpt-health] step = {step}", flush=True)
 
 def report(name, d):
     if not d:
