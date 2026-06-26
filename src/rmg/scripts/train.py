@@ -21,6 +21,7 @@ The training loop:
 
 from __future__ import annotations
 
+import math
 import signal
 import time
 from contextlib import nullcontext
@@ -278,6 +279,7 @@ def main(cfg: DictConfig) -> None:
 
     # -------------------- training loop --------------------
     t_last = time.time()
+    nan_skips = 0  # count of steps skipped due to non-finite loss/grad
     while step < cfg.train.max_steps:
         opt.zero_grad(set_to_none=True)
         accum_loss = 0.0
@@ -307,13 +309,29 @@ def main(cfg: DictConfig) -> None:
         if scaler is not None:
             scaler.unscale_(opt)
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.train.grad_clip)
-        if scaler is not None:
-            scaler.step(opt)
-            scaler.update()
+
+        # Non-finite guard. On the sphere's antipodal cut locus the CFM target
+        # velocity (θ/sin θ) can blow up to Inf/NaN for an unlucky prior/data
+        # pair; clip_grad_norm_ can't help (a NaN grad-norm yields a NaN clip
+        # coefficient, so the NaN flows straight into the weights) and a single
+        # poisoned step corrupts model + EMA + Adam moments permanently. So we
+        # skip the update entirely whenever the loss or grad is non-finite —
+        # one wasted step instead of a dead run.
+        skip_step = not (math.isfinite(accum_loss) and bool(torch.isfinite(grad_norm)))
+        if skip_step:
+            nan_skips += 1
+            opt.zero_grad(set_to_none=True)
+            print(f"[train] WARNING: non-finite step at step {step} "
+                  f"(loss={accum_loss}, grad_norm={float(grad_norm)}); skipped "
+                  f"optimizer + EMA update (total skips={nan_skips})", flush=True)
         else:
-            opt.step()
+            if scaler is not None:
+                scaler.step(opt)
+                scaler.update()
+            else:
+                opt.step()
+            ema.update(model)
         sched.step()
-        ema.update(model)
 
         step += 1
 
@@ -332,6 +350,7 @@ def main(cfg: DictConfig) -> None:
                     "t_mean": float(info["t_mean"]),
                     "x_t_offmanifold_frac": float(info["x_t_offmanifold"]),
                     "steps_per_s": steps_per_s,
+                    "nan_skips": nan_skips,
                 },
                 step=step,
             )
