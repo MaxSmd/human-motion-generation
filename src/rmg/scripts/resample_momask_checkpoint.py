@@ -64,6 +64,15 @@ def _level_acc(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> 
     return out
 
 
+def _inverse_normalize(x: torch.Tensor, ckpt: dict) -> torch.Tensor:
+    stats = ckpt.get("normalizer")
+    if not isinstance(stats, dict) or "mean" not in stats or "std" not in stats:
+        return x
+    mean = stats["mean"].to(device=x.device, dtype=x.dtype)
+    std = stats["std"].to(device=x.device, dtype=x.dtype)
+    return x * std + mean
+
+
 def main() -> None:
     args = parse_args()
     ckpt_path = Path(args.checkpoint)
@@ -105,21 +114,24 @@ def main() -> None:
             guidance_scale=args.guidance_scale,
             mask=token_mask,
         )
-        base_only = vqvae.decode_from_tokens(base.unsqueeze(1), target_len=target_len)
+        base_only = _inverse_normalize(vqvae.decode_from_tokens(base.unsqueeze(1), target_len=target_len), ckpt)
         gen_tokens = residual_model.generate_residuals(
             base,
             cond=cond,
             guidance_scale=args.guidance_scale,
             mask=token_mask,
         )
-        gen = vqvae.decode_from_tokens(gen_tokens, target_len=target_len)
+        gen = _inverse_normalize(vqvae.decode_from_tokens(gen_tokens, target_len=target_len), ckpt)
         teacher_residual_tokens = residual_model.generate_residuals(
             true_tokens[:, 0],
             cond=cond,
             guidance_scale=args.guidance_scale,
             mask=token_mask,
         )
-        teacher_residual = vqvae.decode_from_tokens(teacher_residual_tokens, target_len=target_len)
+        teacher_residual = _inverse_normalize(
+            vqvae.decode_from_tokens(teacher_residual_tokens, target_len=target_len),
+            ckpt,
+        )
 
     token_eval = dict(ckpt.get("token_eval", {}))
     token_eval.update(_level_acc(gen_tokens.cpu(), true_tokens.cpu(), token_mask.cpu()))
