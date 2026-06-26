@@ -159,6 +159,107 @@ def test_sphere_wrapped_gaussian_on_manifold() -> None:
     assert (mean_dir * mu).sum() > 0.9
 
 
+# ---------------------------------------------------------------------------
+# Antipodal quotient (quaternion double cover): align_base_point
+# ---------------------------------------------------------------------------
+
+
+def test_sphere_align_base_point_default_is_noop() -> None:
+    # A genuine sphere keeps antipodal points distinct → x1 unchanged.
+    M = Sphere(3)
+    x0 = _rand_sphere(3, 32)
+    x1 = _rand_sphere(3, 32)
+    assert torch.equal(M.align_base_point(x0, x1), x1)
+
+
+def test_sphere_align_base_point_flips_into_hemisphere() -> None:
+    M = Sphere(3, antipodal_quotient=True)
+    x0 = _rand_sphere(3, 256)
+    x1 = _rand_sphere(3, 256)
+    aligned = M.align_base_point(x0, x1)
+    # Result is one of the two double-cover representatives of x1...
+    same = torch.isclose(aligned, x1).all(-1)
+    negd = torch.isclose(aligned, -x1).all(-1)
+    assert (same | negd).all()
+    # ...and always lands in x0's (closed) hemisphere.
+    assert ((aligned * x0).sum(-1) >= -1e-12).all()
+
+
+def test_align_base_point_caps_arc_at_half_pi() -> None:
+    """Core guarantee: after alignment every pair is within 90°, so the CFM
+    velocity factor θ/sin θ stays bounded (≤ π/2) instead of approaching the
+    antipodal cut locus."""
+    M = Sphere(3, antipodal_quotient=True)
+    x0 = _rand_sphere(3, 1024)
+    x1 = _rand_sphere(3, 1024)  # ~half the pairs are obtuse (θ > 90°)
+    raw_theta = torch.arccos((x0 * x1).sum(-1).clamp(-1.0, 1.0))
+    assert (raw_theta > torch.pi / 2).any()  # the dangerous regime is present
+    aligned = M.align_base_point(x0, x1)
+    aligned_theta = torch.arccos((x0 * aligned).sum(-1).clamp(-1.0, 1.0))
+    assert (aligned_theta <= torch.pi / 2 + 1e-9).all()
+
+
+def test_align_fixes_bf16_antipodal_instability() -> None:
+    """The bug that nuked the rmg_mid run: near-antipodal quaternion pairs make
+    the slerp velocity ill-conditioned, and in bf16 (the run's precision) the
+    coefficients that should cancel instead blow up. Alignment removes it.
+
+    Note antipodal quaternions are the *same* rotation (q ~ -q), so the aligned
+    path is the correct short one (θ → 0), not a detour around the sphere.
+    """
+    torch.manual_seed(0)
+    M_plain = Sphere(3)
+    M_quot = Sphere(3, antipodal_quotient=True)
+    x0 = _rand_sphere(3, 2000)
+    x1 = -x0 + 1e-3 * torch.randn_like(x0)  # near-antipodal (θ ≈ π)
+    x1 = x1 / x1.norm(dim=-1, keepdim=True)
+    t = torch.full((x0.shape[0],), 0.3, dtype=torch.float64)
+
+    # float64 references
+    aligned = M_quot.align_base_point(x0, x1)
+    ref_aligned = M_quot.cfm_target_velocity(x0, aligned, t)
+    ref_raw = M_plain.cfm_target_velocity(x0, x1, t)
+
+    # bf16 recompute (matches the training run's precision)
+    bf = M_quot.cfm_target_velocity(
+        x0.bfloat16(), aligned.bfloat16(), t.bfloat16()).double()
+    bf_raw = M_plain.cfm_target_velocity(
+        x0.bfloat16(), x1.bfloat16(), t.bfloat16()).double()
+
+    err_aligned = (bf - ref_aligned).norm(dim=-1).max()
+    err_raw = (bf_raw - ref_raw).norm(dim=-1).max()
+
+    assert torch.isfinite(bf).all()
+    assert err_aligned < 0.05               # aligned path is bf16-stable
+    assert err_raw > 1.0                     # raw path is wildly off in bf16
+    assert err_raw > 20.0 * err_aligned      # alignment is the difference
+
+
+def test_cfm_batch_aligns_quaternion_factors_only() -> None:
+    """build_cfm_batch flips quaternion (Sphere) targets into x0's hemisphere
+    but leaves the Euclidean translation factor untouched."""
+    from rmg.flow.interpolation import build_cfm_batch
+
+    M = ProductManifold([Euclidean(3), Sphere(3, antipodal_quotient=True)])
+    trans0 = torch.randn(128, 3, dtype=torch.float64)
+    trans1 = torch.randn(128, 3, dtype=torch.float64)
+    q0 = _rand_sphere(3, 128)
+    q1 = _rand_sphere(3, 128)
+    x0 = torch.cat([trans0, q0], dim=-1)
+    x1 = torch.cat([trans1, q1], dim=-1)
+    t = torch.full((128,), 0.5, dtype=torch.float64)
+
+    batch = build_cfm_batch(M, x0, x1, t)
+    # x_t endpoints sanity: still on the product manifold, finite target.
+    assert M.validate(batch.x_t, atol=1e-9).all()
+    assert torch.isfinite(batch.target).all()
+    # The quaternion sub-block of the realized geodesic must hug the short arc:
+    # rebuild the aligned x1 and confirm every quaternion pair has θ <= π/2.
+    aligned = M.align_base_point(x0, x1)
+    assert torch.equal(aligned[..., :3], x1[..., :3])         # translation intact
+    assert ((aligned[..., 3:] * q0).sum(-1) >= -1e-12).all()  # quats in hemisphere
+
+
 def test_quat_to_upper_hemisphere() -> None:
     q = torch.tensor(
         [[-0.5, 0.5, 0.5, 0.5], [0.5, -0.5, -0.5, -0.5], [0.0, 1.0, 0.0, 0.0]],

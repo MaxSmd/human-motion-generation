@@ -50,6 +50,17 @@ class Manifold(ABC):
         one_minus_t = (1.0 - t).clamp_min(1e-7)
         return self.log(xt, x1) / _broadcast_scalar(one_minus_t, xt)
 
+    def align_base_point(self, x0: Tensor, x1: Tensor) -> Tensor:
+        """Return the representative of `x1` best suited for a geodesic from `x0`.
+
+        Default: `x1` unchanged. Manifolds with a discrete quotient symmetry
+        (e.g. the quaternion double cover `q ~ -q` on S^3) override this to pick
+        the representative on the same side as `x0`, keeping the conditional
+        path off the cut locus where the geodesic / its velocity blow up. Used
+        by the CFM batch builder before computing `x_t` and the target velocity.
+        """
+        return x1
+
     @abstractmethod
     def sample_wrapped_gaussian(
         self,

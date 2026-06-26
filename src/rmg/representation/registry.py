@@ -101,7 +101,12 @@ class TRRepresentation(Representation):
         return 3 + 4 * self.num_joints
 
     def build_manifold(self) -> Manifold:
-        return ProductManifold([Euclidean(3)] + [Sphere(3) for _ in range(self.num_joints)])
+        # Sphere factors are unit quaternions → enable the double-cover quotient
+        # so CFM paths stay off the antipodal cut locus.
+        return ProductManifold(
+            [Euclidean(3)]
+            + [Sphere(3, antipodal_quotient=True) for _ in range(self.num_joints)]
+        )
 
     def prior_mu(self, dtype: torch.dtype = torch.float32) -> Tensor:
         rest_T = torch.zeros(3, dtype=dtype)
@@ -202,7 +207,7 @@ class TRPRepresentation(Representation):
     def build_manifold(self) -> Manifold:
         return ProductManifold(
             [Euclidean(3)]
-            + [Sphere(3) for _ in range(self.num_joints)]
+            + [Sphere(3, antipodal_quotient=True) for _ in range(self.num_joints)]
             + [PreShape(self.num_joints, dim=3)]
         )
 

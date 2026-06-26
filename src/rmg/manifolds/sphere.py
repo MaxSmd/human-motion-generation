@@ -28,11 +28,20 @@ def _safe_div_sin(numer: Tensor, theta: Tensor) -> Tensor:
 
 class Sphere(Manifold):
     """Unit sphere S^d ⊂ R^{d+1}. `dim` is the *intrinsic* dimension d
-    (so ambient_dim = d + 1)."""
+    (so ambient_dim = d + 1).
 
-    def __init__(self, dim: int):
+    `antipodal_quotient` opts into the double-cover identification x ~ -x. Set
+    it for unit quaternions on S^3, where q and -q are the *same* rotation: it
+    lets `align_base_point` pick the target representative within 90° of the
+    start, so geodesics never approach the antipodal cut locus (θ → π) where the
+    velocity factor θ/sin(θ) explodes to Inf/NaN. Leave it False for a genuine
+    sphere where antipodal points are distinct.
+    """
+
+    def __init__(self, dim: int, antipodal_quotient: bool = False):
         self.intrinsic_dim = dim
         self.ambient_dim = dim + 1
+        self.antipodal_quotient = antipodal_quotient
 
     def project_tangent(self, x: Tensor, u: Tensor) -> Tensor:
         # u - <x, u> x
@@ -115,6 +124,17 @@ class Sphere(Manifold):
             mu_b = mu
         v = self.project_tangent(mu_b, noise)
         return self.exp(mu_b, v)
+
+    def align_base_point(self, x0: Tensor, x1: Tensor) -> Tensor:
+        # Quaternion double cover: q and -q are the same rotation, so flip x1 to
+        # whichever of {x1, -x1} lies in x0's hemisphere (<x0, x1> >= 0). This
+        # caps the geodesic arc at θ <= π/2, keeping it off the antipodal cut
+        # locus. No-op for a genuine sphere (antipodal_quotient=False).
+        if not self.antipodal_quotient:
+            return x1
+        inner = (x0 * x1).sum(dim=-1, keepdim=True)
+        flip = torch.where(inner < 0, -1.0, 1.0)
+        return x1 * flip
 
     def validate(self, x: Tensor, atol: float = 1e-4) -> Tensor:
         norm = torch.linalg.vector_norm(x, dim=-1)
