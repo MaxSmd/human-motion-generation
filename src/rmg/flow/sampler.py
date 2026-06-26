@@ -68,10 +68,9 @@ class RiemannianEulerSampler:
                 joint factors to a target quaternion — see `flow.constraints`.
                 Both broadcast against (B, T, D) (e.g. pass (T, D)).
             project_fn: optional projection applied to the state after every ODE
-                step — projects each constrained joint onto its feasible
-                submanifold (e.g. hinge limits via swing-twist clamping). See
-                `flow.constraints.build_hinge_projector`. Composes with the
-                inpainting hook (applied after it).
+                step — pulls each constrained joint's bend angle toward its
+                feasible range (see `flow.constraints.build_bend_projector`).
+                Composes with the inpainting hook (applied after it).
             energy_fn / guidance_weight: optional euclidean (room/obstacle)
                 guidance. Each step the clean-sample estimate x̂₁ = Exp_x((1−t)·v)
                 is fed to `energy_fn` (FK → world → penalty); its gradient w.r.t.

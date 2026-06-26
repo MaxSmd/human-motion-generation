@@ -35,11 +35,27 @@ const FALLBACK = [
 let _pid = 0;
 let _rid = 0;
 
+// Approximate healthy ranges of motion for the bend (flexion) at each joint,
+// in degrees. Used by the "anatomical limit" preset so "realistic knee" is one
+// click. 0° = straight; values are deliberately generous.
+const ANATOMICAL_BEND = {
+  L_Knee: [0, 150], R_Knee: [0, 150],
+  L_Elbow: [0, 145], R_Elbow: [0, 145],
+  L_Hip: [0, 120], R_Hip: [0, 120],
+  L_Shoulder: [0, 170], R_Shoulder: [0, 170],
+  L_Ankle: [0, 50], R_Ankle: [0, 50],
+  Neck: [0, 45], Spine1: [0, 30], Spine2: [0, 30], Spine3: [0, 30],
+  L_Collar: [0, 30], R_Collar: [0, 30],
+};
+
 // A constraint is the BEND ANGLE at a joint (angle between its two bones, 0 =
 // straight) — axis-free. A pin fixes it exactly; a range limits it to [min,max].
+// `strength` (0..1) softens the hold; `ease_frames` ramps a windowed hold in/out.
 function toConstraints(pins) {
   return pins.map((p) => ({
     joint: p.joint, bend_deg: Number(p.bend_deg),
+    strength: p.strength == null ? 1 : Number(p.strength),
+    ease_frames: Number(p.ease_frames) || 0,
     frame_start: Number(p.frame_start) || 0,
     frame_end: p.frame_end === "" ? null : Number(p.frame_end),
   }));
@@ -47,6 +63,8 @@ function toConstraints(pins) {
 function toRanges(ranges) {
   return ranges.map((r) => ({
     joint: r.joint, bend_min: Number(r.bend_min), bend_max: Number(r.bend_max),
+    strength: r.strength == null ? 1 : Number(r.strength),
+    ease_frames: Number(r.ease_frames) || 0,
     frame_start: Number(r.frame_start) || 0,
     frame_end: r.frame_end === "" ? null : Number(r.frame_end),
   }));
@@ -266,7 +284,7 @@ function JointEditor({ selName, pin, hinge, numFrames, upsertPin, removePin, ups
       {tab === "pin" ? (
         <PinEditor pin={pin} numFrames={numFrames} upsertPin={upsertPin} removePin={removePin} />
       ) : (
-        <HingeEditor hinge={hinge} numFrames={numFrames} upsertHinge={upsertHinge} removeHinge={removeHinge} />
+        <HingeEditor selName={selName} hinge={hinge} numFrames={numFrames} upsertHinge={upsertHinge} removeHinge={removeHinge} />
       )}
     </section>
   );
@@ -291,6 +309,7 @@ function PinEditor({ pin, numFrames, upsertPin, removePin }) {
           </div>
         </div>
       </div>
+      <HoldStrength c={pin} onChange={(patch) => upsertPin(patch)} />
       <FrameWindow c={pin} numFrames={numFrames} onChange={(patch) => upsertPin(patch)} />
       {pin && (
         <button onClick={removePin} className="text-[11px] text-[var(--muted)] hover:text-[var(--amber)]">remove pin</button>
@@ -299,21 +318,56 @@ function PinEditor({ pin, numFrames, upsertPin, removePin }) {
   );
 }
 
-function HingeEditor({ hinge, numFrames, upsertHinge, removeHinge }) {
+// Soft-hold controls shared by pin & hinge: stiffness (0..1) + window ease ramp.
+function HoldStrength({ c, onChange }) {
+  const strength = c?.strength == null ? 1 : Number(c.strength);
+  const ease = Number(c?.ease_frames) || 0;
+  return (
+    <div className="grid grid-cols-2 gap-3">
+      <div>
+        <div className="mb-1 flex justify-between">
+          <span className="label">hold strength</span>
+          <span className="font-mono text-[12px] text-[var(--signal)]">{strength >= 1 ? "hard" : strength.toFixed(2)}</span>
+        </div>
+        <input type="range" min="0" max="1" step="0.05" value={strength}
+          onChange={(e) => onChange({ strength: Number(e.target.value) })} className="w-full accent-[var(--signal)]" />
+        <p className="label mt-1">1 = snap to target · &lt;1 lets the prompt fight back</p>
+      </div>
+      <label className="block">
+        <span className="label mb-1 block">ease frames</span>
+        <input type="number" min="0" className="field-input" value={ease}
+          onChange={(e) => onChange({ ease_frames: Number(e.target.value) })} />
+        <p className="label mt-1">ramp the hold in/out at the window edges</p>
+      </label>
+    </div>
+  );
+}
+
+function HingeEditor({ selName, hinge, numFrames, upsertHinge, removeHinge }) {
   const mn = hinge?.bend_min ?? 0;
   const mx = hinge?.bend_max ?? 90;
+  const anat = ANATOMICAL_BEND[selName];
   return (
     <div className="space-y-4">
       <p className="text-[12px] text-[var(--muted)]">
         Limits the joint's bend angle to [min, max] each sampling step (0° = straight). The motion
         bends freely within the range; anything outside is projected back in.
       </p>
+      {anat && (
+        <button
+          onClick={() => upsertHinge({ bend_min: anat[0], bend_max: anat[1] })}
+          className="rounded-md border border-[var(--signal)]/50 bg-[var(--signal-dim)] px-3 py-1.5 text-[11px] font-semibold text-[var(--signal)] hover:bg-[var(--signal)]/15"
+        >
+          use anatomical limit ({anat[0]}–{anat[1]}°)
+        </button>
+      )}
       <div className="grid grid-cols-2 gap-3">
         <label className="block"><span className="label mb-1 block">min bend (°)</span>
           <input type="number" min="0" max="180" className="field-input" value={mn} onChange={(e) => upsertHinge({ bend_min: Number(e.target.value) })} /></label>
         <label className="block"><span className="label mb-1 block">max bend (°)</span>
           <input type="number" min="0" max="180" className="field-input" value={mx} onChange={(e) => upsertHinge({ bend_max: Number(e.target.value) })} /></label>
       </div>
+      <HoldStrength c={hinge} onChange={(patch) => upsertHinge(patch)} />
       <FrameWindow c={hinge} numFrames={numFrames} onChange={(patch) => upsertHinge(patch)} />
       {hinge && (
         <button onClick={removeHinge} className="text-[11px] text-[var(--muted)] hover:text-[var(--amber)]">remove hinge</button>

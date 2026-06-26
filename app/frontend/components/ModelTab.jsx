@@ -125,7 +125,7 @@ function RmgTrain() {
         <p className="label text-center">launches a real GPU training run — confirm the preview first</p>
       </form>
       <div className="surface p-6">
-        <VizJobResult job={job} error={error} submitting={submitting} emptyHint="Training job status appears here — full progress in the Cluster tab." />
+        <VizJobResult job={job} error={error} submitting={submitting} emptyHint="Training job status appears here — live progress shows in the panel above." />
       </div>
     </div>
   );
@@ -192,7 +192,7 @@ function MardmTrain() {
         </p>
       </form>
       <div className="surface p-6">
-        <VizJobResult job={job} error={error} submitting={submitting} emptyHint="Training job status appears here — full progress in the Cluster tab." />
+        <VizJobResult job={job} error={error} submitting={submitting} emptyHint="Training job status appears here — live progress shows in the panel above." />
       </div>
     </div>
   );

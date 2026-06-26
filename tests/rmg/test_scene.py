@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import math
 
+import pytest
 import torch
 
 from rmg.flow import (
@@ -20,8 +21,9 @@ from rmg.flow import (
     rmg_manifold,
     scene_energy,
 )
+from rmg.flow import contact_energy, foot_skate_energy, parse_contacts
 from rmg.flow.scene import _sdf_box, _sdf_cylinder, _sdf_sphere
-from shared.geometry.skeleton import NUM_JOINTS, Skeleton, forward_kinematics
+from shared.geometry.skeleton import FOOT_CONTACT_IDX, NUM_JOINTS, Skeleton, forward_kinematics
 
 torch.manual_seed(0)
 
@@ -155,3 +157,76 @@ def test_guidance_reduces_energy() -> None:
     e_guided = run(1.0)
     # Guidance should cut the violation energy by a large margin.
     assert e_guided < 0.5 * e_unguided, f"guided {e_guided} !<< unguided {e_unguided}"
+
+
+# --------------------------------------------------------------------------- contacts
+
+
+def _box_scene(contacts=None, foot_skate_weight=0.0):
+    return parse_scene({
+        "room": {"width": 6, "depth": 6, "height": 3},
+        "objects": [{"id": "box1", "kind": "box", "x": 1.0, "y": 0.25, "z": 0.0,
+                     "w": 1.0, "h": 0.5, "d": 1.0, "rotation": 0}],
+        "spawn": {"x": 0, "z": 0, "rotation": 0},
+        "contacts": contacts or [],
+        "foot_skate_weight": foot_skate_weight,
+    })
+
+
+def _joints(B, T, pos):
+    # All joints at `pos`; pos may be (3,) or (B,T,3).
+    j = torch.zeros(B, T, NUM_JOINTS, 3, dtype=torch.float64)
+    p = torch.as_tensor(pos, dtype=torch.float64)
+    j[...] = p.view(*([1] * (j.dim() - 1)), 3) if p.dim() == 1 else p.unsqueeze(-2)
+    return j
+
+
+def test_contact_zero_when_joint_on_target() -> None:
+    scene = _box_scene([{"joint": "pelvis", "target": "obstacle_top", "object_id": "box1", "tol": 0.05}])
+    c = parse_contacts(scene.contacts)[0]
+    # pelvis sitting exactly on the box top (y = 0.25 + 0.25 = 0.5), over its footprint
+    on_top = _joints(1, 4, [1.0, 0.5, 0.0])
+    assert float(contact_energy(on_top, c, scene)) == pytest.approx(0.0, abs=1e-9)
+    # pelvis well above the top → positive energy that pulls it down
+    above = _joints(1, 4, [1.0, 1.5, 0.0])
+    assert float(contact_energy(above, c, scene)) > 0.0
+
+
+def test_contact_floor_pulls_to_ground() -> None:
+    scene = _box_scene([{"joint": "L_Foot", "target": "floor", "tol": 0.02}])
+    c = parse_contacts(scene.contacts)[0]
+    grounded = _joints(1, 3, [0.3, 0.0, 0.2])
+    assert float(contact_energy(grounded, c, scene)) == pytest.approx(0.0, abs=1e-9)
+    floating = _joints(1, 3, [0.3, 0.4, 0.2])
+    assert float(contact_energy(floating, c, scene)) > 0.0
+
+
+def test_contact_window_limits_frames() -> None:
+    scene = _box_scene([{"joint": "L_Foot", "target": "floor", "frame_start": 0, "frame_end": 2}])
+    c = parse_contacts(scene.contacts)[0]
+    j = _joints(1, 5, [0.0, 0.5, 0.0])     # floating everywhere
+    e_win = float(contact_energy(j, c, scene))
+    c_all = parse_contacts([{"joint": "L_Foot", "target": "floor"}])[0]
+    e_all = float(contact_energy(j, c_all, scene))
+    assert 0.0 < e_win < e_all              # only the 2-frame window contributes
+
+
+def test_foot_skate_penalises_sliding_plant() -> None:
+    scene = _box_scene(foot_skate_weight=1.0)
+    T = 6
+    # feet glued to the floor but sliding in x → should be penalised
+    sliding = torch.zeros(1, T, NUM_JOINTS, 3, dtype=torch.float64)
+    sliding[..., 0] = torch.linspace(0, 1.0, T).view(1, T, 1)   # x drifts
+    e_slide = float(foot_skate_energy(sliding, scene, FOOT_CONTACT_IDX, 1.0))
+    # same feet but lifted high (not planted) → little/no penalty
+    lifted = sliding.clone()
+    lifted[..., 1] = 1.0
+    e_lift = float(foot_skate_energy(lifted, scene, FOOT_CONTACT_IDX, 1.0))
+    assert e_slide > 0.0
+    assert e_lift < 0.05 * e_slide
+
+
+def test_unknown_contact_target_raises() -> None:
+    import pytest as _pt
+    with _pt.raises(ValueError):
+        parse_contacts([{"joint": "pelvis", "target": "nonsense"}])

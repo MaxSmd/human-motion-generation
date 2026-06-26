@@ -87,25 +87,50 @@ _T2M_CHAINS: tuple[tuple[int, ...], ...] = (
 )
 
 
-def _render(joints: np.ndarray, save_path: Path, title: str, fps: int) -> None:
+def _render(joints: np.ndarray, save_path: Path, title: str, fps: int):
     """Render (T, 22, 3) joint positions to GIF (via Pillow — no ffmpeg).
 
     Also dumps the raw joints next to the GIF as `<stem>.npy` so the same
     motion can be re-rendered to MP4 locally with a system ffmpeg if you want.
+
+    Returns the written GIF `Path`, or `None` if the motion is entirely
+    non-finite (nothing renderable). Partially-corrupt motions still render:
+    matplotlib silently breaks line segments at NaN frames, so corruption shows
+    up as gaps/missing limbs rather than crashing the whole job.
     """
     save_path.parent.mkdir(parents=True, exist_ok=True)
-    # Always save joints — cheap insurance, useful for local re-render.
+    # Always save joints — cheap insurance, useful for local re-render. Saved
+    # BEFORE any sanitization so the raw NaN/Inf are preserved for inspection.
     npy_path = save_path.with_suffix(".npy")
     np.save(npy_path, joints.astype(np.float32))
+
+    # Guard against non-finite joints (e.g. a sample dump whose decoded motion
+    # diverged to NaN/Inf). Without this, the axis-limit computation below feeds
+    # NaN to ax.set_xlim → "Axis limits cannot be NaN or Inf", which then leaves
+    # PillowWriter with zero frames and a misleading "IndexError: list index out
+    # of range" at finish(). Compute limits from finite points only.
+    pts = joints.reshape(-1, 3)
+    finite_rows = np.isfinite(pts).all(axis=1)
+    if not finite_rows.all():
+        n_bad = int((~finite_rows).sum())
+        print(f"[visualize] WARNING: {save_path.stem} has {n_bad}/{pts.shape[0]} "
+              f"non-finite joint positions (NaN/Inf) — the decoded motion is "
+              f"corrupt (likely a diverged sample). Saved raw joints to "
+              f"{npy_path.name} for inspection.", flush=True)
+    if not finite_rows.any():
+        print(f"[visualize] SKIP {save_path.stem}: motion is entirely non-finite, "
+              f"nothing to render.", flush=True)
+        return None
 
     import matplotlib.pyplot as plt
     from matplotlib.animation import FuncAnimation, PillowWriter
     from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  (registers 3d projection)
 
     T = joints.shape[0]
-    # Shared axis limits so the camera doesn't jitter between frames.
-    pts = joints.reshape(-1, 3)
-    lo, hi = pts.min(axis=0), pts.max(axis=0)
+    # Shared axis limits so the camera doesn't jitter between frames — derived
+    # from finite points only so a stray NaN frame can't poison the limits.
+    fpts = pts[finite_rows]
+    lo, hi = fpts.min(axis=0), fpts.max(axis=0)
     center = (lo + hi) / 2
     radius = float(np.max(hi - lo)) / 2 * 1.1 + 1e-3
 
@@ -399,6 +424,9 @@ def main(cfg: DictConfig) -> None:
             joints = forward_kinematics(skel, quats, translation).numpy()
             gif = _render(joints, out_dir / f"real-{cid}.mp4",
                           title=f"[{cid}] {caption[:60]}", fps=int(cfg.viz.fps))
+            if gif is None:
+                skipped.append(cid)
+                continue
             manifest.append({"file": gif.name, "kind": "gt", "clip_id": cid, "caption": caption})
         # Fail loudly if nothing rendered (e.g. all clip ids invalid) rather than
         # exiting 0 with no output dir — that left the app pulling a non-existent
@@ -477,6 +505,8 @@ def main(cfg: DictConfig) -> None:
             safe = "".join(c if c.isalnum() else "_" for c in prompt)[:48]
             gif = _render(joints, out_dir / f"gen-{i:02d}-{safe}.mp4",
                           title=prompt[:60], fps=int(cfg.viz.fps))
+            if gif is None:
+                continue
             manifest.append({"file": gif.name, "kind": "pred", "caption": prompt})
         _write_manifest(out_dir, manifest)
         return
@@ -535,7 +565,8 @@ def main(cfg: DictConfig) -> None:
             gt_joints = forward_kinematics(skel, quats, translation).numpy()
             gt_gif = _render(gt_joints, out_dir / f"real-{cid}.mp4",
                              title=f"GT [{cid}] {caption[:55]}", fps=int(cfg.viz.fps))
-            manifest.append({"file": gt_gif.name, "kind": "gt", "clip_id": cid, "caption": caption})
+            if gt_gif is not None:
+                manifest.append({"file": gt_gif.name, "kind": "gt", "clip_id": cid, "caption": caption})
 
             # Prediction: same caption, matched (capped) length.
             print(f"[visualize] compare {cid}: sampling {n_frames} frames for "
@@ -549,7 +580,8 @@ def main(cfg: DictConfig) -> None:
             ).cpu().numpy()
             pred_gif = _render(pred_joints, out_dir / f"gen-{cid}.mp4",
                                title=f"PRED [{cid}] {caption[:55]}", fps=int(cfg.viz.fps))
-            manifest.append({"file": pred_gif.name, "kind": "pred", "clip_id": cid, "caption": caption})
+            if pred_gif is not None:
+                manifest.append({"file": pred_gif.name, "kind": "pred", "clip_id": cid, "caption": caption})
         _write_manifest(out_dir, manifest)
         return
 
@@ -601,13 +633,30 @@ def main(cfg: DictConfig) -> None:
                   f"{samples.shape[1]} frames", flush=True)
             for i, text in enumerate(texts):
                 tpr = tplusr_decode(samples[i].float())
+                # Diagnose where any corruption originates (the dump itself) so
+                # the user can tell a diverged sample apart from a viz bug.
+                if not torch.isfinite(tpr.translation).all() or not torch.isfinite(tpr.quaternions).all():
+                    n_t = int((~torch.isfinite(tpr.translation)).sum())
+                    n_q = int((~torch.isfinite(tpr.quaternions)).sum())
+                    print(f"[visualize] WARNING: {step_tag} prompt {i} sample is "
+                          f"non-finite in the dump (translation={n_t}, quats={n_q}) "
+                          f"— the model's saved generation diverged at this step.",
+                          flush=True)
                 joints = forward_kinematics(
                     skel, tpr.quaternions.float(), tpr.translation.float()
                 ).cpu().numpy()
                 safe = "".join(c if c.isalnum() else "_" for c in text)[:40]
                 gif = _render(joints, out_dir / f"{step_tag}-{i:02d}-{safe}.mp4",
                               title=f"[{step_tag}] {text[:55]}", fps=int(cfg.viz.fps))
+                if gif is None:
+                    continue
                 manifest.append({"file": gif.name, "kind": "sample", "caption": text, "step": step})
+        if not manifest:
+            raise ValueError(
+                "mode=samples: every rendered motion was non-finite — the saved "
+                "sample dumps are corrupt (model generation diverged to NaN/Inf). "
+                "Inspect the .npy files written next to each (attempted) GIF."
+            )
         _write_manifest(out_dir, manifest)
         return
 

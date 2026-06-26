@@ -1,8 +1,9 @@
-"""Sampling-time joint-angle constraint tests.
+"""Joint-angle constraint plumbing tests.
 
-Covers axis-angle → quaternion, the inpaint-target layout, and that the
-Riemannian sampler actually pins constrained joints to their target quaternion
-(while leaving unconstrained joints free).
+Covers the anatomical joint → bend-controller remap (the per-chain FK
+off-by-one), and the soft-hold refinements on the bend projector: partial
+`strength` and `ease_frames` window ramps. The core bend geometry lives in
+test_bend.py.
 """
 
 from __future__ import annotations
@@ -12,104 +13,20 @@ import math
 import pytest
 import torch
 
-from rmg.flow import (
-    JointAngleConstraint,
-    OracleVelocity,
-    RiemannianEulerSampler,
-    SamplerCfg,
-    WrappedGaussianPrior,
-    axis_angle_to_quat,
-    bend_controller_index,
-    build_inpaint_targets,
-    parse_constraints,
-    rest_pose_mu,
-    rmg_manifold,
-)
+from rmg.flow import BendConstraint, bend_clamp, bend_controller_index, build_bend_projector, parse_bends
+from rmg.flow.constraints import _ease_ramp
+from shared.geometry.skeleton import NUM_JOINTS, Skeleton
 
 torch.manual_seed(0)
 
 
-def test_axis_angle_identity_and_known_rotation() -> None:
-    # zero angle → identity quaternion
-    q0 = axis_angle_to_quat("z", 0.0)
-    assert torch.allclose(q0, torch.tensor([1.0, 0.0, 0.0, 0.0]), atol=1e-6)
-    # 90° about z → [cos45, 0, 0, sin45]
-    q = axis_angle_to_quat((0.0, 0.0, 1.0), math.radians(90.0))
-    expect = torch.tensor([math.cos(math.pi / 4), 0.0, 0.0, math.sin(math.pi / 4)])
-    assert torch.allclose(q, expect, atol=1e-6)
-    assert torch.allclose(q.norm(), torch.tensor(1.0), atol=1e-6)
-    assert q[0] >= 0  # upper hemisphere
-
-
-def test_build_inpaint_targets_layout() -> None:
-    J, T = 22, 30
-    c = JointAngleConstraint(joint="L_Elbow", axis="z", angle_deg=90.0, frame_start=5, frame_end=20)
-    values, mask = build_inpaint_targets([c], num_frames=T, num_joints=J)
-    assert values.shape == (T, 3 + 4 * J)
-    assert mask.dtype == torch.bool
-    # the L_Elbow *bend* is controlled by L_Wrist (index 20) under HumanML3D's
-    # per-chain FK, so that's the quaternion slot the constraint must pin.
-    j = 20
-    lo, hi = 3 + 4 * j, 3 + 4 * (j + 1)
-    # masked exactly on the joint's 4 quat dims over [5, 20)
-    assert mask[5:20, lo:hi].all()
-    assert not mask[:5, lo:hi].any()
-    assert not mask[20:, lo:hi].any()
-    # no other dims touched
-    other = torch.ones_like(mask)
-    other[5:20, lo:hi] = False
-    assert not mask[other].any()
-    # target value matches the quaternion
-    assert torch.allclose(values[10, lo:hi], c.quat(), atol=1e-6)
-
-
-def test_frame_window_defaults_to_all_frames() -> None:
-    c = JointAngleConstraint(joint=0)
-    assert c.frame_window(50) == (0, 50)
-    c2 = JointAngleConstraint.from_dict({"joint": "R_Knee", "angle_deg": 30, "frame_end": -1})
-    assert c2.frame_window(50) == (0, 50)
-
-
-def test_empty_constraints_mask_all_false() -> None:
-    values, mask = build_inpaint_targets(parse_constraints(None), num_frames=10, num_joints=22)
-    assert not mask.any()
-    assert values.shape == (10, 3 + 4 * 22)
-
-
-def test_sampler_pins_constrained_joint() -> None:
-    """With a constraint, the chosen joint's quaternion must equal the target in
-    the output, while an unconstrained joint must NOT match it (still free)."""
-    J, T = 5, 8
-    M = rmg_manifold(num_joints=J)
-    mu = rest_pose_mu(num_joints=J, dtype=torch.float64).to(torch.float64)
-    prior = WrappedGaussianPrior(M, mu, sigma=0.5)
-
-    # Oracle field flows from x0 to a random x1 on the manifold; without the
-    # constraint the output is x1, so we can check the constraint overrides it.
-    x0 = prior.sample((1, T), dtype=torch.float64)
-    x1 = prior.sample((1, T), dtype=torch.float64)
-    model = OracleVelocity(M, x0, x1).double()
-
-    sampler = RiemannianEulerSampler(M, prior, SamplerCfg(num_steps=20, guidance_scale=1.0))
-
-    pin_joint = 2
-    c = JointAngleConstraint(joint=pin_joint, axis="x", angle_deg=90.0)
-    # toy 5-joint skeleton: address the raw quaternion index (no SMPL chain remap)
-    values, mask = build_inpaint_targets([c], num_frames=T, num_joints=J, dtype=torch.float64,
-                                         remap_to_controller=False)
-
-    out = sampler.sample(model, shape=(1, T), num_steps=20, dtype=torch.float64,
-                         fixed_values=values, fixed_mask=mask)
-
-    lo, hi = 3 + 4 * pin_joint, 3 + 4 * (pin_joint + 1)
-    q_target = c.quat(dtype=torch.float64)
-    # pinned joint sits exactly on the target across all frames
-    assert torch.allclose(out[0, :, lo:hi], q_target.expand(T, 4), atol=1e-5)
-    # output still lies on the manifold (target is a unit quaternion)
-    assert M.validate(out, atol=1e-4).all()
-    # an unconstrained joint is generally NOT the target (it tracked the oracle)
-    free_lo = 3 + 4 * 1
-    assert not torch.allclose(out[0, :, free_lo:free_lo + 4], q_target.expand(T, 4), atol=1e-3)
+def _arm_skeleton() -> Skeleton:
+    # Minimal offsets with a real left arm so the elbow has incoming/outgoing
+    # bones (shoulder 16 → elbow 18 → wrist 20).
+    off = torch.zeros(NUM_JOINTS, 3, dtype=torch.float64)
+    off[18] = torch.tensor([0.28, 0, 0])   # upper arm (shoulder→elbow)
+    off[20] = torch.tensor([0.25, 0, 0])   # forearm   (elbow→wrist)
+    return Skeleton(offsets=off)
 
 
 def test_bend_controller_index_mapping() -> None:
@@ -131,15 +48,76 @@ def test_bend_controller_index_mapping() -> None:
         bend_controller_index("pelvis")
 
 
-def test_inpaint_remaps_anatomical_joint_to_controller() -> None:
-    """A constraint authored on L_Elbow must pin L_Wrist (its bend controller),
-    NOT the elbow's own quaternion — the off-by-one the elbow demo exposed."""
-    J, T = 22, 10
-    c = JointAngleConstraint(joint="L_Elbow", axis="z", angle_deg=90.0)
-    values, mask = build_inpaint_targets([c], num_frames=T, num_joints=J)
-    lo18, lo20 = 3 + 4 * 18, 3 + 4 * 20
-    assert not mask[:, lo18:lo18 + 4].any()  # elbow's own quat left free
-    assert mask[:, lo20:lo20 + 4].all()      # wrist quat (bend controller) pinned
-    # raw addressing still available for advanced/raw-index use
-    _, m_raw = build_inpaint_targets([c], num_frames=T, num_joints=J, remap_to_controller=False)
-    assert m_raw[:, lo18:lo18 + 4].all()
+def test_from_dict_accepts_bend_and_legacy_keys() -> None:
+    # preferred exact / range keys
+    assert (BendConstraint.from_dict({"joint": "L_Elbow", "bend_deg": 90}).min_deg,) == (90.0,)
+    r = BendConstraint.from_dict({"joint": "L_Knee", "bend_min": 10, "bend_max": 80})
+    assert (r.min_deg, r.max_deg) == (10.0, 80.0)
+    # legacy axis-era keys map onto bend semantics
+    leg = BendConstraint.from_dict({"joint": "L_Elbow", "angle_deg": 45})
+    assert leg.min_deg == leg.max_deg == 45.0
+    # soft-hold refinements
+    s = BendConstraint.from_dict({"joint": "L_Elbow", "bend_deg": 90, "strength": 0.5, "ease_frames": 4})
+    assert s.strength == 0.5 and s.ease_frames == 4
+
+
+def test_ease_ramp_shape_and_endpoints() -> None:
+    r = _ease_ramp(10, 3, device=None, dtype=torch.float64)
+    assert r.shape == (10,)
+    assert r.max() <= 1.0 + 1e-9 and r.min() > 0.0
+    assert float(r[0]) < float(r[2]) <= 1.0           # ramps up at the start
+    assert float(r[-1]) < float(r[-3]) <= 1.0          # ramps down at the end
+    assert torch.allclose(r[4:6], torch.ones(2, dtype=torch.float64))  # flat in the middle
+    # ease_frames=0 ⇒ all ones (hard on/off)
+    assert torch.allclose(_ease_ramp(5, 0, None, torch.float64), torch.ones(5, dtype=torch.float64))
+
+
+def _bend_of(joints_q, u, v):
+    from shared.geometry.skeleton import quat_rotate
+    d = quat_rotate(joints_q, v)
+    cos_a = (d * u).sum(-1).clamp(-1, 1)
+    return math.degrees(float(torch.acos(cos_a)))
+
+
+def test_strength_zero_is_a_noop() -> None:
+    # strength=0 applies none of the correction: the quaternion is unchanged.
+    q = torch.tensor([math.cos(math.radians(60)), 0.0, 0.0, math.sin(math.radians(60))], dtype=torch.float64)
+    u = torch.tensor([1.0, 0.0, 0.0], dtype=torch.float64)
+    v = torch.tensor([1.0, 0.0, 0.0], dtype=torch.float64)
+    out = bend_clamp(q, u, v, 0.0, 0.0, strength=0.0)
+    assert torch.allclose(out, q, atol=1e-6)
+
+
+def test_partial_strength_moves_part_way() -> None:
+    # forearm bent 120°, target 0°: strength 0.5 should roughly halve the bend.
+    q = torch.tensor([math.cos(math.radians(60)), 0.0, 0.0, math.sin(math.radians(60))], dtype=torch.float64)
+    u = torch.tensor([1.0, 0.0, 0.0], dtype=torch.float64)
+    v = torch.tensor([1.0, 0.0, 0.0], dtype=torch.float64)
+    out = bend_clamp(q, u, v, 0.0, 0.0, strength=0.5)
+    assert _bend_of(out, u, v) == pytest.approx(60.0, abs=1e-2)
+
+
+def test_projector_respects_strength() -> None:
+    # A strength<1 hold lands between the free pose and the exact target.
+    skel = _arm_skeleton()
+    T = 6
+    c_soft = parse_bends([{"joint": "L_Elbow", "bend_deg": 0, "strength": 0.5}])
+    proj = build_bend_projector(c_soft, skel, num_frames=T, num_joints=NUM_JOINTS, dtype=torch.float64)
+    assert proj is not None
+    x = torch.zeros(1, T, 3 + 4 * NUM_JOINTS, dtype=torch.float64)
+    x[..., 0] = 1.0
+    for j in range(NUM_JOINTS):
+        x[..., 3 + 4 * j] = 1.0
+    # bend the elbow 120° via its controller (L_Wrist, idx 20) about z
+    lo = 3 + 4 * 20
+    x[..., lo] = math.cos(math.radians(60))
+    x[..., lo + 3] = math.sin(math.radians(60))
+    out = proj(x)
+    # half-corrected: still a unit quaternion, and not the full clamp
+    q = out[0, 0, lo:lo + 4]
+    assert torch.allclose(q.norm(), torch.tensor(1.0, dtype=torch.float64), atol=1e-6)
+    assert not torch.allclose(q, x[0, 0, lo:lo + 4], atol=1e-3)
+
+
+def test_empty_bends_no_projector() -> None:
+    assert build_bend_projector(parse_bends(None), _arm_skeleton(), num_frames=10) is None

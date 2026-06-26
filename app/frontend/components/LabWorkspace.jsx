@@ -9,6 +9,7 @@ import { useState } from "react";
 import ModelTab from "./ModelTab";
 import AnalysisTab from "./AnalysisTab";
 import HistoryRail from "./HistoryRail";
+import TrainingProgress from "./TrainingProgress";
 import { useJobHistory } from "@/lib/useJobHistory";
 import { WORKSPACE_CATEGORIES } from "@/lib/classifyJob";
 
@@ -20,10 +21,13 @@ const MODES = [
 export default function LabWorkspace({ model }) {
   const [mode, setMode] = useState("run");
   const [showRail, setShowRail] = useState(true);
-  const { jobs } = useJobHistory(WORKSPACE_CATEGORIES.lab);
+  const { jobs, refresh } = useJobHistory(WORKSPACE_CATEGORIES.lab);
 
   const main = (
-    <div className="min-w-0">
+    <div className="min-w-0 space-y-5">
+      {/* live progress for whatever training currently holds the GPU slot —
+          surfaces runs launched in earlier sessions, not just this one */}
+      <TrainingProgress jobs={jobs} onChange={refresh} />
       {mode === "run" ? <ModelTab model={model} /> : <AnalysisTab />}
     </div>
   );

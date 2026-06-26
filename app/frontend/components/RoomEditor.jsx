@@ -24,6 +24,7 @@ import {
   TransformControls,
 } from "@react-three/drei";
 import { api, mediaUrl } from "@/lib/api";
+import { sdfBox, sdfSphere, sdfCylinder } from "@/lib/sceneMetrics";
 import MediaViewer from "./MediaViewer";
 import MotionPlayer from "./MotionPlayer";
 import RemoteCheckpointPicker from "./RemoteCheckpointPicker";
@@ -34,13 +35,49 @@ const DEG = Math.PI / 180;
 
 let _oid = 0;
 const uid = () => `obj-${++_oid}`;
+let _cid = 0;
+const cuid = () => `c-${++_cid}`;
+
+// SMPL 22-joint names (matches shared.geometry.skeleton.JOINT_NAMES) — used for
+// the contact joint picker. End-effectors (feet/wrists/head) are the useful
+// contact joints, so the full list is offered.
+const JOINTS = [
+  "pelvis", "L_Hip", "R_Hip", "Spine1", "L_Knee", "R_Knee", "Spine2",
+  "L_Ankle", "R_Ankle", "Spine3", "L_Foot", "R_Foot", "Neck", "L_Collar",
+  "R_Collar", "Head", "L_Shoulder", "R_Shoulder", "L_Elbow", "R_Elbow",
+  "L_Wrist", "R_Wrist",
+];
+
+const CONTACT_TARGETS = [
+  ["obstacle_top", "on top of object", "sit / stand / step on the object's top face"],
+  ["obstacle", "touch object surface", "hand-on-wall: nearest point on the object"],
+  ["floor", "on the floor", "plant a foot / hand on the ground"],
+  ["point", "fixed point", "reach a specific xyz"],
+];
 
 const DEFAULT_SCENE = {
   room: { width: 4, depth: 4, height: 2.5 },
   objects: [],
   spawn: { x: 0, z: 0, rotation: 0 },
   padding: 0.1, // standoff margin (m): guidance brakes this far from surfaces
+  contacts: [], // [{ id, joint, target, object_id, x,y,z, tol, weight, frame_start, frame_end }]
+  foot_skate_weight: 0, // >0 ⇒ penalise sliding planted feet during sampling
 };
+
+function makeContact(scene) {
+  const firstObj = scene.objects[0];
+  return {
+    id: cuid(),
+    joint: firstObj ? "pelvis" : "L_Foot",
+    target: firstObj ? "obstacle_top" : "floor",
+    object_id: firstObj?.id ?? null,
+    x: 0, y: 0.9, z: 0,
+    tol: 0.08,
+    weight: 1.0,
+    frame_start: 0,
+    frame_end: "", // "" ⇒ to last frame
+  };
+}
 
 // Add-button presets. `kind` is the geometry; walls are just a thin tall box.
 function makeObject(preset) {
@@ -127,14 +164,33 @@ export default function RoomEditor({ clusterMode = false, checkpoints = [] }) {
   const updateObject = (id, patch) =>
     setScene((s) => ({ ...s, objects: s.objects.map((o) => (o.id === id ? { ...o, ...patch } : o)) }));
   const removeObject = (id) => {
-    setScene((s) => ({ ...s, objects: s.objects.filter((o) => o.id !== id) }));
+    setScene((s) => ({
+      ...s,
+      objects: s.objects.filter((o) => o.id !== id),
+      // drop contacts that referenced the removed object
+      contacts: (s.contacts || []).filter((c) => c.object_id !== id),
+    }));
     setSelectedId((cur) => (cur === id ? null : cur));
   };
+
+  const addContact = () => setScene((s) => ({ ...s, contacts: [...(s.contacts || []), makeContact(s)] }));
+  const updateContact = (id, patch) =>
+    setScene((s) => ({ ...s, contacts: (s.contacts || []).map((c) => (c.id === id ? { ...c, ...patch } : c)) }));
+  const removeContact = (id) =>
+    setScene((s) => ({ ...s, contacts: (s.contacts || []).filter((c) => c.id !== id) }));
 
   const selectedObj = scene.objects.find((o) => o.id === selectedId) || null;
 
   const [preset, setPreset] = useState("empty");
-  const applyPreset = (p) => { setScene({ padding: scene.padding ?? 0.1, ...p.build() }); setSelectedId(null); setPreset(p.key); };
+  // Presets replace room geometry but keep the user's solver knobs (padding,
+  // foot-skate) and reset contacts (they reference the old objects).
+  const applyPreset = (p) => {
+    setScene((s) => ({
+      padding: s.padding ?? 0.1, foot_skate_weight: s.foot_skate_weight ?? 0, contacts: [], ...p.build(),
+    }));
+    setSelectedId(null);
+    setPreset(p.key);
+  };
 
   return (
     <div className="space-y-5">
@@ -216,6 +272,10 @@ export default function RoomEditor({ clusterMode = false, checkpoints = [] }) {
             />
           ))}
 
+          {(scene.contacts || []).map((c) => (
+            <ContactMarker key={c.id} contact={c} scene={scene} />
+          ))}
+
           <Spawn
             spawn={scene.spawn}
             selected={selectedId === "spawn"}
@@ -244,6 +304,15 @@ export default function RoomEditor({ clusterMode = false, checkpoints = [] }) {
               onChange={(v) => setScene((s) => ({ ...s, padding: v }))} />
             <p className="label mt-1">brake this far before walls & objects (0 = touch allowed)</p>
           </div>
+          <label className="mt-3 flex items-center justify-between gap-2 rounded-md border border-[var(--hairline)] px-2.5 py-2">
+            <span>
+              <span className="label block">foot anti-skate</span>
+              <span className="text-[10px] text-[var(--muted)]">penalise planted feet sliding</span>
+            </span>
+            <input type="checkbox" className="accent-[var(--signal)]"
+              checked={(scene.foot_skate_weight ?? 0) > 0}
+              onChange={(e) => setScene((s) => ({ ...s, foot_skate_weight: e.target.checked ? 1.0 : 0 }))} />
+          </label>
         </Section>
 
         <Section title="Objects" sub="obstacles & structure">
@@ -315,7 +384,15 @@ export default function RoomEditor({ clusterMode = false, checkpoints = [] }) {
           >
             select spawn in viewport
           </button>
+          <SpawnFeasibility scene={scene} />
         </Section>
+
+        <ContactsSection
+          scene={scene}
+          onAdd={addContact}
+          onUpdate={updateContact}
+          onRemove={removeContact}
+        />
 
         <SceneJSON scene={scene} />
       </div>
@@ -407,11 +484,19 @@ function RoomDispatch({ scene, clusterMode, checkpoints }) {
 
         <div>
           <div className="mb-1.5 flex items-center justify-between">
-            <span className="label">room guidance</span>
-            <span className="font-mono text-sm text-[var(--signal)]">{form.room_guidance === 0 ? "off (place only)" : form.room_guidance}</span>
+            <span className="label">soft constraint strength</span>
+            <span className="font-mono text-sm text-[var(--signal)]">{guidanceLabel(form.room_guidance)}</span>
           </div>
           <input type="range" min="0" max="2" step="0.05" value={form.room_guidance} onChange={set("room_guidance")} className="w-full accent-[var(--signal)]" />
-          <p className="label mt-1">0 = just place at spawn · ~0.5–1.5 = avoidance strength relative to the motion · 1 ≈ as strong as the walk itself</p>
+          <p className="label mt-1">
+            drives avoidance, contacts &amp; anti-skate (relative to the motion). 0 = exact spawn placement only —
+            walls, contacts &amp; foot-skate are ignored.
+          </p>
+          {form.room_guidance === 0 && ((scene.contacts || []).length > 0 || (scene.foot_skate_weight ?? 0) > 0) && (
+            <p className="mt-1 text-[11px] text-[var(--amber)]">
+              ⚠ contacts / anti-skate set but strength is 0 — raise it for them to take effect.
+            </p>
+          )}
         </div>
 
         <button type="submit" className="btn-signal w-full" disabled={(clusterMode && (submitting || !checkpoint)) || (!clusterMode && loading)}>
@@ -671,4 +756,144 @@ function SceneJSON({ scene }) {
 function round(v, p = 3) {
   const f = 10 ** p;
   return Math.round(v * f) / f;
+}
+
+// ───────────────────────────────────────────── contacts
+
+function guidanceLabel(v) {
+  if (v === 0) return "off (place only)";
+  if (v < 0.6) return `gentle · ${v}`;
+  if (v < 1.2) return `firm · ${v}`;
+  return `hard · ${v}`;
+}
+
+// Where the contact target sits, for the authoring marker. Mirrors the backend
+// _contact_target for the static (no-clip) case: object top-centre, the object
+// centre, a fixed point, or the floor under the spawn.
+function contactTargetPos(contact, scene) {
+  const o = scene.objects.find((x) => x.id === contact.object_id);
+  if (contact.target === "point") return [contact.x, contact.y, contact.z];
+  if (contact.target === "floor") return [scene.spawn.x, 0, scene.spawn.z];
+  if (!o) return null;
+  if (contact.target === "obstacle_top") {
+    if (o.kind === "box") return [o.x, o.y + o.h / 2, o.z];
+    if (o.kind === "cylinder") return [o.x, o.y + o.height / 2, o.z];
+    if (o.kind === "sphere") return [o.x, o.y + o.radius, o.z];
+  }
+  return [o.x, o.y, o.z]; // obstacle surface → centre as the indicative marker
+}
+
+function ContactMarker({ contact, scene }) {
+  const p = contactTargetPos(contact, scene);
+  if (!p) return null;
+  return (
+    <group position={p}>
+      <mesh>
+        <sphereGeometry args={[0.07, 16, 12]} />
+        <meshBasicMaterial color="#34d399" transparent opacity={0.85} />
+      </mesh>
+      <mesh>
+        <sphereGeometry args={[Math.max(0.02, contact.tol), 16, 12]} />
+        <meshBasicMaterial color="#34d399" transparent opacity={0.12} />
+      </mesh>
+    </group>
+  );
+}
+
+function ContactsSection({ scene, onAdd, onUpdate, onRemove }) {
+  const contacts = scene.contacts || [];
+  const objects = scene.objects || [];
+  return (
+    <Section title="Contacts" sub="pull a joint onto a surface (sit · step · touch)">
+      <button
+        onClick={onAdd}
+        className="w-full rounded-md border border-[var(--signal)]/50 bg-[var(--signal-dim)] px-3 py-1.5 text-[12px] font-semibold text-[var(--signal)] hover:bg-[var(--signal)]/15"
+      >
+        + add contact
+      </button>
+      {contacts.length === 0 && (
+        <p className="label mt-3">No contacts — the body only avoids obstacles. Add one to make it rest on / touch a surface.</p>
+      )}
+      <div className="mt-3 space-y-3">
+        {contacts.map((c, i) => {
+          const needsObj = c.target === "obstacle_top" || c.target === "obstacle";
+          return (
+            <div key={c.id} className="rounded-lg border border-[var(--hairline)] p-3">
+              <div className="mb-2 flex items-center justify-between">
+                <span className="font-mono text-[11px] tracking-widest text-[var(--muted)]">CONTACT {String(i + 1).padStart(2, "0")}</span>
+                <button onClick={() => onRemove(c.id)} className="text-[11px] text-[var(--muted)] hover:text-[var(--amber)]">remove</button>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <label className="block">
+                  <span className="label mb-1 block">joint</span>
+                  <select className="field-input" value={c.joint} onChange={(e) => onUpdate(c.id, { joint: e.target.value })}>
+                    {JOINTS.map((j) => <option key={j} value={j}>{j}</option>)}
+                  </select>
+                </label>
+                <label className="block">
+                  <span className="label mb-1 block">target</span>
+                  <select className="field-input" value={c.target}
+                    onChange={(e) => onUpdate(c.id, { target: e.target.value, object_id: e.target.value.startsWith("obstacle") ? (c.object_id ?? objects[0]?.id ?? null) : c.object_id })}>
+                    {CONTACT_TARGETS.map(([v, label]) => <option key={v} value={v}>{label}</option>)}
+                  </select>
+                </label>
+              </div>
+              <p className="label mt-1.5">{CONTACT_TARGETS.find(([v]) => v === c.target)?.[2]}</p>
+
+              {needsObj && (
+                <label className="mt-2 block">
+                  <span className="label mb-1 block">object</span>
+                  <select className="field-input" value={c.object_id ?? ""} onChange={(e) => onUpdate(c.id, { object_id: e.target.value })}>
+                    {objects.length === 0 && <option value="">— add an object first —</option>}
+                    {objects.map((o) => <option key={o.id} value={o.id}>{o.label || o.kind}</option>)}
+                  </select>
+                </label>
+              )}
+              {c.target === "point" && (
+                <div className="mt-2 grid grid-cols-3 gap-2">
+                  <Num label="x" value={c.x} step={0.1} onChange={(v) => onUpdate(c.id, { x: v })} />
+                  <Num label="y" value={c.y} step={0.1} onChange={(v) => onUpdate(c.id, { y: v })} />
+                  <Num label="z" value={c.z} step={0.1} onChange={(v) => onUpdate(c.id, { z: v })} />
+                </div>
+              )}
+
+              <div className="mt-2 grid grid-cols-2 gap-2">
+                <Num label="tolerance (m)" value={c.tol} min={0.01} step={0.01} onChange={(v) => onUpdate(c.id, { tol: v })} />
+                <Num label="weight" value={c.weight} min={0} step={0.5} onChange={(v) => onUpdate(c.id, { weight: v })} />
+              </div>
+              <div className="mt-2 grid grid-cols-2 gap-2">
+                <Num label="frame start" value={c.frame_start} min={0} step={1} onChange={(v) => onUpdate(c.id, { frame_start: v })} />
+                <label className="block">
+                  <span className="label mb-1 block">frame end <span className="text-[var(--muted)]">(blank = all)</span></span>
+                  <input type="number" min="0" className="field-input" placeholder="all" value={c.frame_end}
+                    onChange={(e) => onUpdate(c.id, { frame_end: e.target.value })} />
+                </label>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </Section>
+  );
+}
+
+// ───────────────────────────────────────────── spawn feasibility check
+
+function SpawnFeasibility({ scene }) {
+  const msg = useMemo(() => {
+    const { width: w, depth: d } = scene.room;
+    const p = [scene.spawn.x, 0.9, scene.spawn.z]; // mid-body height probe
+    if (Math.abs(scene.spawn.x) > w / 2 || Math.abs(scene.spawn.z) > d / 2)
+      return "spawn is outside the room footprint";
+    for (const o of scene.objects || []) {
+      let sdf;
+      if (o.kind === "sphere") sdf = sdfSphere(p, [o.x, o.y, o.z], o.radius);
+      else if (o.kind === "cylinder") sdf = sdfCylinder(p, [o.x, o.z], o.radius, o.y, o.height / 2);
+      else sdf = sdfBox(p, [o.x, o.y, o.z], [o.w / 2, o.h / 2, o.d / 2], ((o.rotation || 0) * Math.PI) / 180);
+      if (sdf < 0) return `spawn is inside "${o.label || o.kind}" — move it clear`;
+    }
+    return null;
+  }, [scene]);
+  if (!msg) return null;
+  return <p className="mt-2 text-[11px] text-[var(--amber)]">⚠ {msg}</p>;
 }

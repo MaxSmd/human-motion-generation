@@ -56,10 +56,10 @@ def test_bend_clamp_range() -> None:
 def test_bend_clamp_preserves_twist() -> None:
     # q = bend(about z) then twist(about the forearm axis v=x). Clamping the bend
     # must leave the twist-about-v component unchanged.
-    from rmg.flow.constraints import _quat_mul
+    from shared.geometry.skeleton import quat_mul
     bend = _quat_axis_angle(Z, 120.0)
     twist = _quat_axis_angle(V, 50.0)
-    q = _quat_mul(bend, twist)
+    q = quat_mul(bend, twist)
     out = bend_clamp(q, U, V, math.radians(90), math.radians(90))
 
     def twist_about_v(qq):

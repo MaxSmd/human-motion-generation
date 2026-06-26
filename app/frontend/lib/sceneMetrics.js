@@ -73,6 +73,68 @@ export function frameJointsOf(joints, frame) {
   return out;
 }
 
+// SMPL 22-joint name → index (matches shared.geometry.skeleton.JOINT_NAMES).
+const JOINT_INDEX = {
+  pelvis: 0, L_Hip: 1, R_Hip: 2, Spine1: 3, L_Knee: 4, R_Knee: 5, Spine2: 6,
+  L_Ankle: 7, R_Ankle: 8, Spine3: 9, L_Foot: 10, R_Foot: 11, Neck: 12,
+  L_Collar: 13, R_Collar: 14, Head: 15, L_Shoulder: 16, R_Shoulder: 17,
+  L_Elbow: 18, R_Elbow: 19, L_Wrist: 20, R_Wrist: 21,
+};
+
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+
+// JS mirror of flow.scene._contact_target — the point a contact pulls its joint
+// toward, given that joint's current position `jp` ([x,y,z], already placed).
+function contactTarget(jp, contact, scene) {
+  if (contact.target === "floor") return [jp[0], 0, jp[2]];
+  if (contact.target === "point") return [contact.x, contact.y, contact.z];
+  const o = (scene.objects || []).find((x) => x.id === contact.object_id);
+  if (!o) return jp;
+  if (contact.target === "obstacle_top") {
+    if (o.kind === "box") {
+      const yaw = ((o.rotation || 0) * Math.PI) / 180;
+      const [lx, , lz] = rotYInv(jp[0] - o.x, jp[1] - o.y, jp[2] - o.z, yaw);
+      const cx = clamp(lx, -o.w / 2, o.w / 2), cz = clamp(lz, -o.d / 2, o.d / 2);
+      const c = Math.cos(yaw), s = Math.sin(yaw); // rotate (cx,cz) back by +yaw
+      return [o.x + c * cx + s * cz, o.y + o.h / 2, o.z - s * cx + c * cz];
+    }
+    if (o.kind === "cylinder") {
+      const dx = jp[0] - o.x, dz = jp[2] - o.z;
+      const dist = Math.hypot(dx, dz) || 1e-9;
+      const sc = Math.min(dist, o.radius) / dist;
+      return [o.x + dx * sc, o.y + o.height / 2, o.z + dz * sc];
+    }
+    if (o.kind === "sphere") return [o.x, o.y + o.radius, o.z];
+  }
+  return [o.x, o.y, o.z];
+}
+
+// Per-contact realized satisfaction: fraction of in-window frames where the
+// joint lands within `tol` of its target, plus the mean / worst distance.
+export function contactReport(joints, scene) {
+  const contacts = scene.contacts || [];
+  if (!contacts.length) return [];
+  const T = joints.shape[0];
+  return contacts.map((c) => {
+    const ji = JOINT_INDEX[c.joint] ?? 0;
+    const fs = Math.max(0, Number(c.frame_start) || 0);
+    const fe = c.frame_end === "" || c.frame_end == null ? T : Math.min(T, Number(c.frame_end));
+    const tol = Number(c.tol) || 0.05;
+    let held = 0, sum = 0, worst = 0, n = 0;
+    for (let f = fs; f < fe; f++) {
+      const jp = frameJointsOf(joints, f)[ji];
+      const tgt = contactTarget(jp, c, scene);
+      const dist = Math.hypot(jp[0] - tgt[0], jp[1] - tgt[1], jp[2] - tgt[2]);
+      n += 1; sum += dist; worst = Math.max(worst, dist);
+      if (dist <= tol + VIOL_EPS) held += 1;
+    }
+    return {
+      id: c.id, joint: c.joint, target: c.target,
+      heldPct: n ? held / n : 0, meanDist: n ? sum / n : 0, worst,
+    };
+  });
+}
+
 // Whole-clip summary + per-frame worst-violation series (for the timeline).
 export function clipMetrics(joints, scene) {
   const T = joints.shape[0];

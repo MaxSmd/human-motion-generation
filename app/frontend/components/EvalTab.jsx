@@ -103,7 +103,7 @@ export default function EvalTab() {
           ))}
           {runs.length === 0 && !error && (
             <li className="text-[12px] text-[var(--muted)]">
-              No eval runs yet — launch one from the Cluster tab.
+              No eval runs yet — launch one from Lab ▸ Train / Eval.
             </li>
           )}
         </ul>

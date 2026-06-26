@@ -60,19 +60,22 @@ app.include_router(cluster_router)
 
 
 class JointConstraint(BaseModel):
+    """A bend-angle PIN: hold a joint at `bend_deg` (0° = straight)."""
     joint: str                     # SMPL joint name, e.g. "L_Elbow"
-    axis: str = "z"                # "x" | "y" | "z" (rotation axis)
-    angle_deg: float = 90.0
+    bend_deg: float = 90.0         # target bend (angle between the two bones)
+    strength: float = 1.0          # 0..1 — fraction of the correction (1 = hard)
+    ease_frames: int = 0           # ramp the hold in/out over N frames at edges
     frame_start: int = 0
     frame_end: int | None = None   # None / -1 ⇒ to the last frame
 
 
 class RangeConstraint(BaseModel):
+    """A bend-angle LIMIT: keep a joint's bend within [bend_min, bend_max]."""
     joint: str                     # SMPL joint name, e.g. "L_Knee"
-    axis: str = "x"                # "x" | "y" | "z" (hinge axis)
-    min_deg: float = 0.0
-    max_deg: float = 10.0
-    swing_max_deg: float = 0.0     # off-axis swing budget (0 = pure hinge)
+    bend_min: float = 0.0
+    bend_max: float = 90.0
+    strength: float = 1.0          # 0..1 — fraction of the correction (1 = hard)
+    ease_frames: int = 0
     frame_start: int = 0
     frame_end: int | None = None
 
@@ -85,13 +88,16 @@ class GenerateRequest(BaseModel):
     num_frames: int = 100
     checkpoint: str | None = None  # explicit ckpt path; None → server default
     fmt: str = "auto"              # auto | mp4 | gif
-    # Sampling-time constraints (RMG tr/trp representations only).
-    constraints: list[JointConstraint] | None = None  # fixed joint angles (inpaint)
-    ranges: list[RangeConstraint] | None = None        # hinge limits (projection)
-    # Euclidean room/scene: free-form dict ({room, objects, spawn}) from the
-    # RoomEditor; exact spawn placement + soft room/obstacle guidance.
+    # Sampling-time constraints (RMG tr/trp representations only). Both are
+    # bend-angle constraints projected each ODE step (pins = fixed bend, ranges
+    # = bend limits) — see flow.constraints.
+    constraints: list[JointConstraint] | None = None  # bend pins
+    ranges: list[RangeConstraint] | None = None        # bend ranges
+    # Euclidean room/scene: free-form dict ({room, objects, spawn, contacts,
+    # foot_skate_weight}) from the RoomEditor; exact spawn placement + soft
+    # room/obstacle/contact/anti-skate guidance.
     scene: dict | None = None
-    room_guidance: float = 0.0     # 0 ⇒ placement only (no avoidance guidance)
+    room_guidance: float = 0.0     # 0 ⇒ placement only (no soft guidance)
 
 
 # --------------------------------------------------------------------------- health

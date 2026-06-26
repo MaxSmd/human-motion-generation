@@ -14,7 +14,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Canvas, useFrame } from "@react-three/fiber";
 import { Edges, Grid, GizmoHelper, GizmoViewport, Line, OrbitControls } from "@react-three/drei";
 import { loadNpy } from "@/lib/npy";
-import { clipMetrics, frameJointsOf, frameViolations } from "@/lib/sceneMetrics";
+import { clipMetrics, contactReport, frameJointsOf, frameViolations } from "@/lib/sceneMetrics";
 
 // HumanML3D kinematic chains (same as the renderer / FK).
 const CHAINS = [
@@ -46,6 +46,10 @@ export default function MotionPlayer({ jointsUrl, scene, fps = 20 }) {
 
   // Constraint-violation analysis (only when a scene is present).
   const clip = useMemo(() => (joints && scene ? clipMetrics(joints, scene) : null), [joints, scene]);
+  const contacts = useMemo(
+    () => (joints && scene ? contactReport(joints, scene) : []),
+    [joints, scene]
+  );
   const fm = useMemo(
     () => (joints && scene ? frameViolations(frameJointsOf(joints, frame), scene) : null),
     [joints, scene, frame]
@@ -57,7 +61,7 @@ export default function MotionPlayer({ jointsUrl, scene, fps = 20 }) {
   return (
     <div className="relative">
       <div className="relative overflow-hidden rounded-lg border border-[var(--hairline)]" style={{ height: 440 }}>
-        {showAnalysis && fm && <ConstraintHUD fm={fm} clip={clip} />}
+        {showAnalysis && fm && <ConstraintHUD fm={fm} clip={clip} contacts={contacts} />}
         {clip && (
           <button
             onClick={() => setShowAnalysis((s) => !s)}
@@ -115,7 +119,7 @@ export default function MotionPlayer({ jointsUrl, scene, fps = 20 }) {
 }
 
 // Live readout of the current frame's constraint violations + clip summary.
-function ConstraintHUD({ fm, clip }) {
+function ConstraintHUD({ fm, clip, contacts = [] }) {
   const worst = fm.worst;
   const ok = worst <= 1e-3;
   const col = ok ? "var(--signal)" : worst > 0.1 ? "#f87171" : "var(--amber)";
@@ -132,6 +136,16 @@ function ConstraintHUD({ fm, clip }) {
         <Row k="obstacle" v={fm.pen > 1e-3 ? `${fm.pen.toFixed(2)} m → ${fm.penLabel}` : "clear"} bad={fm.pen > 1e-3} />
         <Row k="joints" v={`${fm.nViol}/22`} bad={fm.nViol > 0} />
       </dl>
+      {contacts.length > 0 && (
+        <dl className="mt-1.5 border-t border-[var(--hairline)] pt-1.5 space-y-0.5 text-[11px]">
+          <div className="label mb-0.5">contacts</div>
+          {contacts.map((c) => (
+            <Row key={c.id} k={`${c.joint}`}
+              v={c.heldPct >= 0.95 ? "held" : `${Math.round(c.heldPct * 100)}% · ${(c.meanDist * 100).toFixed(0)}cm`}
+              bad={c.heldPct < 0.95} />
+          ))}
+        </dl>
+      )}
       {clip && (
         <div className="mt-1.5 border-t border-[var(--hairline)] pt-1.5 text-[10px] text-[var(--muted)]">
           peak <span className="font-mono text-slate-300">{clip.peak.toFixed(2)} m</span> ·
