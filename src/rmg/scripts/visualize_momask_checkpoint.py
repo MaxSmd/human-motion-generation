@@ -35,12 +35,14 @@ def parse_args() -> argparse.Namespace:
             "compare",
             "vq_compare",
             "diagnostic",
+            "trajectory_diagnostic",
         ],
         default="generated",
         help=(
             "What to render. 'compare' shows real | reconstruction | generated; "
             "'vq_compare' shows real | reconstruction; "
-            "'diagnostic' also shows base-only and true-base/generated-residual."
+            "'diagnostic' also shows base-only and true-base/generated-residual; "
+            "'trajectory_diagnostic' compares generated motion before/after removing root XZ velocity."
         ),
     )
     return p.parse_args()
@@ -84,6 +86,13 @@ def _motion_from_checkpoint(ckpt: dict, key: str) -> torch.Tensor:
     return motion
 
 
+def _without_root_xz_velocity(motion: torch.Tensor) -> torch.Tensor:
+    """Keep pose/root height/rotation, but remove global XZ trajectory drift."""
+    out = motion.clone()
+    out[..., 1:3] = 0
+    return out
+
+
 def main() -> None:
     args = parse_args()
     ckpt_path = Path(args.checkpoint)
@@ -100,7 +109,7 @@ def main() -> None:
     }
     first_key = (
         "sample_generated"
-        if args.view in {"compare", "diagnostic"}
+        if args.view in {"compare", "diagnostic", "trajectory_diagnostic"}
         else "sample_real" if args.view == "vq_compare"
         else key_by_view[args.view]
     )
@@ -131,6 +140,16 @@ def main() -> None:
             ("base only", _motion_from_checkpoint(ckpt, "sample_base_only")),
             ("true base + generated residual", _motion_from_checkpoint(ckpt, "sample_teacher_residual")),
             ("generated", _motion_from_checkpoint(ckpt, "sample_generated")),
+        ]
+    elif args.view == "trajectory_diagnostic":
+        generated = _motion_from_checkpoint(ckpt, "sample_generated")
+        teacher_residual = _motion_from_checkpoint(ckpt, "sample_teacher_residual")
+        series = [
+            ("real", _motion_from_checkpoint(ckpt, "sample_real")),
+            ("reconstruction", _motion_from_checkpoint(ckpt, "sample_reconstruction")),
+            ("generated", generated),
+            ("generated in-place", _without_root_xz_velocity(generated)),
+            ("true base + residual in-place", _without_root_xz_velocity(teacher_residual)),
         ]
     else:
         series = [(args.view, motion)]
