@@ -113,16 +113,26 @@ def main(cfg: DictConfig) -> None:
         with amp_ctx:
             loss_amp, info = trainer.compute_loss(model, x1, cond=cond, mask=mask)
         loss_amp.backward()
-        gn_amp = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        # Grad report BEFORE clip — clip_grad_norm_ zeros grads when the norm is
+        # inf, which would hide the offending layer.
         norm_amp, bad_amp = _grad_report(model)
+        gn_amp = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
 
         # --- rerun the identical step in fp32 (no autocast) ---
         torch.manual_seed(1000 + i)
         opt.zero_grad(set_to_none=True)
         loss_fp32, _ = trainer.compute_loss(model, x1, cond=cond, mask=mask)
         loss_fp32.backward()
-        gn_fp32 = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         norm_fp32, bad_fp32 = _grad_report(model)
+        gn_fp32 = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+
+        # --- isolate the masking hypothesis: rerun fp32 with NO attention mask ---
+        torch.manual_seed(1000 + i)
+        opt.zero_grad(set_to_none=True)
+        loss_nomask, _ = trainer.compute_loss(model, x1, cond=cond, mask=None)
+        loss_nomask.backward()
+        _, bad_nomask = _grad_report(model)
+        has_pad = bool((~mask).any())
 
         # --- input-side diagnostics (recompute target & x_t for this batch) ---
         with torch.no_grad():
@@ -136,16 +146,12 @@ def main(cfg: DictConfig) -> None:
 
         print(
             f"[grad-probe] step {i:2d}  "
-            f"loss(amp)={float(loss_amp):.3f} loss(fp32)={float(loss_fp32):.3f}  "
+            f"loss={float(loss_fp32):.3f}  "
             f"gradnorm(amp)={float(gn_amp):.3e} gradnorm(fp32)={float(gn_fp32):.3e}  "
-            f"amp_finite={not bad_amp} fp32_finite={not bad_fp32}  "
-            f"target_max={tgt_max:.3f} x_t_on_manifold={onman:.3f}",
+            f"grad_finite: amp={not bad_amp} fp32={not bad_fp32} no_mask={not bad_nomask}  "
+            f"has_pad={has_pad}  target_max={tgt_max:.3f} x_t_on_M={onman:.3f}",
             flush=True,
         )
-        if bad_amp:
-            print(f"    amp non-finite grads in: {bad_amp[:6]}"
-                  f"{' …' if len(bad_amp) > 6 else ''} ({len(bad_amp)} total)",
-                  flush=True)
         if bad_fp32:
             print(f"    fp32 non-finite grads in: {bad_fp32[:6]}"
                   f"{' …' if len(bad_fp32) > 6 else ''} ({len(bad_fp32)} total)",
