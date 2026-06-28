@@ -56,7 +56,7 @@ export default function ClusterTab({ status }) {
 
       <TrainingProgress jobs={jobs} onChange={refresh} />
       <Jobs jobs={jobs} onChange={refresh} />
-      <Queue squeue={squeue} onChange={refresh} />
+      <Queue squeue={squeue} jobs={jobs} onChange={refresh} />
     </div>
   );
 }
@@ -72,12 +72,10 @@ function Readout({ k, v }) {
 
 // ─────────────────────────────────────────────────────────── remote squeue
 
-function Queue({ squeue, onChange }) {
-  async function cancel(id) {
-    if (!confirm(`scancel job ${id}?`)) return;
-    await api.clusterCancel(id);
-    onChange();
-  }
+function Queue({ squeue, jobs, onChange }) {
+  // slurm ids the app already tracks (any live state) — those rows can't be
+  // adopted again, so we hide the adopt affordance for them.
+  const tracked = new Set((jobs || []).filter((j) => j.slurm_id && LIVE.has(j.state)).map((j) => j.slurm_id));
   return (
     <div className="surface p-5">
       <div className="label mb-3">squeue · --me ({squeue.length})</div>
@@ -91,19 +89,122 @@ function Queue({ squeue, onChange }) {
             </thead>
             <tbody>
               {squeue.map((r) => (
-                <tr key={r.jobid} className="border-t border-[var(--hairline)]">
-                  <td className="py-1.5 pr-3 text-[var(--signal)]">{r.jobid}</td>
-                  <td className="py-1.5 pr-3 text-slate-300">{r.name}</td>
-                  <td className="py-1.5 pr-3">{r.state}</td>
-                  <td className="py-1.5 pr-3 text-slate-400">{r.time}</td>
-                  <td className="py-1.5 pr-3 text-slate-500">{r.nodes || r.reason}</td>
-                  <td className="py-1.5"><button onClick={() => cancel(r.jobid)} className="rounded border border-rose-500/40 px-2 py-0.5 text-[10px] text-rose-300 hover:bg-rose-500/10">cancel</button></td>
-                </tr>
+                <QueueRow key={r.jobid} row={r} tracked={tracked.has(r.jobid)} onChange={onChange} />
               ))}
             </tbody>
           </table>
         </div>
       )}
+    </div>
+  );
+}
+
+function QueueRow({ row: r, tracked, onChange }) {
+  const [adopting, setAdopting] = useState(false);
+  async function cancel() {
+    if (!confirm(`scancel job ${r.jobid}?`)) return;
+    await api.clusterCancel(r.jobid);
+    onChange();
+  }
+  return (
+    <>
+      <tr className="border-t border-[var(--hairline)]">
+        <td className="py-1.5 pr-3 text-[var(--signal)]">{r.jobid}</td>
+        <td className="py-1.5 pr-3 text-slate-300">{r.name}</td>
+        <td className="py-1.5 pr-3">{r.state}</td>
+        <td className="py-1.5 pr-3 text-slate-400">{r.time}</td>
+        <td className="py-1.5 pr-3 text-slate-500">{r.nodes || r.reason}</td>
+        <td className="py-1.5">
+          <span className="flex items-center justify-end gap-2">
+            {tracked ? (
+              <span className="text-[10px] text-[var(--muted)]" title="already tracked by the app">tracked</span>
+            ) : (
+              <button onClick={() => setAdopting((a) => !a)}
+                className={`rounded border px-2 py-0.5 text-[10px] transition ${adopting ? "border-[var(--signal)] text-[var(--signal)]" : "border-[var(--hairline-strong)] text-slate-300 hover:border-[var(--signal)]"}`}
+                title="track this run for live progress + walltime auto-resubmit">
+                {adopting ? "close" : "adopt"}
+              </button>
+            )}
+            <button onClick={cancel} className="rounded border border-rose-500/40 px-2 py-0.5 text-[10px] text-rose-300 hover:bg-rose-500/10">cancel</button>
+          </span>
+        </td>
+      </tr>
+      {adopting && (
+        <tr className="border-t border-[var(--hairline)]/40">
+          <td colSpan={6} className="py-2">
+            <AdoptForm jobid={r.jobid} guessName={r.name} onDone={() => { setAdopting(false); onChange(); }} />
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
+// Adopt a train job that's already on the cluster (e.g. a raw `sbatch`) into the
+// app registry so it gets the live progress panel + walltime auto-resubmit. The
+// run_name is REQUIRED (it locates the run dir + is what a resubmit resumes); the
+// presets/max_steps let a resubmit rebuild the same launch command. Assumes the
+// run used the standard slurm/rmg/train.sbatch layout.
+function AdoptForm({ jobid, guessName, onDone }) {
+  const [runName, setRunName] = useState("");
+  const [modelPreset, setModelPreset] = useState("dit_base");
+  const [trainPreset, setTrainPreset] = useState("rmg_base");
+  const [maxSteps, setMaxSteps] = useState("");
+  const [autoResubmit, setAutoResubmit] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+
+  async function submit() {
+    if (!runName.trim()) { setErr("run_name is required"); return; }
+    setBusy(true); setErr(null);
+    try {
+      await api.adoptJob({
+        slurm_id: jobid,
+        run_name: runName.trim(),
+        model_preset: modelPreset,
+        train_preset: trainPreset,
+        max_steps: maxSteps ? Number(maxSteps) : null,
+        auto_resubmit: autoResubmit,
+      });
+      onDone();
+    } catch (e) { setErr(e.message); }
+    finally { setBusy(false); }
+  }
+
+  const field = "rounded border border-[var(--hairline)] bg-ink px-2 py-1 text-[11px] text-slate-200";
+  return (
+    <div className="space-y-2 rounded-lg border border-[var(--hairline)] bg-ink p-3">
+      <p className="text-[11px] text-[var(--muted)]">
+        Adopt slurm <span className="font-mono text-[var(--signal)]">#{jobid}</span> as a tracked train run.
+        Enter its <span className="font-mono">RUN_NAME</span> (the run dir under <span className="font-mono">runs/&lt;model&gt;/train</span>) and the presets it was launched with —
+        a resubmit will resume the same run from latest.pt.
+      </p>
+      <div className="flex flex-wrap items-end gap-2 font-mono">
+        <label className="flex flex-col gap-0.5">
+          <span className="label">run_name *</span>
+          <input value={runName} onChange={(e) => setRunName(e.target.value)} placeholder={guessName || "rmg-mid-…"} className={`${field} w-56`} />
+        </label>
+        <label className="flex flex-col gap-0.5">
+          <span className="label">model_preset</span>
+          <input value={modelPreset} onChange={(e) => setModelPreset(e.target.value)} className={`${field} w-32`} />
+        </label>
+        <label className="flex flex-col gap-0.5">
+          <span className="label">train_preset</span>
+          <input value={trainPreset} onChange={(e) => setTrainPreset(e.target.value)} className={`${field} w-32`} />
+        </label>
+        <label className="flex flex-col gap-0.5">
+          <span className="label">max_steps</span>
+          <input value={maxSteps} onChange={(e) => setMaxSteps(e.target.value)} placeholder="from config" className={`${field} w-28`} />
+        </label>
+        <label className="flex items-center gap-1.5 pb-1.5 text-[11px] text-slate-300">
+          <input type="checkbox" checked={autoResubmit} onChange={(e) => setAutoResubmit(e.target.checked)} />
+          auto-resubmit
+        </label>
+        <button onClick={submit} disabled={busy} className="btn-signal px-3 py-1 text-[11px] disabled:opacity-40">
+          {busy ? "adopting…" : "adopt"}
+        </button>
+      </div>
+      {err && <p className="text-[11px] text-rose-300">⚠ {err}</p>}
     </div>
   );
 }

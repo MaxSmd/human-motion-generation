@@ -205,6 +205,43 @@ class EvalRequest(BaseModel):
     ae_checkpoint: str | None = None     # MARDM-only: the stage-1 AE checkpoint
 
 
+class AdoptRequest(TrainRequest):
+    """Adopt an already-running cluster train job into the registry. Reuses the
+    train knobs (so a resubmit rebuilds the right command) but `slurm_id` and
+    `run_name` are REQUIRED here — the slurm id identifies the live job and the
+    run name locates its progress + is what a resume picks up from latest.pt."""
+
+    slurm_id: str
+    run_name: str
+
+
+@router.get("/jobs/adoptable")
+def adoptable_jobs() -> list[dict]:
+    """Live cluster jobs (squeue --me) the app is NOT already tracking — candidates
+    to adopt (e.g. a train run launched by a raw `sbatch` outside the app)."""
+    _require_online()
+    tracked = {
+        j.slurm_id for j in jobsmod.get_manager().list()
+        if j.slurm_id and j.state in jobsmod._ACTIVE
+    }
+    return [r for r in squeuemod.squeue_me() if r["jobid"] not in tracked]
+
+
+@router.post("/jobs/adopt")
+def adopt_job(req: AdoptRequest) -> dict:
+    """Adopt an already-running cluster train job (raw `sbatch`) into the registry
+    so it gets the live progress panel + walltime auto-resubmit."""
+    _require_online()
+    params = req.model_dump(exclude={"slurm_id"})
+    try:
+        job = jobsmod.get_manager().adopt(
+            req.slurm_id, params, auto_resubmit=req.auto_resubmit
+        )
+    except (KeyError, ValueError) as e:
+        raise HTTPException(400, str(e)) from e
+    return job.to_dict()
+
+
 @router.get("/queue")
 def queue_summary() -> dict:
     """Cheap, SSH-free busy/queue snapshot for the global indicator (telemetry)."""

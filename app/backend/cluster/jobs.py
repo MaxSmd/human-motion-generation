@@ -172,6 +172,76 @@ class JobManager:
         self._maybe_start_next()
         return job
 
+    def adopt(self, slurm_id: str, params: dict, auto_resubmit: bool = True) -> ClusterJob:
+        """Adopt a train job ALREADY running on the cluster (launched outside the
+        app — e.g. a raw `sbatch`) into the registry so it gets the live progress
+        panel and walltime auto-resubmit. We rebuild the train script/env from
+        `params` exactly as `enqueue` would, so a later resubmit resumes the SAME
+        run from latest.pt. `params` MUST carry the run's `run_name` (it locates
+        the run dir for progress markers and is what train.py resumes). Assumes the
+        run was launched with the standard `slurm/rmg/train.sbatch` layout
+        (RUNS_ROOT = <runs>/<model>/train), where progress + resumes live.
+        Raises ValueError on bad input / state conflicts (→ 400)."""
+        import secrets
+        slurm_id = str(slurm_id).strip()
+        if not slurm_id.isdigit():
+            raise ValueError("slurm_id must be numeric")
+        if not params.get("run_name"):
+            raise ValueError(
+                "run_name is required to adopt a train job — it locates the run's "
+                "progress markers and is what a resubmit resumes from latest.pt"
+            )
+        with self._lock:
+            dup = next(
+                (j for j in self._jobs.values()
+                 if j.slurm_id == slurm_id and j.state in _ACTIVE),
+                None,
+            )
+            if dup is not None:
+                raise ValueError(f"slurm job {slurm_id} is already tracked (job {dup.id})")
+            other = next((j for j in self._jobs.values() if j.state in _ON_CLUSTER), None)
+        if other is not None:
+            raise ValueError(
+                f"already tracking an on-cluster job ({other.id}, "
+                f"{other.run_name or other.kind}); the cluster runs one job at a "
+                "time — cancel or pause it before adopting another"
+            )
+        # Rebuild the train job exactly as enqueue would so a resubmit reproduces
+        # the right command (same run_name → resume from latest.pt).
+        builder = submit.builder_for(cfgmod.cluster_model(), "train")
+        script, env, job_name, run_name = builder(params)
+        sbatch_flags = submit.sbatch_flags_for_train(params)
+        # Map the job's CURRENT cluster state into our state machine (sacct, with a
+        # squeue fallback for a freshly-queued job sacct has no record of yet).
+        raw = squeue.sacct_state(slurm_id)
+        if not raw:
+            raw = next(
+                (r["state"] for r in squeue.squeue_me() if r["jobid"] == slurm_id),
+                None,
+            )
+        st = (raw or "").upper().split()[0] if raw else ""
+        if st in _SLURM_RUNNING:
+            state = "running"
+        elif st in _SLURM_PENDING:
+            state = "pending"
+        else:
+            raise ValueError(
+                f"slurm job {slurm_id} is not running/pending (state={raw or 'unknown'}); "
+                "only a live job can be adopted"
+            )
+        job = ClusterJob(
+            id=secrets.token_hex(6), kind="train", mode="",
+            slurm_id=slurm_id, run_name=run_name, job_name=job_name,
+            params=params, script=script, env=env,
+            command=submit.render_command(script, env, job_name, sbatch_flags),
+            sbatch_flags=sbatch_flags, auto_resubmit=auto_resubmit,
+            state=state, submitted_at=time.time(), updated_at=time.time(),
+        )
+        with self._lock:
+            self._jobs[job.id] = job
+        self._save()
+        return job
+
     def _maybe_start_next(self) -> None:
         """If the cluster slot is free, sbatch the oldest queued job. Claims the job
         under the lock (→ 'submitting') so concurrent callers can't double-start."""
