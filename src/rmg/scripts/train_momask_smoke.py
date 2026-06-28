@@ -48,6 +48,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--vq-steps", type=int, default=30)
     p.add_argument("--token-steps", type=int, default=20)
     p.add_argument("--vq-only", action="store_true", help="Train/evaluate only the VQ-VAE tokenizer, then save.")
+    p.add_argument(
+        "--load-vq-checkpoint",
+        default=None,
+        help="Load a pretrained VQ-VAE checkpoint and train/evaluate token transformers from it.",
+    )
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--weight-decay", type=float, default=0.0)
     p.add_argument("--seed", type=int, default=0)
@@ -154,6 +159,38 @@ class H3DNormalizer:
 
     def state_dict(self) -> dict[str, torch.Tensor]:
         return {"mean": self.mean.cpu(), "std": self.std.cpu()}
+
+    @classmethod
+    def from_state_dict(cls, state: dict[str, torch.Tensor]) -> "H3DNormalizer":
+        return cls(state["mean"], state["std"])
+
+
+def torch_load(path: str | Path, map_location: str | torch.device = "cpu") -> dict:
+    try:
+        return torch.load(path, map_location=map_location, weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location=map_location)
+
+
+def restore_vq_args(args: argparse.Namespace, ckpt: dict) -> None:
+    saved_args = ckpt.get("args", {})
+    if not isinstance(saved_args, dict):
+        return
+    for name in (
+        "vq_hidden_dim",
+        "vq_latent_dim",
+        "num_quantizers",
+        "codebook_size",
+        "downsample",
+        "vq_res_blocks",
+        "vq_commitment_weight",
+        "quantize_dropout",
+        "vq_velocity_weight",
+        "no_momask_normalize",
+        "feat_bias",
+    ):
+        if name in saved_args:
+            setattr(args, name, saved_args[name])
 
 
 def masked_mae(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -372,6 +409,11 @@ def main() -> None:
     device = torch.device(args.device)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    loaded_vq_ckpt = torch_load(args.load_vq_checkpoint) if args.load_vq_checkpoint else None
+    if loaded_vq_ckpt is not None:
+        restore_vq_args(args, loaded_vq_ckpt)
+    if args.vq_steps <= 0 and loaded_vq_ckpt is None:
+        raise ValueError("--vq-steps must be positive unless --load-vq-checkpoint is set")
 
     ds = HumanML3DDataset(
         root=Path(args.data_root),
@@ -385,11 +427,14 @@ def main() -> None:
     if n <= 0:
         raise RuntimeError(f"no clips available in split={args.split!r}")
     small = Subset(ds, list(range(n)))
-    normalizer = (
-        H3DNormalizer.identity()
-        if args.no_momask_normalize
-        else H3DNormalizer.from_dataset(small, feat_bias=args.feat_bias)
-    )
+    if loaded_vq_ckpt is not None and "normalizer" in loaded_vq_ckpt:
+        normalizer = H3DNormalizer.from_state_dict(loaded_vq_ckpt["normalizer"])
+    else:
+        normalizer = (
+            H3DNormalizer.identity()
+            if args.no_momask_normalize
+            else H3DNormalizer.from_dataset(small, feat_bias=args.feat_bias)
+        )
     loader = DataLoader(small, batch_size=args.batch_size, shuffle=True, collate_fn=collate, num_workers=0)
     batches = cycle(loader)
 
@@ -400,6 +445,8 @@ def main() -> None:
         "[momask-smoke] momask_normalize="
         f"{not args.no_momask_normalize} feat_bias={args.feat_bias:.2f}"
     )
+    if args.load_vq_checkpoint:
+        print(f"[momask-smoke] load_vq_checkpoint={args.load_vq_checkpoint}")
 
     vqvae = MotionRVQVAE(
         input_dim=H3D_FEATURE_DIM,
@@ -414,6 +461,16 @@ def main() -> None:
         velocity_loss_weight=args.vq_velocity_weight,
     ).to(device)
     vq_opt = torch.optim.AdamW(vqvae.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    if loaded_vq_ckpt is not None:
+        vqvae.load_state_dict(loaded_vq_ckpt["vqvae"])
+        if "vq_optimizer" in loaded_vq_ckpt and args.vq_steps > 0:
+            vq_opt.load_state_dict(loaded_vq_ckpt["vq_optimizer"])
+        print(
+            "[momask-smoke] restored VQ "
+            f"quantizers={args.num_quantizers} codebook={args.codebook_size} "
+            f"hidden={args.vq_hidden_dim} latent={args.vq_latent_dim}",
+            flush=True,
+        )
 
     first_recon = None
     for step in range(1, args.vq_steps + 1):
@@ -450,7 +507,7 @@ def main() -> None:
         raw_recon = normalizer.inverse(recon)
         eval_token_mask = token_mask_from_frame_mask(eval_mask, tokens.shape[-1])
     print(
-        f"[vq summary] first_train_recon_mae={first_recon:.5f} "
+        f"[vq summary] first_train_recon_mae={(first_recon if first_recon is not None else float('nan')):.5f} "
         f"eval_recon_mae={vq_eval['recon_mae']:.5f} "
         f"eval_raw_recon_mae={vq_eval['raw_recon_mae']:.5f} "
         f"eval_vel={vq_eval['velocity_loss']:.5f} "
