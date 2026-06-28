@@ -71,6 +71,25 @@ def count_bad(d):
     bad = sum(1 for v in floats if not torch.isfinite(v).all())
     return bad, len(floats)
 
+def magnitudes(d):
+    # Max |w| over all params, and the name of the largest-magnitude tensor.
+    # Growing max|w| across steps == the model is diverging (weights exploding).
+    if not d:
+        return 0.0, 0.0, "-"
+    mx, mx_name, ssum, scount = 0.0, "-", 0.0, 0
+    for k, v in d.items():
+        if not (torch.is_tensor(v) and torch.is_floating_point(v)):
+            continue
+        finite = v[torch.isfinite(v)]
+        if finite.numel() == 0:
+            return float("inf"), float("inf"), k
+        m = finite.abs().max().item()
+        if m > mx:
+            mx, mx_name = m, k
+        ssum += finite.abs().sum().item()
+        scount += finite.numel()
+    return mx, (ssum / max(scount, 1)), mx_name
+
 print(f"[ckpt-health] scanning {len(paths)} checkpoint(s)", flush=True)
 for path in paths:
     p = torch.load(path, map_location="cpu", weights_only=False)
@@ -83,9 +102,11 @@ for path in paths:
     if opt and "state" in opt:
         exp = {i: s["exp_avg"] for i, s in opt["state"].items() if "exp_avg" in s}
         ob, ot = count_bad(exp)
+    mx, mean_abs, mx_name = magnitudes(p.get("model"))
     tag = "OK " if (mb == 0 and eb == 0) else "BAD"
     print(f"[ckpt-health] {tag} step={step} {os.path.basename(path)} "
-          f"model={mb}/{mt} ema={eb}/{et} opt_exp_avg={ob}/{ot}", flush=True)
+          f"model={mb}/{mt} ema={eb}/{et} opt_exp_avg={ob}/{ot} "
+          f"max|w|={mx:.3g} mean|w|={mean_abs:.3g} @{mx_name}", flush=True)
     del p
 PY
     '
