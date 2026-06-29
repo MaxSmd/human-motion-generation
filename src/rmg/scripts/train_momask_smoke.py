@@ -47,11 +47,22 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--min-seq-len", type=int, default=20)
     p.add_argument("--vq-steps", type=int, default=30)
     p.add_argument("--token-steps", type=int, default=20)
+    p.add_argument(
+        "--token-batch-size",
+        type=int,
+        default=None,
+        help="Batch size for token-transformer training after VQ tokens are cached. Defaults to --batch-size.",
+    )
     p.add_argument("--vq-only", action="store_true", help="Train/evaluate only the VQ-VAE tokenizer, then save.")
     p.add_argument(
         "--load-vq-checkpoint",
         default=None,
         help="Load a pretrained VQ-VAE checkpoint and train/evaluate token transformers from it.",
+    )
+    p.add_argument(
+        "--load-token-checkpoint",
+        default=None,
+        help="Resume token-transformer training from a periodic token checkpoint.",
     )
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--weight-decay", type=float, default=0.0)
@@ -112,6 +123,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--shared-residual-head", action="store_true")
     p.add_argument("--live-token-crops", action="store_true",
                    help="Train token models from the live dataset instead of cached fixed VQ tokens.")
+    p.add_argument(
+        "--cache-token-device",
+        choices=["cpu", "cuda"],
+        default="cpu",
+        help="Where to keep cached VQ tokens for token-transformer training.",
+    )
     return p.parse_args()
 
 
@@ -172,7 +189,7 @@ def torch_load(path: str | Path, map_location: str | torch.device = "cpu") -> di
         return torch.load(path, map_location=map_location)
 
 
-def restore_vq_args(args: argparse.Namespace, ckpt: dict) -> None:
+def restore_model_args(args: argparse.Namespace, ckpt: dict) -> None:
     saved_args = ckpt.get("args", {})
     if not isinstance(saved_args, dict):
         return
@@ -188,6 +205,13 @@ def restore_vq_args(args: argparse.Namespace, ckpt: dict) -> None:
         "vq_velocity_weight",
         "no_momask_normalize",
         "feat_bias",
+        "text_dim",
+        "transformer_hidden_dim",
+        "transformer_depth",
+        "transformer_heads",
+        "transformer_ffn_dim",
+        "transformer_dropout",
+        "shared_residual_head",
     ):
         if name in saved_args:
             setattr(args, name, saved_args[name])
@@ -378,6 +402,23 @@ def cycle_cached(cached_batches: list[dict[str, torch.Tensor | list[str]]]):
             yield batch
 
 
+def stack_token_cache(
+    cached_batches: list[dict[str, torch.Tensor | list[str]]],
+    device: torch.device,
+) -> dict[str, torch.Tensor]:
+    return {
+        "tokens": torch.cat([batch["tokens"] for batch in cached_batches], dim=0).to(device),  # type: ignore[list-item]
+        "token_mask": torch.cat([batch["token_mask"] for batch in cached_batches], dim=0).to(device),  # type: ignore[list-item]
+        "cond": torch.cat([batch["cond"] for batch in cached_batches], dim=0).to(device),  # type: ignore[list-item]
+    }
+
+
+def sample_token_cache(cache: dict[str, torch.Tensor], batch_size: int) -> dict[str, torch.Tensor]:
+    n = cache["tokens"].shape[0]
+    idx = torch.randint(n, (batch_size,), device=cache["tokens"].device)
+    return {key: value[idx] for key, value in cache.items()}
+
+
 def save_vq_train_checkpoint(
     output_dir: Path,
     step: int,
@@ -409,11 +450,16 @@ def main() -> None:
     device = torch.device(args.device)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    loaded_vq_ckpt = torch_load(args.load_vq_checkpoint) if args.load_vq_checkpoint else None
+    loaded_token_ckpt = torch_load(args.load_token_checkpoint) if args.load_token_checkpoint else None
+    loaded_vq_ckpt = (
+        loaded_token_ckpt
+        if loaded_token_ckpt is not None
+        else torch_load(args.load_vq_checkpoint) if args.load_vq_checkpoint else None
+    )
     if loaded_vq_ckpt is not None:
-        restore_vq_args(args, loaded_vq_ckpt)
+        restore_model_args(args, loaded_vq_ckpt)
     if args.vq_steps <= 0 and loaded_vq_ckpt is None:
-        raise ValueError("--vq-steps must be positive unless --load-vq-checkpoint is set")
+        raise ValueError("--vq-steps must be positive unless --load-vq-checkpoint or --load-token-checkpoint is set")
 
     ds = HumanML3DDataset(
         root=Path(args.data_root),
@@ -447,6 +493,8 @@ def main() -> None:
     )
     if args.load_vq_checkpoint:
         print(f"[momask-smoke] load_vq_checkpoint={args.load_vq_checkpoint}")
+    if args.load_token_checkpoint:
+        print(f"[momask-smoke] load_token_checkpoint={args.load_token_checkpoint}")
 
     vqvae = MotionRVQVAE(
         input_dim=H3D_FEATURE_DIM,
@@ -540,12 +588,20 @@ def main() -> None:
 
     text_encoder = RandomTextEncoder(text_dim=args.text_dim)
     cached_batches = cache_token_batches(vqvae, text_encoder, loader, device, normalizer)
-    cached_iter = cycle_cached(cached_batches)
+    token_batch_size = args.token_batch_size or args.batch_size
+    token_cache = None
     if args.live_token_crops:
         print("[token data] live random crops from dataset")
     else:
         n_cached = sum(int(batch["tokens"].shape[0]) for batch in cached_batches)  # type: ignore[index, union-attr]
-        print(f"[token data] cached fixed VQ tokens batches={len(cached_batches)} samples={n_cached}")
+        cache_device = device if args.cache_token_device == "cuda" else torch.device("cpu")
+        if cache_device.type == "cuda" and device.type != "cuda":
+            raise ValueError("--cache-token-device cuda requires --device cuda")
+        token_cache = stack_token_cache(cached_batches, cache_device)
+        print(
+            f"[token data] cached fixed VQ tokens batches={len(cached_batches)} "
+            f"samples={n_cached} train_batch={token_batch_size} cache_device={cache_device}"
+        )
 
     cfg = TokenTransformerConfig(
         vocab_size=args.codebook_size,
@@ -568,9 +624,21 @@ def main() -> None:
         lr=args.lr,
         weight_decay=args.weight_decay,
     )
+    start_token_step = 0
+    if loaded_token_ckpt is not None:
+        masked_model.load_state_dict(loaded_token_ckpt["masked_transformer"])
+        residual_model.load_state_dict(loaded_token_ckpt["residual_transformer"])
+        if "token_optimizer" in loaded_token_ckpt:
+            token_opt.load_state_dict(loaded_token_ckpt["token_optimizer"])
+        start_token_step = int(loaded_token_ckpt.get("step", 0))
+        print(
+            f"[momask-smoke] restored token transformers from step={start_token_step} "
+            f"target_steps={args.token_steps}",
+            flush=True,
+        )
 
     vqvae.eval()
-    for step in range(1, args.token_steps + 1):
+    for step in range(start_token_step + 1, args.token_steps + 1):
         if args.live_token_crops:
             batch = next(batches)
             x = normalizer.transform(batch.x1.to(device))
@@ -580,10 +648,12 @@ def main() -> None:
                 tok = vqvae.encode_to_tokens(x)
             token_mask = token_mask_from_frame_mask(mask, tok.shape[-1])
         else:
-            cached = next(cached_iter)
-            tok = cached["tokens"].to(device)  # type: ignore[index, union-attr]
-            token_mask = cached["token_mask"].to(device)  # type: ignore[index, union-attr]
-            cond = cached["cond"].to(device)  # type: ignore[index, union-attr]
+            if token_cache is None:
+                raise RuntimeError("token cache was not built")
+            cached = sample_token_cache(token_cache, token_batch_size)
+            tok = cached["tokens"].to(device, non_blocking=True)
+            token_mask = cached["token_mask"].to(device, non_blocking=True)
+            cond = cached["cond"].to(device, non_blocking=True)
 
         with torch.no_grad():
             tok = tok.long()
@@ -622,6 +692,24 @@ def main() -> None:
                 f"base_ce={base_loss.item():.5f} residual_ce={res_loss.item():.5f} {res_levels}",
                 flush=True,
             )
+        if args.save_every > 0 and step % args.save_every == 0:
+            ckpt_dir = output_dir / "checkpoints"
+            ckpt_dir.mkdir(parents=True, exist_ok=True)
+            step_path = ckpt_dir / f"tokens_step_{step:07d}.pt"
+            latest_path = ckpt_dir / "tokens_latest_train.pt"
+            ckpt = {
+                "step": step,
+                "args": vars(args),
+                "normalizer": normalizer.state_dict(),
+                "vqvae": vqvae.state_dict(),
+                "masked_transformer": masked_model.state_dict(),
+                "residual_transformer": residual_model.state_dict(),
+                "vq_optimizer": vq_opt.state_dict(),
+                "token_optimizer": token_opt.state_dict(),
+            }
+            torch.save(ckpt, step_path)
+            torch.save(ckpt, latest_path)
+            print(f"[save] {step_path}", flush=True)
 
     token_eval = evaluate_tokens(
         masked_model,
