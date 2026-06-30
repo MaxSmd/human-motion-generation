@@ -1,18 +1,19 @@
 # Top-level Hydra config for `python scripts/train.py`.
 #
-# Compose with model + data + train sub-configs:
-#   python scripts/train.py +model=dit_base +train=rmg_base
+# Defaults to the rmg-mid model (≈112M, dit_mid + rmg_mid); override on the CLI
+# for other sizes:
+#   python scripts/train.py model=dit_base train=rmg_base
 #
 # Override any leaf value at the CLI:
-#   python scripts/train.py +model=dit_base +train=rmg_base train.max_steps=10
+#   python scripts/train.py train.max_steps=10
 #
 # Switch data layout once AMASS lands on the cluster:
-#   python scripts/train.py +data=cluster_mounted ...
+#   python scripts/train.py data=cluster_mounted ...
 
 defaults:
   - data: local_submodule
-  - model: dit_base
-  - train: rmg_base
+  - model: dit_mid
+  - train: rmg_mid
   - representation: t_plus_r
   - _self_
 

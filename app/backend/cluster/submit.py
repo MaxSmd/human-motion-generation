@@ -168,12 +168,12 @@ def build_viz(params: dict) -> tuple[str, dict[str, str], str, str]:
 def build_train(params: dict) -> tuple[str, dict[str, str], str, str]:
     """All training config is reachable: structured knobs become Hydra OVERRIDES,
     plus a free-form `overrides` string for anything not surfaced in the form."""
-    run_name = params.get("run_name") or _run_name("train", params.get("train_preset", "rmg_base"))
+    run_name = params.get("run_name") or _run_name("train", params.get("train_preset", "rmg_mid"))
     env: dict[str, str] = {
         "RUN_NAME": run_name,
         "RUNS_ROOT": _runs_root("train"),
-        "MODEL_PRESET": params.get("model_preset", "dit_base"),
-        "PRESET": params.get("train_preset", "rmg_base"),
+        "MODEL_PRESET": params.get("model_preset", "dit_mid"),
+        "PRESET": params.get("train_preset", "rmg_mid"),
     }
     ov = _overrides([
         ("data.subset_n", params.get("subset_n")),
@@ -206,8 +206,8 @@ def build_eval(params: dict) -> tuple[str, dict[str, str], str, str]:
         "CKPT": params["checkpoint"],
         "RUN_NAME": run_name,
         "RUNS_ROOT": _runs_root("eval"),
-        "MODEL_PRESET": params.get("model_preset", "dit_base"),
-        "PRESET": params.get("train_preset", "rmg_base"),
+        "MODEL_PRESET": params.get("model_preset", "dit_mid"),
+        "PRESET": params.get("train_preset", "rmg_mid"),
     }
     for key, env_name in [
         ("eval_split", "EVAL_SPLIT"), ("max_clips", "MAX_CLIPS"),

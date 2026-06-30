@@ -25,7 +25,7 @@ import torch
 from torch import Tensor
 from torch.utils.data import Dataset
 
-from shared.geometry import Skeleton, make_continuous, normalize_quaternions
+from shared.geometry import Skeleton, normalize_quaternions
 
 # SMPL 22-joint left/right pairs (HumanML3D-standard mirror).
 LR_PAIRS: tuple[tuple[int, int], ...] = (
@@ -142,8 +142,9 @@ class HumanML3DSample:
 class HumanML3DDataset(Dataset):
     """Packed HumanML3D loader, parameterised by a `ClipRepresentation`.
 
-    Reads packed clips, applies the standard normalize + temporal sign-continuity
-    pass, then delegates the model-specific encoding to `representation.encode_clip`.
+    Reads packed clips, restricts quaternions to the upper hemisphere (q_w >= 0,
+    per the paper's dataset construction), then delegates the model-specific
+    encoding to `representation.encode_clip`.
     `representation` is required here; model packages provide a thin subclass that
     defaults it (e.g. `rmg.data.HumanML3DDataset` → T+R).
     """
@@ -272,8 +273,20 @@ class HumanML3DDataset(Dataset):
 
         # Normalize + temporal sign continuity, then encode via the chosen
         # representation (rmg T+R main result; mardm essential; …).
+        # Global upper-hemisphere restriction (q_w >= 0), per the paper's dataset
+        # construction: "we restrict quaternions to the upper hemisphere of S^3
+        # ... for any q=(w,x,y,z), q_0 > 0". normalize_quaternions already does
+        # this. We deliberately do NOT apply temporal sign-continuity afterwards:
+        # each frame's quaternion is an *independent* flow-matching token,
+        # interpolated along a geodesic from the prior mean mu=[1,0,0,0] — there
+        # is no geodesic between adjacent frames in the loss, so continuity buys
+        # nothing. Worse, make_continuous propagated sign for smoothness and thus
+        # let near-180deg joint frames settle in the LOWER hemisphere (w<0, i.e.
+        # near -mu), making (x0, x1) near-antipodal -> theta/sin(theta) blows up
+        # to a finite ~7000 target that slips past the non-finite guard and
+        # collapsed training (~46k/49k). q ~ -q is the same rotation, so FK /
+        # 263-D features are identical either way.
         quats = normalize_quaternions(quats)
-        quats = make_continuous(quats, time_dim=0)
         x1 = self.representation.encode_clip(translation, quats, skeleton=self._skeleton)
 
         return HumanML3DSample(x1=x1.float(), text=random.choice(texts), length=T, clip_id=clip_id)
