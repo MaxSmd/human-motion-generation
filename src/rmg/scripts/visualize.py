@@ -75,100 +75,48 @@ from rmg.representation import (  # noqa: E402
 )
 from rmg.representation.tplusr import decode as tplusr_decode  # noqa: E402
 from shared.utils import EMA, load_checkpoint, set_seed  # noqa: E402
+from shared.render import render_joints  # noqa: E402
 
 
-# HumanML3D 22-joint kinematic chains (same as upstream's t2m_kinematic_chain).
-_T2M_CHAINS: tuple[tuple[int, ...], ...] = (
-    (0, 2, 5, 8, 11),       # right leg
-    (0, 1, 4, 7, 10),       # left leg
-    (0, 3, 6, 9, 12, 15),   # spine + head
-    (9, 14, 17, 19, 21),    # right arm
-    (9, 13, 16, 18, 20),    # left arm
-)
+def _render(joints: np.ndarray, save_path: Path, title: str, fps: int,
+            scene: dict | None = None):
+    """Render (T, 22, 3) joint positions via the shared multi-panel animation.
 
+    Delegates the actual drawing to `shared.render.render_joints` (the same
+    renderer the backend uses), which lays out three orthographic panels plus a
+    3-D perspective, draws the optional room/obstacle `scene`, and dumps the raw
+    joints next to the media as `<stem>.npy`. Produces MP4 when a system ffmpeg
+    is present, else a GIF.
 
-def _render(joints: np.ndarray, save_path: Path, title: str, fps: int):
-    """Render (T, 22, 3) joint positions to GIF (via Pillow — no ffmpeg).
-
-    Also dumps the raw joints next to the GIF as `<stem>.npy` so the same
-    motion can be re-rendered to MP4 locally with a system ffmpeg if you want.
-
-    Returns the written GIF `Path`, or `None` if the motion is entirely
+    Returns the written media `Path`, or `None` if the motion is entirely
     non-finite (nothing renderable). Partially-corrupt motions still render:
     matplotlib silently breaks line segments at NaN frames, so corruption shows
     up as gaps/missing limbs rather than crashing the whole job.
     """
     save_path.parent.mkdir(parents=True, exist_ok=True)
-    # Always save joints — cheap insurance, useful for local re-render. Saved
-    # BEFORE any sanitization so the raw NaN/Inf are preserved for inspection.
-    npy_path = save_path.with_suffix(".npy")
-    np.save(npy_path, joints.astype(np.float32))
 
     # Guard against non-finite joints (e.g. a sample dump whose decoded motion
-    # diverged to NaN/Inf). Without this, the axis-limit computation below feeds
-    # NaN to ax.set_xlim → "Axis limits cannot be NaN or Inf", which then leaves
-    # PillowWriter with zero frames and a misleading "IndexError: list index out
-    # of range" at finish(). Compute limits from finite points only.
+    # diverged to NaN/Inf). Compute finiteness up front so we can warn about
+    # partial corruption and skip entirely-dead motions before rendering.
     pts = joints.reshape(-1, 3)
     finite_rows = np.isfinite(pts).all(axis=1)
     if not finite_rows.all():
         n_bad = int((~finite_rows).sum())
         print(f"[visualize] WARNING: {save_path.stem} has {n_bad}/{pts.shape[0]} "
               f"non-finite joint positions (NaN/Inf) — the decoded motion is "
-              f"corrupt (likely a diverged sample). Saved raw joints to "
-              f"{npy_path.name} for inspection.", flush=True)
+              f"corrupt (likely a diverged sample).", flush=True)
     if not finite_rows.any():
+        # Still dump the raw joints (NaN/Inf preserved) for inspection, then bail.
+        npy_path = save_path.with_suffix(".npy")
+        np.save(npy_path, joints.astype(np.float32))
         print(f"[visualize] SKIP {save_path.stem}: motion is entirely non-finite, "
-              f"nothing to render.", flush=True)
+              f"nothing to render (saved raw joints to {npy_path.name}).", flush=True)
         return None
 
-    import matplotlib.pyplot as plt
-    from matplotlib.animation import FuncAnimation, PillowWriter
-    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  (registers 3d projection)
-
-    T = joints.shape[0]
-    # Shared axis limits so the camera doesn't jitter between frames — derived
-    # from finite points only so a stray NaN frame can't poison the limits.
-    fpts = pts[finite_rows]
-    lo, hi = fpts.min(axis=0), fpts.max(axis=0)
-    center = (lo + hi) / 2
-    radius = float(np.max(hi - lo)) / 2 * 1.1 + 1e-3
-
-    fig = plt.figure(figsize=(7, 7))
-    ax = fig.add_subplot(111, projection="3d")
-    chain_lines = [ax.plot([], [], [], "-o", linewidth=2, markersize=3)[0]
-                   for _ in _T2M_CHAINS]
-    title_text = ax.set_title("")
-
-    def _setup_axes():
-        # HumanML3D is Y-up; matplotlib's 3D viewer treats Z as up by default,
-        # so swap Y↔Z for display.
-        ax.set_xlim(center[0] - radius, center[0] + radius)
-        ax.set_ylim(center[2] - radius, center[2] + radius)
-        ax.set_zlim(center[1] - radius, center[1] + radius)
-        ax.set_xlabel("x")
-        ax.set_ylabel("z")
-        ax.set_zlabel("y")
-        ax.view_init(elev=15, azim=-70)
-
-    def update(t):
-        _setup_axes()
-        for line, chain in zip(chain_lines, _T2M_CHAINS):
-            xs = joints[t, list(chain), 0]
-            ys = joints[t, list(chain), 2]   # Y/Z swap for display
-            zs = joints[t, list(chain), 1]
-            line.set_data(xs, ys)
-            line.set_3d_properties(zs)
-        title_text.set_text(f"{title}\nframe {t + 1}/{T}")
-        return chain_lines + [title_text]
-
-    ani = FuncAnimation(fig, update, frames=T, interval=1000 // fps, blit=False)
-    # Force GIF extension regardless of caller (PillowWriter doesn't do MP4).
-    gif_path = save_path.with_suffix(".gif")
-    ani.save(str(gif_path), writer=PillowWriter(fps=fps))
-    plt.close(fig)
-    print(f"[visualize] wrote {gif_path}  (+ joints at {npy_path.name})", flush=True)
-    return gif_path
+    media_path, npy_path = render_joints(
+        joints, save_path, title=title, fps=fps, fmt="auto", scene=scene)
+    print(f"[visualize] wrote {media_path}  (+ joints at {npy_path.name})", flush=True)
+    return media_path
 
 
 def _write_manifest(out_dir: Path, entries: list[dict]) -> None:
@@ -463,7 +411,8 @@ def main(cfg: DictConfig) -> None:
         guidance_weight = 0.0
         c_specs = _load_specs(cfg, "RMG_CONSTRAINTS", "constraints")
         r_specs = _load_specs(cfg, "RMG_RANGES", "ranges")
-        scene_obj = parse_scene(_load_scene(cfg))
+        scene_dict = _load_scene(cfg)
+        scene_obj = parse_scene(scene_dict)
         if c_specs or r_specs or scene_obj:
             if cfg.representation.name not in CONSTRAINABLE_REPRESENTATIONS:
                 raise ValueError(
@@ -504,7 +453,7 @@ def main(cfg: DictConfig) -> None:
             ).cpu().numpy()
             safe = "".join(c if c.isalnum() else "_" for c in prompt)[:48]
             gif = _render(joints, out_dir / f"gen-{i:02d}-{safe}.mp4",
-                          title=prompt[:60], fps=int(cfg.viz.fps))
+                          title=prompt[:60], fps=int(cfg.viz.fps), scene=scene_dict)
             if gif is None:
                 continue
             manifest.append({"file": gif.name, "kind": "pred", "caption": prompt})
