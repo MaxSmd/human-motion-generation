@@ -79,7 +79,7 @@ from shared.render import render_joints  # noqa: E402
 
 
 def _render(joints: np.ndarray, save_path: Path, title: str, fps: int,
-            scene: dict | None = None):
+            scene: dict | None = None, constraints: list[dict] | None = None):
     """Render (T, 22, 3) joint positions via the shared multi-panel animation.
 
     Delegates the actual drawing to `shared.render.render_joints` (the same
@@ -114,9 +114,32 @@ def _render(joints: np.ndarray, save_path: Path, title: str, fps: int,
         return None
 
     media_path, npy_path = render_joints(
-        joints, save_path, title=title, fps=fps, fmt="auto", scene=scene)
+        joints, save_path, title=title, fps=fps, fmt="auto", scene=scene,
+        constraints=constraints)
     print(f"[visualize] wrote {media_path}  (+ joints at {npy_path.name})", flush=True)
     return media_path
+
+
+def _constraint_viz(bend_specs, num_frames: int) -> list[dict]:
+    """Resolve parsed `BendConstraint`s into the flat dicts the renderer's
+    constraint panel wants: `{joint, name, min_deg, max_deg, frame_start,
+    frame_end}` with the joint index/name resolved and the frame window
+    clamped to `num_frames`."""
+    from shared.geometry.skeleton import JOINT_NAMES
+
+    out = []
+    for c in bend_specs:
+        j = c.joint if isinstance(c.joint, int) else JOINT_NAMES.index(c.joint)
+        fs, fe = c.frame_window(num_frames)
+        out.append({
+            "joint": j,
+            "name": JOINT_NAMES[j],
+            "min_deg": float(c.min_deg),
+            "max_deg": float(c.max_deg),
+            "frame_start": fs,
+            "frame_end": fe,
+        })
+    return out
 
 
 def _write_manifest(out_dir: Path, entries: list[dict]) -> None:
@@ -409,6 +432,7 @@ def main(cfg: DictConfig) -> None:
         # euclidean room/obstacle guidance & exact spawn placement.
         fixed_values = fixed_mask = project_fn = energy_fn = None
         guidance_weight = 0.0
+        constraint_viz: list[dict] = []
         c_specs = _load_specs(cfg, "RMG_CONSTRAINTS", "constraints")
         r_specs = _load_specs(cfg, "RMG_RANGES", "ranges")
         scene_dict = _load_scene(cfg)
@@ -424,6 +448,7 @@ def main(cfg: DictConfig) -> None:
             if bend_specs:
                 project_fn = build_bend_projector(
                     bend_specs, skel, num_frames=n_frames, num_joints=nj, device=device)
+                constraint_viz = _constraint_viz(bend_specs, n_frames)
                 print(f"[visualize] applying {len(c_specs)} bend pin(s) + {len(r_specs)} bend range(s): "
                       f"{c_specs} {r_specs}", flush=True)
             if scene_obj:
@@ -453,7 +478,8 @@ def main(cfg: DictConfig) -> None:
             ).cpu().numpy()
             safe = "".join(c if c.isalnum() else "_" for c in prompt)[:48]
             gif = _render(joints, out_dir / f"gen-{i:02d}-{safe}.mp4",
-                          title=prompt[:60], fps=int(cfg.viz.fps), scene=scene_dict)
+                          title=prompt[:60], fps=int(cfg.viz.fps), scene=scene_dict,
+                          constraints=constraint_viz or None)
             if gif is None:
                 continue
             manifest.append({"file": gif.name, "kind": "pred", "caption": prompt})

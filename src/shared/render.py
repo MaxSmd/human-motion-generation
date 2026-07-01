@@ -28,6 +28,37 @@ _T2M_CHAINS: tuple[tuple[int, ...], ...] = (
 )
 
 
+# Parent/child neighbours along the kinematic chains, used to measure the
+# interior bend angle at a joint straight from world positions (mirrors
+# flow.constraints' bend, but position-space and torch-free).
+def _chain_neighbors(joint: int) -> tuple[int, int] | None:
+    """(parent, child) of `joint` along its chain, or None if it's a chain
+    endpoint (root/end-effector) with no representable bend."""
+    for chain in _T2M_CHAINS:
+        if joint in chain:
+            i = chain.index(joint)
+            if 0 < i < len(chain) - 1:
+                return chain[i - 1], chain[i + 1]
+            return None
+    return None
+
+
+def _bend_series_deg(joints: np.ndarray, joint: int) -> np.ndarray | None:
+    """Per-frame interior bend angle (deg, 0 = straight) at `joint`: the angle
+    between the incoming bone (parent→joint) and the outgoing bone
+    (joint→child). Returns None if `joint` has no representable bend."""
+    nb = _chain_neighbors(joint)
+    if nb is None:
+        return None
+    parent, child = nb
+    inc = joints[:, joint] - joints[:, parent]
+    out = joints[:, child] - joints[:, joint]
+    inc = inc / (np.linalg.norm(inc, axis=-1, keepdims=True) + 1e-9)
+    out = out / (np.linalg.norm(out, axis=-1, keepdims=True) + 1e-9)
+    cos = np.clip((inc * out).sum(axis=-1), -1.0, 1.0)
+    return np.degrees(np.arccos(cos))
+
+
 def ffmpeg_available() -> bool:
     return shutil.which("ffmpeg") is not None
 
@@ -250,6 +281,90 @@ def _draw_scene_3d(ax3d, scene: dict) -> None:
                   [0.0, 0.0], color=_C_SPAWN, lw=1.8)
 
 
+# Allowed-band colour for the constraint panel (reuse the obstacle amber).
+_C_BAND = "#e0904a"
+
+
+def _draw_constraint_panel(fig, rect: tuple[float, float, float, float],
+                           joints: np.ndarray, constraints: list[dict]):
+    """Draw a full-width panel under the main viz summarising the sampling-time
+    bend constraints, in the same dark scientific style.
+
+    Each constraint dict is `{joint, name, min_deg, max_deg, frame_start,
+    frame_end}` (joint = int index, window already resolved). Fixed pins
+    (min ≈ max) render as text; clamped ranges render as a bend-angle-over-time
+    plot with the allowed band shaded across its active window. Returns a
+    per-frame `update(t)` that moves an animated cursor, or None when there is
+    no time plot to scrub.
+    """
+    import matplotlib.pyplot as plt  # noqa: F401  (backend already selected)
+    from matplotlib.patches import Rectangle
+
+    T = joints.shape[0]
+    fixed = [c for c in constraints if abs(c["max_deg"] - c["min_deg"]) < 0.5]
+    clamped = [c for c in constraints if abs(c["max_deg"] - c["min_deg"]) >= 0.5]
+
+    fig.text(rect[0], rect[1] + rect[3] + 0.012, "Constraints", color=_FG,
+             fontsize=10, fontfamily="monospace", ha="left", va="bottom")
+
+    ax = fig.add_axes(rect)
+    ax.set_facecolor(_PANEL)
+    for spine in ax.spines.values():
+        spine.set_color(_GRID)
+
+    if not clamped:
+        # Nothing to scrub over time → a plain text card listing the pins.
+        ax.axis("off")
+        lines = [f"{c['name']}   pinned to {c['min_deg']:.0f}°" for c in fixed]
+        ax.text(0.5, 0.5, "\n".join(lines) or "—", color="#f5f7fa", fontsize=13,
+                fontfamily="monospace", ha="center", va="center",
+                linespacing=1.6, transform=ax.transAxes)
+        return None
+
+    ax.set_xlim(0, max(T - 1, 1))
+    ax.tick_params(colors=_FG, labelsize=7, length=2)
+    ax.grid(True, color=_GRID, linewidth=0.5, alpha=0.6)
+    ax.set_xlabel("frame", color=_FG, fontsize=8, fontfamily="monospace")
+    ax.set_ylabel("bend  (deg)", color=_FG, fontsize=8, fontfamily="monospace")
+
+    ymax = 90.0
+    for c in clamped:
+        fs, fe = c["frame_start"], c["frame_end"]
+        col = _C_LEFT if c["name"].startswith("L_") else (
+            _C_RIGHT if c["name"].startswith("R_") else _C_SPINE)
+        # Allowed band, shaded only over the window where the clamp is active.
+        ax.add_patch(Rectangle((fs, c["min_deg"]), max(fe - fs, 0),
+                               c["max_deg"] - c["min_deg"], facecolor=_C_BAND,
+                               edgecolor="none", alpha=0.20, zorder=1))
+        ax.hlines([c["min_deg"], c["max_deg"]], fs, fe, color=_C_BAND, lw=1.0,
+                  alpha=0.75, zorder=2)
+        series = _bend_series_deg(joints, c["joint"])
+        if series is not None:
+            ax.plot(np.arange(T), series, "-", lw=1.8, color=col, zorder=3,
+                    label=f"{c['name']}  clamp {c['min_deg']:.0f}–{c['max_deg']:.0f}°")
+            ymax = max(ymax, float(np.nanmax(series)))
+        ymax = max(ymax, c["max_deg"])
+    ax.set_ylim(0, min(185.0, ymax * 1.1 + 5))
+
+    # Any fixed pins alongside the clamp(s): note them in a corner.
+    if fixed:
+        txt = "    ".join(f"{c['name']} = {c['min_deg']:.0f}°" for c in fixed)
+        ax.text(0.01, 0.96, txt, color="#f5f7fa", fontsize=8,
+                fontfamily="monospace", ha="left", va="top", transform=ax.transAxes)
+
+    leg = ax.legend(loc="upper right", fontsize=7, facecolor=_PANEL,
+                    edgecolor=_GRID, framealpha=0.6)
+    for t in leg.get_texts():
+        t.set_color(_FG)
+
+    cursor = ax.axvline(0, color=_C_ROOT, lw=1.2, alpha=0.9, zorder=4)
+
+    def _update(t: int) -> None:
+        cursor.set_xdata([t, t])
+
+    return _update
+
+
 def render_joints(
     joints: np.ndarray,                 # (T, 22, 3)
     out_path: Path,                     # media path; suffix is forced to match fmt
@@ -257,6 +372,7 @@ def render_joints(
     fps: int = 20,
     fmt: str = "auto",
     scene: dict | None = None,          # optional room/obstacle scene (see flow.scene)
+    constraints: list[dict] | None = None,  # optional sampling-time bend constraints
 ) -> tuple[Path, Path]:
     """Render joints to MP4/GIF and dump joints as `.npy`. Returns (media, npy).
 
@@ -270,6 +386,12 @@ def render_joints(
     `objects` of kind box/sphere/cylinder, and a `spawn`), the room wireframe,
     obstacle silhouettes and the spawn marker are drawn into every panel and the
     axis limits are widened to frame the whole room — "obstacle mode".
+
+    When `constraints` is given (a list of resolved bend-constraint dicts
+    `{joint, name, min_deg, max_deg, frame_start, frame_end}`), a full-width
+    panel is added below the four viz panels: fixed pins render as text, clamped
+    ranges render as a bend-angle-over-time plot with the allowed band shaded and
+    a cursor that tracks the current frame.
     """
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -301,11 +423,15 @@ def render_joints(
     def _lim(axis: int) -> tuple[float, float]:
         return center[axis] - radius, center[axis] + radius
 
-    fig = plt.figure(figsize=(19, 5.4))
+    has_constraints = bool(constraints)
+    fig = plt.figure(figsize=(19, 6.9 if has_constraints else 5.4))
     fig.patch.set_facecolor(_BG)
+    # With a constraint panel, lift the viz row into the top of a taller figure
+    # and reserve the strip between the row and the progress bar for the panel.
+    gs_top, gs_bottom = (0.90, 0.42) if has_constraints else (0.86, 0.10)
     gs = GridSpec(
         1, 4, figure=fig, width_ratios=[1, 1, 1, 1.5],
-        left=0.015, right=0.985, top=0.86, bottom=0.10, wspace=0.12,
+        left=0.015, right=0.985, top=gs_top, bottom=gs_bottom, wspace=0.12,
     )
 
     # --- 2-D orthographic panels ---------------------------------------------
@@ -390,6 +516,12 @@ def render_joints(
     bar_bg.add_patch(plt.Rectangle((0, 0), 1, 1, color=_GRID, alpha=0.5))
     bar_fill = bar_bg.add_patch(plt.Rectangle((0, 0), 0, 1, color=_C_ROOT))
 
+    # --- Constraint panel (optional) -----------------------------------------
+    cursor_update = None
+    if has_constraints:
+        cursor_update = _draw_constraint_panel(
+            fig, (0.06, 0.10, 0.90, 0.22), joints, constraints)
+
     def update(t):
         lo_t = max(0, t - _TRAIL_WINDOW)
         for h, v, lines, trails in views2d:
@@ -407,6 +539,9 @@ def render_joints(
         for j, tr in trails3d.items():
             tr.set_data(joints[lo_t:t + 1, j, 0], joints[lo_t:t + 1, j, 2])
             tr.set_3d_properties(joints[lo_t:t + 1, j, 1])
+
+        if cursor_update is not None:
+            cursor_update(t)
 
         clock.set_text(f"frame {t + 1:>3}/{T}   ·   {t / max(fps, 1):4.1f}s")
         bar_fill.set_width((t + 1) / T)
