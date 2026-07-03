@@ -30,6 +30,15 @@ scheduler:
   min_lr_ratio: 0.0
 
 grad_clip: 0.5
+# Finite-spike guard (train.py): skip optimizer+EMA steps whose loss/grad_norm
+# is finite but absurd — bf16 grad storms (seen from ~160k on this preset: grad
+# 8→23k→3.7e8, all finite) sail past the non-finite guard and slow-poison Adam.
+# Ceilings are absolute (logged scale); mults are vs a running mean of accepted
+# steps (healthy grad ≈8–30, absolute max 278 over 160k clean steps).
+guard_loss_ceiling: 200.0
+guard_grad_ceiling: 500.0     # clean-run absolute max was 278; storms ≥331
+guard_loss_mult: 5.0
+guard_grad_mult: 25.0
 cfg_dropout: 0.1               # paper §4.1
 prior_sigma: 1.0              # wrapped Gaussian σ
 

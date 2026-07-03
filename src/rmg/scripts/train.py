@@ -279,7 +279,12 @@ def main(cfg: DictConfig) -> None:
 
     # -------------------- training loop --------------------
     t_last = time.time()
-    nan_skips = 0  # count of steps skipped due to non-finite loss/grad
+    nan_skips = 0  # count of steps skipped due to non-finite OR spiking loss/grad
+    # Running references for the finite-spike guard (see below). Updated only on
+    # ACCEPTED steps so a storm can never drag the reference up to its own level.
+    ema_loss_ref: float | None = None
+    ema_grad_ref: float | None = None
+    _GUARD_DECAY = 0.99  # ~100-step memory; log_every-scale adaptivity
     while step < cfg.train.max_steps:
         opt.zero_grad(set_to_none=True)
         accum_loss = 0.0
@@ -317,14 +322,53 @@ def main(cfg: DictConfig) -> None:
         # poisoned step corrupts model + EMA + Adam moments permanently. So we
         # skip the update entirely whenever the loss or grad is non-finite —
         # one wasted step instead of a dead run.
-        skip_step = not (math.isfinite(accum_loss) and bool(torch.isfinite(grad_norm)))
-        if skip_step:
+        #
+        # Finite-spike guard. bf16 late-training instability (rmg_mid run
+        # f8f7cf5e, steps 160.7k–177k) produces grad storms that are FINITE —
+        # grad_norm jumped 8→23k→3.7e8 while the loss ratcheted 3→64 — so the
+        # non-finite check never fires; clipping caps the step SIZE but the
+        # DIRECTION is garbage and Adam's moments get poisoned over a few
+        # thousand steps until the weights are cooked. Clean-run stats: grad p50
+        # ≈8, absolute max 278 over 160k steps; storm steps ≥331 and typically
+        # 100–10⁶× the running level. We skip a step when loss/grad exceeds an
+        # absolute ceiling OR a multiple of an accepted-steps-only running EMA;
+        # thresholds sit ≥10× above anything a healthy step produced. Values are
+        # on the LOGGED scale (accum_loss × grad_accum) so yaml knobs match the
+        # numbers on the dashboard.
+        loss_metric = accum_loss * cfg.train.grad_accum
+        skip_reason = None
+        if not (math.isfinite(accum_loss) and bool(torch.isfinite(grad_norm))):
+            skip_reason = "non-finite"
+        else:
+            gn = float(grad_norm)
+            loss_ceiling = float(cfg.train.get("guard_loss_ceiling", 200.0))
+            grad_ceiling = float(cfg.train.get("guard_grad_ceiling", 1000.0))
+            loss_mult = float(cfg.train.get("guard_loss_mult", 5.0))
+            grad_mult = float(cfg.train.get("guard_grad_mult", 25.0))
+            if loss_metric > loss_ceiling or gn > grad_ceiling:
+                skip_reason = f"spike>ceiling ({loss_ceiling:g}/{grad_ceiling:g})"
+            elif ema_loss_ref is not None and (
+                loss_metric > loss_mult * ema_loss_ref
+                or gn > grad_mult * ema_grad_ref
+            ):
+                skip_reason = (
+                    f"spike>{loss_mult:g}x/{grad_mult:g}x running mean "
+                    f"({ema_loss_ref:.2f}/{ema_grad_ref:.2f})"
+                )
+
+        if skip_reason is not None:
             nan_skips += 1
             opt.zero_grad(set_to_none=True)
-            print(f"[train] WARNING: non-finite step at step {step} "
-                  f"(loss={accum_loss}, grad_norm={float(grad_norm)}); skipped "
+            print(f"[train] WARNING: {skip_reason} step at step {step} "
+                  f"(loss={loss_metric}, grad_norm={float(grad_norm)}); skipped "
                   f"optimizer + EMA update (total skips={nan_skips})", flush=True)
         else:
+            # Accepted step — advance the guard's running references.
+            if ema_loss_ref is None:
+                ema_loss_ref, ema_grad_ref = loss_metric, float(grad_norm)
+            else:
+                ema_loss_ref = _GUARD_DECAY * ema_loss_ref + (1 - _GUARD_DECAY) * loss_metric
+                ema_grad_ref = _GUARD_DECAY * ema_grad_ref + (1 - _GUARD_DECAY) * float(grad_norm)
             if scaler is not None:
                 scaler.step(opt)
                 scaler.update()
