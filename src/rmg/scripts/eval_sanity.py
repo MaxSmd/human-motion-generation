@@ -65,8 +65,11 @@ def main(cfg: DictConfig) -> None:
     representation = build_representation(cfg.representation.name, **rep_kwargs)
 
     ds = _build_dataset(cfg, split=cfg.eval.split, representation=representation)
+    # Seeded shuffle — consecutive test.txt ids are near-duplicate segments of
+    # the same AMASS sequence; see the matching note in evaluate.py.
     loader = DataLoader(
-        ds, batch_size=cfg.eval.batch_size, shuffle=False,
+        ds, batch_size=cfg.eval.batch_size, shuffle=True,
+        generator=torch.Generator().manual_seed(int(cfg.eval.seed)),
         collate_fn=collate, num_workers=0, drop_last=False,
     )
     skeleton = _load_target_offsets(cfg)

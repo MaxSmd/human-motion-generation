@@ -213,8 +213,14 @@ def main(cfg: DictConfig) -> None:
 
     # --- Data ---
     ds = _build_dataset(cfg, split=cfg.eval.split, representation=representation)
+    # Seeded shuffle, always. test.txt lists segments of the same AMASS source
+    # sequence under consecutive ids, so an unshuffled loader (a) evaluates a
+    # highly redundant subset when eval.max_clips > 0 and (b) fills each
+    # R-precision pool with near-duplicate motions, making text→motion
+    # discrimination artificially hard and depressing R@k.
     loader = DataLoader(
-        ds, batch_size=cfg.eval.batch_size, shuffle=False,
+        ds, batch_size=cfg.eval.batch_size, shuffle=True,
+        generator=torch.Generator().manual_seed(int(cfg.eval.seed)),
         collate_fn=collate, num_workers=0, drop_last=False,
     )
 
