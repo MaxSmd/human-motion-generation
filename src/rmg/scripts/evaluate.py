@@ -44,6 +44,7 @@ from shared.eval import (
     multimodality,
     r_precision,
 )
+from shared.eval.text_tokens import CaptionTokenLookup, encode_texts_prefer_tokens
 from rmg.flow import (
     RiemannianEulerSampler,
     SamplerCfg,
@@ -234,6 +235,11 @@ def main(cfg: DictConfig) -> None:
 
     skeleton = _load_target_offsets(cfg)
     evaluator = _build_evaluator(cfg, device)
+    try:
+        token_lookup = CaptionTokenLookup(cfg.eval.humanml3d_repo)
+    except FileNotFoundError as e:
+        print(f"[eval] WARN: {e} — falling back to spaCy text tagging (worse R-precision)")
+        token_lookup = None
 
     # --- Iterate test set, gather real + generated features at all guidance scales ---
     all_results: dict[float, dict[str, float | list]] = {}
@@ -242,6 +248,7 @@ def main(cfg: DictConfig) -> None:
         print(f"\n=== guidance ω = {omega} ===")
         real_motion_feats, gen_motion_feats, text_feats = [], [], []
         n_seen = 0
+        n_text_fallback = 0
 
         for batch in tqdm(loader, desc=f"sample ω={omega}"):
             x1 = batch.x1.to(device)
@@ -270,7 +277,15 @@ def main(cfg: DictConfig) -> None:
 
             real_emb = evaluator.encode_motion(real_padded, lengths - 1)
             gen_emb = evaluator.encode_motion(gen_padded, lengths - 1)
-            text_emb = evaluator.encode_text_from_strings(batch.texts)
+            # Prefer HumanML3D's pre-tagged word/POS tokens: the Guo text
+            # encoder was trained on their custom *_VIP tags, which spaCy
+            # tagging never produces — the from_strings path silently halves
+            # R-precision (harness bug found 2026-07-05: real-motion R@1 was
+            # 0.17 vs the published ~0.51).
+            text_emb, n_fb = encode_texts_prefer_tokens(
+                evaluator, token_lookup, batch.clip_ids, batch.texts,
+            )
+            n_text_fallback += n_fb
 
             real_motion_feats.append(real_emb.cpu().numpy())
             gen_motion_feats.append(gen_emb.cpu().numpy())
@@ -284,6 +299,10 @@ def main(cfg: DictConfig) -> None:
             t1 = time.perf_counter()
             print(f"[ω={omega}] {label}: {t1 - t0:.2f}s", flush=True)
             return t1
+
+        if n_text_fallback:
+            print(f"[ω={omega}] WARN: {n_text_fallback} captions missing pre-tagged "
+                  f"tokens — encoded via spaCy fallback", flush=True)
 
         t = time.perf_counter()
         real_motion_feats = np.concatenate(real_motion_feats, axis=0)

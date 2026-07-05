@@ -34,6 +34,7 @@ from tqdm import tqdm
 
 from rmg.data import collate
 from shared.eval import diversity, fid, mm_distance, r_precision
+from shared.eval.text_tokens import CaptionTokenLookup, encode_texts_prefer_tokens
 from shared.utils import set_seed
 
 from rmg.scripts.evaluate import (
@@ -70,10 +71,16 @@ def main(cfg: DictConfig) -> None:
     )
     skeleton = _load_target_offsets(cfg)
     evaluator = _build_evaluator(cfg, device)
+    try:
+        token_lookup = CaptionTokenLookup(cfg.eval.humanml3d_repo)
+    except FileNotFoundError as e:
+        print(f"[sanity] WARN: {e} — spaCy fallback (expect halved R-precision)")
+        token_lookup = None
 
     real_embs, text_embs = [], []
     raw_feat_stats = []
     n_seen = 0
+    n_text_fallback = 0
     for batch in tqdm(loader, desc="featurize real"):
         x1 = batch.x1.to(device)
         lengths = batch.lengths
@@ -90,7 +97,11 @@ def main(cfg: DictConfig) -> None:
             raw_feat_stats.append((float(f.abs().mean()), float(f.abs().max())))
 
         real_embs.append(evaluator.encode_motion(padded, lengths - 1).cpu().numpy())
-        text_embs.append(evaluator.encode_text_from_strings(batch.texts).cpu().numpy())
+        temb, n_fb = encode_texts_prefer_tokens(
+            evaluator, token_lookup, batch.clip_ids, batch.texts,
+        )
+        n_text_fallback += n_fb
+        text_embs.append(temb.cpu().numpy())
 
         n_seen += x1.shape[0]
         if cfg.eval.max_clips > 0 and n_seen >= cfg.eval.max_clips:
@@ -98,7 +109,8 @@ def main(cfg: DictConfig) -> None:
 
     real = np.concatenate(real_embs, axis=0)
     text = np.concatenate(text_embs, axis=0)
-    print(f"[sanity] {real.shape[0]} real clips embedded")
+    print(f"[sanity] {real.shape[0]} real clips embedded"
+          f" ({n_text_fallback} captions via spaCy fallback)")
 
     am = np.array(raw_feat_stats)
     print(f"[sanity] raw 263-D features: |f| mean {am[:,0].mean():.3f}  max {am[:,1].max():.1f}")
