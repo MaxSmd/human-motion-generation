@@ -242,8 +242,18 @@ def main(cfg: DictConfig) -> None:
     ema = EMA(model, decay=cfg.train.ema.decay)
 
     use_amp = cfg.train.precision in ("bf16", "fp16")
-    amp_dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[cfg.train.precision]
+    amp_dtype = {
+        "bf16": torch.bfloat16, "fp16": torch.float16,
+        "fp32": torch.float32, "tf32": torch.float32,
+    }[cfg.train.precision]
     scaler = torch.amp.GradScaler(device.type) if cfg.train.precision == "fp16" else None
+    # "tf32" = fp32 everywhere (no autocast) but matmuls on TF32 tensor cores:
+    # 10-bit mantissa vs bf16's 8 — 4x finer rounding at near-bf16 throughput.
+    # Escape hatch for bf16 late-training grad storms (see the finite-spike
+    # guard below) when true fp32 would be too slow. "fp32" keeps TF32 off.
+    if cfg.train.precision == "tf32":
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
 
     # -------------------- resume? --------------------
     step = 0

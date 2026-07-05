@@ -45,7 +45,7 @@ prior_sigma: 1.0              # wrapped Gaussian σ
 ema:
   decay: 0.9999
 
-precision: bf16               # bf16 | fp16 | fp32
+precision: bf16               # bf16 | fp16 | fp32 | tf32 (fp32 + TF32 matmuls)
 
 log_every: 100
 ckpt_every: 10_000            # numbered (durable, ~1.8GB each) history every 10k
