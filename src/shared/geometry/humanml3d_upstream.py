@@ -110,6 +110,39 @@ def _load_upstream_process_file(repo_root: str | None = None):
 # ---------------------------------------------------------------------------
 
 
+def positions_to_h3d_features_upstream(
+    positions: Tensor,
+    skeleton: Skeleton,
+    feet_thre: float = 0.002,
+    repo_root: str | None = None,
+) -> Tensor:
+    """World joint positions → 263-D HumanML3D feature via upstream `process_file`.
+
+    The most direct bridge to the Guo evaluator's training distribution: no IK,
+    no FK — `process_file` consumes raw world positions (the same frame
+    `recover_joints_from_ric` / upstream `recover_from_ric` produce) and does
+    its own uniform-skeleton / floor / facing alignment internally.
+
+    Args:
+        positions: (T, J, 3) world-frame joint positions.
+        skeleton: rest-pose offsets, used as `tgt_offsets` for upstream.
+        feet_thre: foot-contact squared-velocity threshold (upstream default 0.002).
+        repo_root: optional explicit repo root (otherwise auto-located).
+
+    Returns:
+        (T-1, 263) tensor on CPU.
+    """
+    pos_np = positions.detach().cpu().numpy().astype(np.float32)  # (T, J, 3)
+
+    ns = _load_upstream_process_file(repo_root)
+    ns["tgt_offsets"] = skeleton.offsets.detach().cpu().float()  # (J, 3)
+    process_file = ns["process_file"]
+
+    # Upstream returns (data, ground_positions, positions, l_velocity)
+    data, _, _, _ = process_file(pos_np, feet_thre)
+    return torch.from_numpy(np.asarray(data, dtype=np.float32))
+
+
 def tplusr_to_h3d_features_upstream(
     translation: Tensor,
     quaternions: Tensor,
@@ -119,7 +152,11 @@ def tplusr_to_h3d_features_upstream(
 ) -> Tensor:
     """T+R → 263-D HumanML3D feature, using upstream's `process_file`.
 
-    Bit-comparable agreement with the Guo evaluator's training distribution.
+    For data whose source of truth *is* rotations (the packed dataset): FK the
+    stored quats to world positions, then defer to
+    `positions_to_h3d_features_upstream`. If you already hold joint positions,
+    call that function directly — an IK→FK round-trip through this one only
+    adds reconstruction error.
 
     Args:
         translation: (T, 3) root translation.
@@ -132,14 +169,7 @@ def tplusr_to_h3d_features_upstream(
         (T-1, 263) tensor on CPU.
     """
     # FK on our stored quats → world joint positions.
-    positions = forward_kinematics(
-        skeleton, quaternions.float(), translation.float()
-    ).detach().cpu().numpy().astype(np.float32)  # (T, J, 3)
-
-    ns = _load_upstream_process_file(repo_root)
-    ns["tgt_offsets"] = skeleton.offsets.detach().cpu().float()  # (J, 3)
-    process_file = ns["process_file"]
-
-    # Upstream returns (data, ground_positions, positions, l_velocity)
-    data, _, _, _ = process_file(positions, feet_thre)
-    return torch.from_numpy(np.asarray(data, dtype=np.float32))
+    positions = forward_kinematics(skeleton, quaternions.float(), translation.float())
+    return positions_to_h3d_features_upstream(
+        positions, skeleton, feet_thre=feet_thre, repo_root=repo_root
+    )

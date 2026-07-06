@@ -308,6 +308,11 @@ def main(cfg: DictConfig) -> None:
         results = {
             "r_precision_real": r_precision(text_emb, real_emb, top_k=3, rng=rng).tolist(),
             "diversity_real": diversity(real_emb, diversity_times=int(cfg.eval.diversity_times), rng=rng),
+            # GT-pair matching distance: text vs its OWN real motion. Upstream
+            # real-data MM-Dist is ~2.9; if this is ~diversity_real instead, the
+            # text/motion co-embedding is flat (matched pairs no closer than
+            # random) — i.e. the motion features are the bottleneck, not the code.
+            "mm_dist_real": mm_distance(text_emb, real_emb),
         }
         if not skip_gen:
             gen_emb = np.concatenate(gen_emb, 0)

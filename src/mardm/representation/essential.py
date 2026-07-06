@@ -30,9 +30,9 @@ from torch import Tensor
 
 from shared.geometry import (
     Skeleton,
+    positions_to_h3d_features_upstream,
     recover_joints_from_ric,
     tplusr_to_h3d_features_with_quats,
-    tplusr_to_h3d_features_upstream,
 )
 
 # root(1+2+1) + (J-1)*3 local joint positions = 4 + 63
@@ -167,20 +167,26 @@ def essential_to_h3d(
 ) -> Tensor:
     """Generated essential feature (L, 67) -> full (L-1, 263) for the Guo evaluator.
 
-    Pipeline: de-normalize -> recover canonical joint positions (`rmg`'s
+    Pipeline: de-normalize -> recover world joint positions (`rmg`'s
     `recover_joints_from_ric`, which reads only the first 67 dims) -> upstream
-    IK to per-joint quaternions -> `rmg`'s 263-D featurization (FK + features),
-    matching how the packed dataset was built.
+    `process_file` on the positions directly. No IK/FK round-trip: the recovered
+    positions are already in the frame upstream's extractor consumes, and
+    manufacturing quaternions from them only to FK back to positions adds
+    reconstruction error (it noticeably distorts the root-trajectory channels
+    the Guo evaluator's retrieval metrics are most sensitive to).
+
+    The legacy `use_upstream=False` path keeps the old positions -> IK -> quats
+    -> custom featurization chain for comparison against the packed dataset.
     """
     if essential.dim() != 2 or essential.shape[-1] != ESSENTIAL_DIM:
         raise ValueError(f"essential must be (L, {ESSENTIAL_DIM}), got {tuple(essential.shape)}")
     if mean is not None and std is not None:
         essential = denormalize(essential, mean, std)
-    joints = recover_joints_from_ric(essential)          # (L, 22, 3), canonical frame
+    joints = recover_joints_from_ric(essential)          # (L, 22, 3), world frame
+    if use_upstream:
+        return positions_to_h3d_features_upstream(joints, skeleton)
     quats = _ik_quaternions(joints, skeleton.offsets, Path(humanml3d_repo))
     # `_ik_quaternions` lands on CPU (numpy roundtrip); pin everything to its
     # device so the downstream FK doesn't see a CUDA/CPU mismatch.
     translation = joints[:, 0, :].contiguous().to(quats.device)
-    if use_upstream:
-        return tplusr_to_h3d_features_upstream(translation, quats, skeleton)
     return tplusr_to_h3d_features_with_quats(translation, quats, skeleton)
