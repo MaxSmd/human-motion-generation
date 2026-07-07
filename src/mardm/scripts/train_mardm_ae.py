@@ -71,6 +71,7 @@ def _build_dataset(cfg: DictConfig, split: str, mean, std) -> EssentialDataset:
         splits_name=cfg.data.splits_name,
         offsets_name=cfg.data.offsets_name,
         preload=cfg.data.get("preload", False),
+        canonical_dir=cfg.data.get("canonical_dir"),
     )
 
 

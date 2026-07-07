@@ -29,12 +29,16 @@ def main() -> None:
     ap.add_argument("--split", default="train")
     ap.add_argument("--out", type=Path, required=True, help="output .pt path for {mean, std}")
     ap.add_argument("--max-clips", type=int, default=None, help="cap clips (debug); default = all")
+    ap.add_argument("--canonical-dir", type=Path, default=None,
+                    help="new_joint_vecs dir: compute stats over canonical features "
+                         "(first 67 dims of the 263-D files) instead of packed-derived ones")
     args = ap.parse_args()
 
     # Raw (unnormalized) essential features, no windowing.
     ds = EssentialDataset(
         root=args.data_root, split=args.split,
         mean=None, std=None, window_size=None,
+        canonical_dir=args.canonical_dir,
     )
     print(f"[stats] computing essential mean/std over {len(ds)} clips (split={args.split}) ...", flush=True)
     mean, std = compute_essential_stats(ds, max_clips=args.max_clips)

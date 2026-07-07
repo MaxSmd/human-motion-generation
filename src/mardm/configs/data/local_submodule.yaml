@@ -30,3 +30,9 @@ prefetch_factor: 4
 # which otherwise pins GPU util at ~5%. Default off to keep tests and tiny smoke
 # runs fast; flip on for full-dataset training.
 preload: false
+
+# Canonical-features mode: dir with new_joint_vecs/<clip_id>.npy files (from
+# `prepare_humanml3d features`). When set, x1 = file[:, :67] — no pack-time IK
+# in the training distribution. Implies preload. Compute stats with the same
+# flag (compute_mardm_stats --canonical-dir) or they won't match.
+canonical_dir: null

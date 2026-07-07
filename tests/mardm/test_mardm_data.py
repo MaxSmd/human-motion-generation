@@ -164,3 +164,41 @@ def test_ae_forward_backward_on_windows(tmp_path: Path) -> None:
     loss = (recon - batch.x1).abs().mean()
     loss.backward()
     assert torch.isfinite(loss)
+
+
+def test_canonical_dir_mode(tmp_path: Path) -> None:
+    import numpy as np
+
+    _build(tmp_path)
+    splits = json.loads((tmp_path / "splits.json").read_text())
+    canon = tmp_path / "new_joint_vecs"
+    canon.mkdir()
+    rng = np.random.default_rng(0)
+    missing = splits["train"][-1]  # exercise the drop-missing path
+    for cid in splits["train"] + splits["val"]:
+        if cid == missing:
+            continue
+        np.save(canon / f"{cid}.npy", rng.normal(size=(79, 263)).astype(np.float32))
+
+    ds = EssentialDataset(tmp_path, "train", min_seq_len=10, canonical_dir=canon)
+    assert ds.preload  # canonical implies preload
+    assert len(ds) == len(splits["train"]) - 1
+    s = ds[0]
+    assert s.x1.shape[-1] == ESSENTIAL_DIM
+    # raw mode (no stats): x1 is exactly the file's first 67 columns
+    f = torch.from_numpy(np.load(canon / f"{ds.inner.clip_ids[0]}.npy")[:, :ESSENTIAL_DIM])
+    torch.testing.assert_close(s.x1, f[: s.x1.shape[0]])
+
+    # stats set at init: features come out normalized
+    mean, std = compute_essential_stats(ds)
+    ds_norm = EssentialDataset(tmp_path, "train", mean=mean, std=std,
+                               min_seq_len=10, canonical_dir=canon)
+    s_norm = ds_norm[0]
+    assert not torch.allclose(s_norm.x1, s.x1)
+    assert s_norm.x1.std() < 2.0  # roughly unit scale after z-norm
+
+    # collate path works end-to-end
+    loader = DataLoader(ds_norm, batch_size=2, collate_fn=collate, num_workers=0, drop_last=True)
+    batch = next(iter(loader))
+    assert batch.x1.shape[-1] == ESSENTIAL_DIM
+    assert torch.isfinite(batch.x1).all()
