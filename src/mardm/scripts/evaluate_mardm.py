@@ -218,6 +218,19 @@ def main(cfg: DictConfig) -> None:
         "calib_clips": 512,                    # real clips used to estimate the calibration
         "skip_gen": False,                     # real-only diagnosis: harness R@1 ceiling, no sampling
         "vip_tokens": True,                     # encode captions via HumanML3D VIP word/POS tokens
+        # Dir with canonical new_joint_vecs/<clip_id>.npy (prepare_humanml3d
+        # `features` stage). When set, REAL motions use these files — the Guo
+        # evaluator's actual training distribution — instead of features
+        # reconstructed from the packed IK representation. Clips without a file
+        # fall back to reconstruction (counted + reported).
+        "real_h3d_dir": "",
+        # With real_h3d_dir set: ALSO embed the packed-reconstruction features
+        # for every real clip and report fid_recon_floor = FID(canonical,
+        # reconstructed). This is the feature-fidelity floor: a generator that
+        # perfectly reproduced its (packed-derived) training distribution
+        # cannot score a better FID than this against canonical features.
+        # Combine with skip_gen=true for a sampling-free diagnostic run.
+        "diag_recon_fid": False,
     })
     cfg.eval = OmegaConf.merge(eval_cfg, cfg.get("eval", OmegaConf.create({})))
     set_seed(int(cfg.eval.seed))
@@ -247,6 +260,12 @@ def main(cfg: DictConfig) -> None:
 
     use_upstream = bool(cfg.eval.use_upstream_features)
     skip_gen = bool(cfg.eval.skip_gen)
+    real_dir = Path(cfg.eval.real_h3d_dir) if cfg.eval.real_h3d_dir else None
+    if real_dir is not None:
+        n_files = sum(1 for _ in real_dir.glob("*.npy"))
+        print(f"[eval] real features: canonical new_joint_vecs from {real_dir} "
+              f"({n_files} files)", flush=True)
+    n_real_fallback = 0
     caption_tokens = None
     if cfg.eval.vip_tokens and cfg.eval.evaluator == "real":
         caption_tokens = _load_caption_tokens(cfg.eval.humanml3d_repo)
@@ -259,18 +278,36 @@ def main(cfg: DictConfig) -> None:
                                    max_clips=int(cfg.eval.calib_clips), use_upstream=use_upstream)
 
     all_results: dict[float, dict] = {}
+    diag_recon = bool(cfg.eval.diag_recon_fid) and real_dir is not None
     for omega in cfg.eval.guidance_scales:
         print(f"\n=== guidance w = {omega} ===")
-        real_emb, gen_emb, text_emb = [], [], []
+        real_emb, gen_emb, text_emb, recon_emb = [], [], [], []
         n_seen = 0
         for batch in tqdm(loader, desc=f"sample w={omega}"):
             x1 = batch.x1.to(device)
             lengths = batch.lengths
 
-            real_feats = [_real_h3d(x1[i], int(lengths[i]), skeleton, use_upstream=use_upstream)
-                          for i in range(x1.shape[0])]
+            real_feats, real_lens = [], []
+            for i in range(x1.shape[0]):
+                f = None
+                if real_dir is not None:
+                    p = real_dir / f"{batch.clip_ids[i]}.npy"
+                    if p.exists():
+                        arr = np.load(p)[: int(cfg.data.max_seq_len) - 1]
+                        f = torch.from_numpy(arr.astype(np.float32))
+                if f is None:
+                    if real_dir is not None:
+                        n_real_fallback += 1
+                    f = _real_h3d(x1[i], int(lengths[i]), skeleton, use_upstream=use_upstream)
+                real_feats.append(f)
+                real_lens.append(f.shape[0])
             real_feats = [_calibrate(f, calib) for f in real_feats]
-            real_emb.append(evaluator.encode_motion(_pad_stack(real_feats), lengths - 1).cpu().numpy())
+            real_emb.append(evaluator.encode_motion(
+                _pad_stack(real_feats), torch.tensor(real_lens, dtype=torch.long)).cpu().numpy())
+            if diag_recon:
+                recon_feats = [_real_h3d(x1[i], int(lengths[i]), skeleton, use_upstream=use_upstream)
+                               for i in range(x1.shape[0])]
+                recon_emb.append(evaluator.encode_motion(_pad_stack(recon_feats), lengths - 1).cpu().numpy())
             if caption_tokens is not None:
                 toks = [caption_tokens.get(cid, {}).get(cap)
                         for cid, cap in zip(batch.clip_ids, batch.texts)]
@@ -300,6 +337,9 @@ def main(cfg: DictConfig) -> None:
         text_emb = np.concatenate(text_emb, 0)
         if caption_tokens is not None:
             print(f"[eval] VIP tokens: {n_text_fallback} caption(s) fell back to spaCy", flush=True)
+        if real_dir is not None and n_real_fallback:
+            print(f"[eval] canonical real features: {n_real_fallback} clip(s) missing a "
+                  f"new_joint_vecs file, fell back to packed reconstruction", flush=True)
         rng = np.random.default_rng(int(cfg.eval.seed))
 
         # Harness ceiling: R@1 of REAL motions vs their own captions (no model).
@@ -314,6 +354,11 @@ def main(cfg: DictConfig) -> None:
             # random) — i.e. the motion features are the bottleneck, not the code.
             "mm_dist_real": mm_distance(text_emb, real_emb),
         }
+        if diag_recon:
+            recon_emb_np = np.concatenate(recon_emb, 0)
+            results["fid_recon_floor"] = fid(real_emb, recon_emb_np)
+            results["mm_dist_recon"] = mm_distance(text_emb, recon_emb_np)
+            results["r_precision_recon"] = r_precision(text_emb, recon_emb_np, top_k=3, rng=rng).tolist()
         if not skip_gen:
             gen_emb = np.concatenate(gen_emb, 0)
             results.update({
