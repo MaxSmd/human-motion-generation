@@ -275,6 +275,7 @@ def main_impl(cfg: DictConfig) -> None:
         root=cfg.data.root, split=str(cfg.viz.get("split", "train")),
         subset_frac=cfg.get("subset_frac"), limit_clips=cfg.get("limit_clips"),
         window_size=None, min_seq_len=cfg.data.min_seq_len, max_seq_len=cfg.data.max_seq_len,
+        canonical_dir=cfg.data.get("canonical_dir"),
     )
     n_render = min(len(dataset), int(cfg.viz.num_clips))
     zf = zipfile.ZipFile(Path(cfg.data.root) / cfg.data.zip_name)
