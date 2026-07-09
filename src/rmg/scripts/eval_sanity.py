@@ -105,21 +105,31 @@ def main(cfg: DictConfig) -> None:
     print(f"[sanity] {len(all_feats)} real clips featurized"
           f" ({n_text_fallback} captions via spaCy fallback)")
 
-    def embed_pass(rng: np.random.Generator, jitter: bool, bs: int = 32) -> np.ndarray:
-        """Crop every clip to unit-length (upstream protocol) and embed."""
+    def embed_pass(
+        rng: np.random.Generator, jitter: bool, pad_to: int | None = None, bs: int = 32,
+    ) -> np.ndarray:
+        """Crop every clip to unit-length (upstream protocol) and embed.
+        `pad_to` mimics upstream's fixed zero-pad to max_motion_length=196
+        (dataset.py pads EVERY clip to 196 before the conv movement encoder);
+        None pads to the chunk max instead."""
         out = []
         for s in range(0, len(all_feats), bs):
             chunk = [crop_to_unit_length(f, rng, jitter=jitter) for f in all_feats[s:s + bs]]
             lens = torch.tensor([c.shape[0] for c in chunk])
-            padded = torch.zeros(len(chunk), int(lens.max()), 263)
+            width = pad_to if pad_to is not None else int(lens.max())
+            padded = torch.zeros(len(chunk), width, 263)
             for i, c in enumerate(chunk):
                 padded[i, : c.shape[0]] = c
             out.append(evaluator.encode_motion(padded, lens).cpu().numpy())
         return np.concatenate(out, axis=0)
 
     seed = int(cfg.eval.seed)
-    real_a = embed_pass(np.random.default_rng(seed), jitter=True)
-    real_b = embed_pass(np.random.default_rng(seed + 1), jitter=True)
+    # Full upstream protocol: jittered unit crop + fixed 196 pad.
+    real_a = embed_pass(np.random.default_rng(seed), jitter=True, pad_to=196)
+    real_b = embed_pass(np.random.default_rng(seed + 1), jitter=True, pad_to=196)
+    # Ablations to locate pairwise-metric sensitivity.
+    real_nojit = embed_pass(np.random.default_rng(seed), jitter=False, pad_to=196)
+    real_nojit_chunk = embed_pass(np.random.default_rng(seed), jitter=False, pad_to=None)
 
     rng = np.random.default_rng(seed)
     half = real_a.shape[0] // 2
@@ -131,7 +141,10 @@ def main(cfg: DictConfig) -> None:
         # Disjoint halves (small-sample-biased; kept for continuity).
         "fid_real_vs_real": float(fid(real_a[perm[:half]], real_a[perm[half:2 * half]])),
         "r_precision_real": r_precision(text, real_a, top_k=3, rng=rng).tolist(),
+        "r_precision_real_nojitter": r_precision(text, real_nojit, top_k=3, rng=np.random.default_rng(seed)).tolist(),
+        "r_precision_real_nojitter_chunkpad": r_precision(text, real_nojit_chunk, top_k=3, rng=np.random.default_rng(seed)).tolist(),
         "mm_dist_real": float(mm_distance(text, real_a)),
+        "mm_dist_real_nojitter": float(mm_distance(text, real_nojit)),
         "diversity_real": float(diversity(real_a, diversity_times=int(cfg.eval.diversity_times), rng=rng)),
     }
     print(json.dumps(results, indent=2))
