@@ -39,23 +39,41 @@ class CaptionTokenLookup:
         }
         self._cache: dict[str, dict[str, list[str]]] = {}
 
-    def _load_clip(self, clip_id: str) -> dict[str, list[str]]:
+    def _load_clip(self, clip_id: str) -> dict[str, tuple[list[str], float, float]]:
         cached = self._cache.get(clip_id)
         if cached is not None:
             return cached
-        out: dict[str, list[str]] = {}
+        out: dict[str, tuple[list[str], float, float]] = {}
         name = self._names.get(clip_id)
         if name is not None:
             for line in self._zf.read(name).decode("utf-8").splitlines():
                 parts = line.split("#")
                 if len(parts) >= 2 and parts[1].strip():
-                    out.setdefault(_norm(parts[0]), parts[1].strip().split(" "))
+                    try:
+                        start = float(parts[2]) if len(parts) > 2 and parts[2].strip() else 0.0
+                        end = float(parts[3]) if len(parts) > 3 and parts[3].strip() else 0.0
+                    except ValueError:
+                        start = end = 0.0
+                    out.setdefault(_norm(parts[0]), (parts[1].strip().split(" "), start, end))
         self._cache[clip_id] = out
         return out
 
     def get(self, clip_id: str, caption: str) -> list[str] | None:
         """Pre-tagged tokens for this caption, or None if not found."""
-        return self._load_clip(clip_id).get(_norm(caption))
+        hit = self._load_clip(clip_id).get(_norm(caption))
+        return hit[0] if hit is not None else None
+
+    def get_span(self, clip_id: str, caption: str) -> tuple[float, float] | None:
+        """(start, end) seconds for this caption per texts.zip; (0, 0) = whole
+        clip. In official HumanML3D, nonzero-span captions belong to a
+        SEPARATE segmented clip id — a parent clip carrying them indicates the
+        pack bundled sub-segment captions, which mispairs text and motion."""
+        hit = self._load_clip(clip_id).get(_norm(caption))
+        return (hit[1], hit[2]) if hit is not None else None
+
+    def whole_clip_captions(self, clip_id: str) -> list[str]:
+        """Captions of this clip whose span is (0, 0) (describe the whole clip)."""
+        return [c for c, (_t, s, e) in self._load_clip(clip_id).items() if s == 0.0 and e == 0.0]
 
 
 def encode_texts_prefer_tokens(

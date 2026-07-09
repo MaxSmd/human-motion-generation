@@ -83,27 +83,55 @@ def main(cfg: DictConfig) -> None:
 
     # Featurize once (expensive: FK + upstream IK per clip), embed in passes.
     all_feats: list[torch.Tensor] = []
-    text_embs = []
+    all_clip_ids: list[str] = []
+    text_embs, text_embs_whole = [], []
     n_seen = 0
     n_text_fallback = 0
+    n_span_captions = 0
+    n_respan = 0
     for batch in tqdm(loader, desc="featurize real"):
         x1 = batch.x1.to(device)
         lengths = batch.lengths
         for i in range(x1.shape[0]):
             L = int(lengths[i].item())
             all_feats.append(representation.to_h3d_features(x1[i, :L], skeleton).cpu())
+        all_clip_ids.extend(batch.clip_ids)
         temb, n_fb = encode_texts_prefer_tokens(
             evaluator, token_lookup, batch.clip_ids, batch.texts,
         )
         n_text_fallback += n_fb
         text_embs.append(temb.cpu().numpy())
+
+        # Span audit + whole-clip variant: in official HumanML3D, captions with
+        # nonzero start/end describe a SUB-SEGMENT and live under their own
+        # segmented clip id — a pack that bundles them onto the parent clip
+        # mispairs text and motion. Re-draw such captions from the clip's
+        # (0,0)-span pool where possible and encode a second text set.
+        whole_texts = list(batch.texts)
+        if token_lookup is not None:
+            for i, (cid, cap) in enumerate(zip(batch.clip_ids, batch.texts)):
+                span = token_lookup.get_span(cid, cap)
+                if span is not None and span != (0.0, 0.0):
+                    n_span_captions += 1
+                    pool = token_lookup.whole_clip_captions(cid)
+                    if pool:
+                        whole_texts[i] = pool[0]
+                        n_respan += 1
+        temb_w, _ = encode_texts_prefer_tokens(
+            evaluator, token_lookup, batch.clip_ids, whole_texts,
+        )
+        text_embs_whole.append(temb_w.cpu().numpy())
+
         n_seen += x1.shape[0]
         if cfg.eval.max_clips > 0 and n_seen >= cfg.eval.max_clips:
             break
 
     text = np.concatenate(text_embs, axis=0)
+    text_whole = np.concatenate(text_embs_whole, axis=0)
     print(f"[sanity] {len(all_feats)} real clips featurized"
           f" ({n_text_fallback} captions via spaCy fallback)")
+    print(f"[sanity] span audit: {n_span_captions}/{len(all_feats)} chosen captions "
+          f"describe a sub-segment (start/end != 0); {n_respan} re-drawn to whole-clip captions")
 
     def embed_pass(
         rng: np.random.Generator, jitter: bool, pad_to: int | None = None, bs: int = 32,
@@ -159,7 +187,19 @@ def main(cfg: DictConfig) -> None:
         "r_precision_real_nojitter": r_precision(text, real_nojit, top_k=3, rng=np.random.default_rng(seed)).tolist(),
         "r_precision_real_nojitter_chunkpad": r_precision(text, real_nojit_chunk, top_k=3, rng=np.random.default_rng(seed)).tolist(),
         "r_precision_real_rawlen": r_precision(text, real_rawlen, top_k=3, rng=np.random.default_rng(seed)).tolist(),
+        "r_precision_real_rawlen_wholecap": r_precision(text_whole, real_rawlen, top_k=3, rng=np.random.default_rng(seed)).tolist(),
+        # Regular vs pack-time-mirrored ('M') clips: a geometric flaw in the
+        # pack's quaternion-domain mirror would tank the M subset only.
+        "r_precision_real_rawlen_regular": r_precision(
+            text[[i for i, c in enumerate(all_clip_ids) if not c.startswith("M")]],
+            real_rawlen[[i for i, c in enumerate(all_clip_ids) if not c.startswith("M")]],
+            top_k=3, rng=np.random.default_rng(seed)).tolist(),
+        "r_precision_real_rawlen_mirrored": r_precision(
+            text[[i for i, c in enumerate(all_clip_ids) if c.startswith("M")]],
+            real_rawlen[[i for i, c in enumerate(all_clip_ids) if c.startswith("M")]],
+            top_k=3, rng=np.random.default_rng(seed)).tolist(),
         "mm_dist_real_rawlen": float(mm_distance(text, real_rawlen)),
+        "mm_dist_real_rawlen_wholecap": float(mm_distance(text_whole, real_rawlen)),
         "mm_dist_real": float(mm_distance(text, real_a)),
         "mm_dist_real_nojitter": float(mm_distance(text, real_nojit)),
         "diversity_real": float(diversity(real_a, diversity_times=int(cfg.eval.diversity_times), rng=rng)),
