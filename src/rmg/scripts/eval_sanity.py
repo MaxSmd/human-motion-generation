@@ -34,6 +34,7 @@ from tqdm import tqdm
 
 from rmg.data import collate
 from shared.eval import diversity, fid, mm_distance, r_precision
+from shared.eval.metrics import crop_to_unit_length
 from shared.eval.text_tokens import CaptionTokenLookup, encode_texts_prefer_tokens
 from shared.utils import set_seed
 
@@ -80,52 +81,58 @@ def main(cfg: DictConfig) -> None:
         print(f"[sanity] WARN: {e} — spaCy fallback (expect halved R-precision)")
         token_lookup = None
 
-    real_embs, text_embs = [], []
-    raw_feat_stats = []
+    # Featurize once (expensive: FK + upstream IK per clip), embed in passes.
+    all_feats: list[torch.Tensor] = []
+    text_embs = []
     n_seen = 0
     n_text_fallback = 0
     for batch in tqdm(loader, desc="featurize real"):
         x1 = batch.x1.to(device)
         lengths = batch.lengths
-
-        feats = []
         for i in range(x1.shape[0]):
             L = int(lengths[i].item())
-            feats.append(representation.to_h3d_features(x1[i, :L], skeleton))
-
-        Tmax = int(lengths.max().item())
-        padded = torch.zeros(len(feats), Tmax - 1, 263)
-        for i, f in enumerate(feats):
-            padded[i, : f.shape[0]] = f
-            raw_feat_stats.append((float(f.abs().mean()), float(f.abs().max())))
-
-        real_embs.append(evaluator.encode_motion(padded, lengths - 1).cpu().numpy())
+            all_feats.append(representation.to_h3d_features(x1[i, :L], skeleton).cpu())
         temb, n_fb = encode_texts_prefer_tokens(
             evaluator, token_lookup, batch.clip_ids, batch.texts,
         )
         n_text_fallback += n_fb
         text_embs.append(temb.cpu().numpy())
-
         n_seen += x1.shape[0]
         if cfg.eval.max_clips > 0 and n_seen >= cfg.eval.max_clips:
             break
 
-    real = np.concatenate(real_embs, axis=0)
     text = np.concatenate(text_embs, axis=0)
-    print(f"[sanity] {real.shape[0]} real clips embedded"
+    print(f"[sanity] {len(all_feats)} real clips featurized"
           f" ({n_text_fallback} captions via spaCy fallback)")
 
-    am = np.array(raw_feat_stats)
-    print(f"[sanity] raw 263-D features: |f| mean {am[:,0].mean():.3f}  max {am[:,1].max():.1f}")
+    def embed_pass(rng: np.random.Generator, jitter: bool, bs: int = 32) -> np.ndarray:
+        """Crop every clip to unit-length (upstream protocol) and embed."""
+        out = []
+        for s in range(0, len(all_feats), bs):
+            chunk = [crop_to_unit_length(f, rng, jitter=jitter) for f in all_feats[s:s + bs]]
+            lens = torch.tensor([c.shape[0] for c in chunk])
+            padded = torch.zeros(len(chunk), int(lens.max()), 263)
+            for i, c in enumerate(chunk):
+                padded[i, : c.shape[0]] = c
+            out.append(evaluator.encode_motion(padded, lens).cpu().numpy())
+        return np.concatenate(out, axis=0)
 
-    rng = np.random.default_rng(int(cfg.eval.seed))
-    half = real.shape[0] // 2
-    perm = rng.permutation(real.shape[0])
+    seed = int(cfg.eval.seed)
+    real_a = embed_pass(np.random.default_rng(seed), jitter=True)
+    real_b = embed_pass(np.random.default_rng(seed + 1), jitter=True)
+
+    rng = np.random.default_rng(seed)
+    half = real_a.shape[0] // 2
+    perm = rng.permutation(real_a.shape[0])
     results = {
-        "fid_real_vs_real": float(fid(real[perm[:half]], real[perm[half:2 * half]])),
-        "r_precision_real": r_precision(text, real, top_k=3, rng=rng).tolist(),
-        "mm_dist_real": float(mm_distance(text, real)),
-        "diversity_real": float(diversity(real, diversity_times=int(cfg.eval.diversity_times), rng=rng)),
+        # Upstream's "GT" row protocol: same motions embedded twice with
+        # different random crop draws — published ≈ 0.002.
+        "fid_gt_gt_protocol": float(fid(real_a, real_b)),
+        # Disjoint halves (small-sample-biased; kept for continuity).
+        "fid_real_vs_real": float(fid(real_a[perm[:half]], real_a[perm[half:2 * half]])),
+        "r_precision_real": r_precision(text, real_a, top_k=3, rng=rng).tolist(),
+        "mm_dist_real": float(mm_distance(text, real_a)),
+        "diversity_real": float(diversity(real_a, diversity_times=int(cfg.eval.diversity_times), rng=rng)),
     }
     print(json.dumps(results, indent=2))
 

@@ -44,6 +44,7 @@ from shared.eval import (
     multimodality,
     r_precision,
 )
+from shared.eval.metrics import crop_to_unit_length
 from shared.eval.text_tokens import CaptionTokenLookup, encode_texts_prefer_tokens
 from rmg.flow import (
     RiemannianEulerSampler,
@@ -255,6 +256,7 @@ def main(cfg: DictConfig) -> None:
         real_motion_feats, gen_motion_feats, text_feats = [], [], []
         n_seen = 0
         n_text_fallback = 0
+        crop_rng = np.random.default_rng(int(cfg.eval.seed) + int(float(omega) * 10))
 
         for batch in tqdm(loader, desc=f"sample ω={omega}"):
             x1 = batch.x1.to(device)
@@ -273,16 +275,24 @@ def main(cfg: DictConfig) -> None:
                 L = int(lengths[i].item())
                 real_feats.append(representation.to_h3d_features(x1[i, :L], skeleton))
 
-            # Pad to a common (max-1) for batch encoding via the Guo evaluator.
-            Tmax = int(lengths.max().item())
-            real_padded = torch.zeros(len(real_feats), Tmax - 1, 263)
-            gen_padded = torch.zeros(len(gen_feats), Tmax - 1, 263)
+            # Upstream eval protocol: crop clips to multiples of unit_length=4
+            # (the movement encoder is a stride-4 conv; raw lengths misalign
+            # the co-embedding and depress R-precision/mm_dist — real-motion
+            # R@1 measured 0.344 vs the published 0.511 without this). Same
+            # jittered crop on real and gen, mirroring dataset.py.
+            real_feats = [crop_to_unit_length(f, crop_rng) for f in real_feats]
+            gen_feats = [crop_to_unit_length(f, crop_rng) for f in gen_feats]
+
+            real_lens = torch.tensor([f.shape[0] for f in real_feats])
+            gen_lens = torch.tensor([f.shape[0] for f in gen_feats])
+            real_padded = torch.zeros(len(real_feats), int(real_lens.max()), 263)
+            gen_padded = torch.zeros(len(gen_feats), int(gen_lens.max()), 263)
             for i, (rf, gf) in enumerate(zip(real_feats, gen_feats)):
                 real_padded[i, : rf.shape[0]] = rf
                 gen_padded[i, : gf.shape[0]] = gf
 
-            real_emb = evaluator.encode_motion(real_padded, lengths - 1)
-            gen_emb = evaluator.encode_motion(gen_padded, lengths - 1)
+            real_emb = evaluator.encode_motion(real_padded, real_lens)
+            gen_emb = evaluator.encode_motion(gen_padded, gen_lens)
             # Prefer HumanML3D's pre-tagged word/POS tokens: the Guo text
             # encoder was trained on their custom *_VIP tags, which spaCy
             # tagging never produces — the from_strings path silently halves
@@ -358,12 +368,14 @@ def main(cfg: DictConfig) -> None:
             t_sample = time.perf_counter()
             feats = []
             for k in range(K):
-                feats.append(representation.to_h3d_features(samples[k, :L], skeleton))
+                f = representation.to_h3d_features(samples[k, :L], skeleton)
+                feats.append(crop_to_unit_length(f, crop_rng))
             t_feat = time.perf_counter()
-            padded = torch.zeros(K, L - 1, 263)
+            mm_lens = torch.tensor([f.shape[0] for f in feats])
+            padded = torch.zeros(K, int(mm_lens.max()), 263)
             for k, f in enumerate(feats):
                 padded[k, : f.shape[0]] = f
-            emb = evaluator.encode_motion(padded, torch.full((K,), L - 1, dtype=torch.long))
+            emb = evaluator.encode_motion(padded, mm_lens)
             mm_per_text.append(emb.cpu().numpy())
             t_emb = time.perf_counter()
             print(f"[ω={omega} MM {mm_idx + 1}/{len(mm_texts)}] L={L} "
