@@ -131,6 +131,21 @@ def main(cfg: DictConfig) -> None:
     real_nojit = embed_pass(np.random.default_rng(seed), jitter=False, pad_to=196)
     real_nojit_chunk = embed_pass(np.random.default_rng(seed), jitter=False, pad_to=None)
 
+    def embed_rawlen(bs: int = 32) -> np.ndarray:
+        """No crop at all — raw T-1 lengths (the pre-crop harness), to
+        reproduce/refute the 0.344 real R@1 measured before the crop landed."""
+        out = []
+        for s in range(0, len(all_feats), bs):
+            chunk = all_feats[s:s + bs]
+            lens = torch.tensor([c.shape[0] for c in chunk])
+            padded = torch.zeros(len(chunk), int(lens.max()), 263)
+            for i, c in enumerate(chunk):
+                padded[i, : c.shape[0]] = c
+            out.append(evaluator.encode_motion(padded, lens).cpu().numpy())
+        return np.concatenate(out, axis=0)
+
+    real_rawlen = embed_rawlen()
+
     rng = np.random.default_rng(seed)
     half = real_a.shape[0] // 2
     perm = rng.permutation(real_a.shape[0])
@@ -143,6 +158,8 @@ def main(cfg: DictConfig) -> None:
         "r_precision_real": r_precision(text, real_a, top_k=3, rng=rng).tolist(),
         "r_precision_real_nojitter": r_precision(text, real_nojit, top_k=3, rng=np.random.default_rng(seed)).tolist(),
         "r_precision_real_nojitter_chunkpad": r_precision(text, real_nojit_chunk, top_k=3, rng=np.random.default_rng(seed)).tolist(),
+        "r_precision_real_rawlen": r_precision(text, real_rawlen, top_k=3, rng=np.random.default_rng(seed)).tolist(),
+        "mm_dist_real_rawlen": float(mm_distance(text, real_rawlen)),
         "mm_dist_real": float(mm_distance(text, real_a)),
         "mm_dist_real_nojitter": float(mm_distance(text, real_nojit)),
         "diversity_real": float(diversity(real_a, diversity_times=int(cfg.eval.diversity_times), rng=rng)),
