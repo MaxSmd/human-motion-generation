@@ -33,6 +33,7 @@ MIN_SEQ_LEN="${MIN_SEQ_LEN:-40}"
 VARIANTS="${VARIANTS:-full,base}"
 GUIDANCE_SCALE="${GUIDANCE_SCALE:-1.0}"
 TEMPERATURE="${TEMPERATURE:-1.0}"
+GENERATION_STEPS="${GENERATION_STEPS:-}"
 EVALUATOR="${EVALUATOR:-real}"
 OUTPUT="${OUTPUT:-}"
 
@@ -46,7 +47,19 @@ echo "[momask-eval] image=${IMAGE}"
 echo "[momask-eval] data_root=${DATA_ROOT}"
 echo "[momask-eval] ckpt=${CKPT}"
 echo "[momask-eval] max_clips=${MAX_CLIPS} batch_size=${BATCH_SIZE} variants=${VARIANTS}"
+echo "[momask-eval] generation_steps=${GENERATION_STEPS:-checkpoint-default}"
 echo "[momask-eval] output=${OUTPUT}"
+
+GENERATION_ARGS=""
+if [ -n "${GENERATION_STEPS}" ]; then
+    case "${GENERATION_STEPS}" in
+        ''|*[!0-9]*)
+            echo "[momask-eval] ERROR: GENERATION_STEPS must be a positive integer, got '${GENERATION_STEPS}'" >&2
+            exit 1
+            ;;
+    esac
+    GENERATION_ARGS="--generation-steps ${GENERATION_STEPS}"
+fi
 
 enroot start \
     --root \
@@ -71,6 +84,7 @@ enroot start \
             --max-seq-len ${MAX_SEQ_LEN} \
             --min-seq-len ${MIN_SEQ_LEN} \
             --variants '${VARIANTS}' \
+            ${GENERATION_ARGS} \
             --guidance-scale ${GUIDANCE_SCALE} \
             --temperature ${TEMPERATURE} \
             --evaluator '${EVALUATOR}' \
