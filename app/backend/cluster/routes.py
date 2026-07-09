@@ -203,6 +203,13 @@ class EvalRequest(BaseModel):
     use_ema: bool | None = None
     overrides: str | None = None
     ae_checkpoint: str | None = None     # MARDM-only: the stage-1 AE checkpoint
+    # Cluster placement. Evals default to the 12g partition (they fit in <12GB;
+    # the cluster warns at 1h / auto-cancels at 2h any job using <50% GPU mem
+    # on the big cards). The 2h cap also bounds job LENGTH — split many-ω
+    # sweeps into multiple jobs (~40 min per ω on the full test split).
+    partition: str | None = None
+    walltime: str | None = None
+    sbatch_extra: str | None = None
 
 
 class AdoptRequest(TrainRequest):

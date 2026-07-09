@@ -157,7 +157,14 @@ class JobManager:
         script, env, job_name, run_name = builder(params)
         # Train jobs carry partition/walltime overrides and opt into auto-resubmit
         # so a multi-day run survives the cluster's 24h walltime untended.
-        sbatch_flags = submit.sbatch_flags_for_train(params) if kind == "train" else []
+        # Eval jobs default to the 12g partition (they fit; the cluster
+        # auto-cancels <50%-GPU-mem jobs after 2h on the big partition).
+        if kind == "train":
+            sbatch_flags = submit.sbatch_flags_for_train(params)
+        elif kind == "eval":
+            sbatch_flags = submit.sbatch_flags_for_eval(params)
+        else:
+            sbatch_flags = []
         auto_resubmit = kind == "train" and params.get("auto_resubmit", True)
         job = ClusterJob(
             id=secrets.token_hex(6), kind=kind, mode=params.get("mode", ""),

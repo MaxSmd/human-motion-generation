@@ -72,6 +72,24 @@ def sbatch_flags_for_train(params: dict) -> list[str]:
     return flags
 
 
+def sbatch_flags_for_eval(params: dict) -> list[str]:
+    """SBATCH CLI overrides for an eval job. Evals fit in <12GB even for
+    dit_mid (measured <50% of a 24g card), and the cluster auto-cancels jobs
+    under 50% GPU-mem utilization after 2h — so default to the 12g partition
+    unless the caller overrides. Same sm_75 gres pin as train: only the 12g
+    partition's RTX 2080 Ti nodes can run the CUDA-13 container."""
+    partition = params.get("partition") or "12g"
+    flags = [f"--partition={partition}"]
+    if params.get("walltime"):
+        flags.append(f"--time={params['walltime']}")
+    extra = str(params.get("sbatch_extra") or "")
+    if partition == "12g" and "gres" not in extra:
+        flags.append("--gres=gpu:RTX2080Ti:1")
+    if extra:
+        flags.extend(shlex.split(extra))
+    return flags
+
+
 def render_command(
     script: str, env: dict[str, str], job_name: str, sbatch_flags: list[str] | None = None
 ) -> str:
