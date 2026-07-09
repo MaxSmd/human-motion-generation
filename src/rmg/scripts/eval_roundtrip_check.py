@@ -25,7 +25,7 @@ from pathlib import Path
 import hydra
 import numpy as np
 import torch
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, OmegaConf, open_dict
 
 from shared.data.humanml3d import read_clip
 from shared.geometry import normalize_quaternions
@@ -46,15 +46,16 @@ GROUPS = {
 @hydra.main(config_path="../configs", config_name="train", version_base=None)
 def main(cfg: DictConfig) -> None:
     check_cfg = OmegaConf.create({"clip_id": "012314", "pack_zip": "", "humanml3d_repo": "external/HumanML3D"})
-    cfg.check = OmegaConf.merge(check_cfg, cfg.get("check", OmegaConf.create({})))
-    cfg.eval = OmegaConf.merge(
-        OmegaConf.create({
-            "evaluator": "real",
-            "text_to_motion_repo": "external/text-to-motion",
-            "humanml3d_repo": "external/HumanML3D",
-        }),
-        cfg.get("eval", OmegaConf.create({})),
-    )
+    with open_dict(cfg):
+        cfg.check = OmegaConf.merge(check_cfg, cfg.get("check", OmegaConf.create({})))
+        cfg.eval = OmegaConf.merge(
+            OmegaConf.create({
+                "evaluator": "real",
+                "text_to_motion_repo": "external/text-to-motion",
+                "humanml3d_repo": "external/HumanML3D",
+            }),
+            cfg.get("eval", OmegaConf.create({})),
+        )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     cid = str(cfg.check.clip_id)
 
