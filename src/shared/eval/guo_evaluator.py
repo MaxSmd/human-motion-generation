@@ -72,6 +72,20 @@ class _GuoOpts:
     unit_length: int = 4
 
 
+def _upstream_align_indices(m_lens: Tensor) -> tuple[np.ndarray, np.ndarray]:
+    """Upstream's length ordering (descending, for pack_padded_sequence) + its inverse.
+
+    `np.argsort(x)[::-1]` is *not* a descending sort: on tied values it emits the
+    tie group in reverse. Evaluation truncates every long clip to a common frame
+    cap, so one huge tie group is the norm — assuming this permutation is a no-op
+    silently mis-pairs each tied motion with another clip's caption.
+    """
+    align = np.argsort(m_lens.detach().cpu().numpy())[::-1].copy()
+    inv = np.empty_like(align)
+    inv[align] = np.arange(align.size)
+    return align, inv
+
+
 class RealGuoEvaluator:
     motion_dim = 512
     text_dim = 512
@@ -163,22 +177,21 @@ class RealGuoEvaluator:
     # ------------------------------------------------------------ public API
 
     def encode_motion(self, motion_features: Tensor, lengths: Tensor) -> Tensor:
-        # Upstream `get_motion_embeddings` sorts internally by length descending
-        # (for pack_padded_sequence) and does NOT undo the sort before
-        # returning. That scrambles the input→output correspondence, breaking
-        # any metric that pairs motion embeddings with text embeddings by
-        # index (R@k, mm_dist, paired FID). We pre-sort here and un-sort the
-        # result, so callers get embeddings in the same order as the input.
+        # Upstream `get_motion_embeddings` reorders by length and returns
+        # embeddings in *that* order ("the results does not following the order
+        # of inputs"). Anything pairing motion with text by index (R@k, mm_dist)
+        # breaks unless the exact permutation is undone. Reproduce its ordering
+        # and invert it, encoding the way `get_co_embeddings` does.
         x = self.normalize(motion_features.to(self._device).float())
         m_lens = lengths.to(self._device).long()
-        sort_idx = torch.argsort(m_lens, descending=True)
-        inv_idx = torch.empty_like(sort_idx)
-        inv_idx[sort_idx] = torch.arange(sort_idx.numel(), device=sort_idx.device)
-        sorted_emb = self._wrapper.get_motion_embeddings(x[sort_idx], m_lens[sort_idx])
-        # Upstream sorts again internally — the result is in *its* sort order
-        # over the already-sorted input, which equals the sort order over the
-        # original input. So inv_idx of the original order undoes both layers.
-        return sorted_emb[inv_idx]
+        align, inv = _upstream_align_indices(m_lens)
+        align_t = torch.as_tensor(align, device=self._device)
+        inv_t = torch.as_tensor(inv, device=self._device)
+        unit = self._wrapper.opt.unit_length
+        with torch.no_grad():
+            movements = self._wrapper.movement_encoder(x[align_t][..., :-4]).detach()
+            emb = self._wrapper.motion_encoder(movements, m_lens[align_t] // unit)
+        return emb[inv_t]
 
     def encode_text_from_strings(self, texts: list[str]) -> Tensor:
         word_embs, pos_ohot, cap_lens = self._tokenize_for_text_enc(texts)

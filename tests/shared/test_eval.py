@@ -22,6 +22,7 @@ from shared.eval import (
     multimodality,
     r_precision,
 )
+from shared.eval.guo_evaluator import _upstream_align_indices
 
 
 # ---------------------------------------------------------------------------
@@ -161,3 +162,34 @@ def test_random_guo_evaluator_text_is_deterministic_per_string() -> None:
     a = ev.encode_text_from_strings(["a person walks", "a person runs"])
     b = ev.encode_text_from_strings(["a person walks", "a person runs"])
     assert torch.allclose(a, b)
+
+
+# ---------------------------------------------------------------------------
+# Upstream length-ordering (the tie-group trap)
+# ---------------------------------------------------------------------------
+
+
+def test_upstream_align_indices_round_trip_under_ties() -> None:
+    # Eval caps long clips at a common length, so ties are the norm. Reversed
+    # argsort flips each tie group, so treating the permutation as a no-op
+    # mis-pairs tied motions with other clips' captions.
+    m_lens = torch.tensor([195, 195, 195, 195, 120, 80, 80, 40])
+    align, inv = _upstream_align_indices(m_lens)
+
+    assert not np.array_equal(align, np.arange(m_lens.numel())), (
+        "reversed-argsort must not be assumed to be the identity under ties"
+    )
+    # lengths must land descending — pack_padded_sequence requires it
+    assert np.all(np.diff(m_lens.numpy()[align]) <= 0)
+    # applying inv to align-ordered rows restores the caller's original order
+    rows = np.arange(m_lens.numel())
+    assert np.array_equal(rows[align][inv], rows)
+
+
+def test_upstream_align_indices_is_identity_without_ties() -> None:
+    # All-distinct lengths are why the tie bug hid: here the permutation really
+    # is a no-op, so any test using distinct lengths passes either way.
+    m_lens = torch.tensor([200, 150, 100, 50])
+    align, inv = _upstream_align_indices(m_lens)
+    assert np.array_equal(align, np.arange(m_lens.numel()))
+    assert np.array_equal(inv, np.arange(m_lens.numel()))
