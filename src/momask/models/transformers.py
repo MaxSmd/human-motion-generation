@@ -111,8 +111,9 @@ class MaskedMotionTransformer(_TransformerBackbone):
         if force_full_mask:
             ratio = torch.ones(B, device=device)
         else:
-            ratio = torch.rand(B, device=device).clamp_min(1.0 / max(T, 1))
-        masked = tokens.clone()
+            tau = torch.rand(B, device=device)
+            ratio = torch.cos(math.pi * tau / 2.0).clamp_min(1.0 / max(T, 1))
+        corrupted = tokens.clone()
         predict_mask = torch.zeros(B, T, dtype=torch.bool, device=device)
         for i in range(B):
             candidates = valid_mask[i] if valid_mask is not None else torch.ones(T, dtype=torch.bool, device=device)
@@ -122,9 +123,16 @@ class MaskedMotionTransformer(_TransformerBackbone):
             n = max(1, int(math.ceil(idx.numel() * float(ratio[i]))))
             chosen = idx[torch.randperm(idx.numel(), device=device)[:n]]
             predict_mask[i, chosen] = True
-        masked[predict_mask] = self.mask_token_id
+        replace_prob = torch.rand(B, T, device=device)
+        random_tokens = torch.randint_like(corrupted, high=self.cfg.vocab_size)
+        corrupted = torch.where(predict_mask & (replace_prob < 0.8), self.mask_token_id, corrupted)
+        corrupted = torch.where(
+            predict_mask & (replace_prob >= 0.8) & (replace_prob < 0.9),
+            random_tokens,
+            corrupted,
+        )
         drop = torch.rand(B, device=device) < cond_drop_prob
-        logits = self(masked, cond=cond, mask=valid_mask, drop_cond_mask=drop)
+        logits = self(corrupted, cond=cond, mask=valid_mask, drop_cond_mask=drop)
         loss_mask = predict_mask if valid_mask is None else predict_mask & valid_mask
         return F.cross_entropy(logits[loss_mask], tokens[loss_mask])
 

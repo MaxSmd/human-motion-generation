@@ -20,12 +20,16 @@ dist/
 # experiment outputs
 runs/
 outputs/
+work/
 wandb/
 lightning_logs/
 checkpoints/
 *.ckpt
 *.pt
 !tests/**/*.pt
+
+# generated frontend / artifact dependencies
+node_modules/
 
 # data (anchored: only the downloaded blob dirs under external/, NOT src/rmg/data/)
 /external/data/

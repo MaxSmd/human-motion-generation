@@ -40,6 +40,17 @@ EVAL_BATCHES="${EVAL_BATCHES:-32}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 TOKEN_BATCH_SIZE="${TOKEN_BATCH_SIZE:-128}"
 MAX_SEQ_LEN="${MAX_SEQ_LEN:-80}"
+TOKEN_LR="${TOKEN_LR:-1e-4}"
+BASE_COND_DROP="${BASE_COND_DROP:-0.1}"
+RESIDUAL_COND_DROP="${RESIDUAL_COND_DROP:-0.2}"
+BASE_FULL_MASK_PROB="${BASE_FULL_MASK_PROB:-0.3}"
+GENERATION_STEPS="${GENERATION_STEPS:-10}"
+CACHE_TOKEN_DEVICE="${CACHE_TOKEN_DEVICE:-cuda}"
+
+TOKEN_CKPT_ARG=""
+if [ -n "${TOKEN_CKPT}" ]; then
+    TOKEN_CKPT_ARG="--load-token-checkpoint '${TOKEN_CKPT}'"
+fi
 
 echo "[momask-tokens] host=$(hostname)"
 echo "[momask-tokens] repo=${REPO}"
@@ -49,6 +60,7 @@ echo "[momask-tokens] vq_ckpt=${VQ_CKPT}"
 echo "[momask-tokens] token_ckpt=${TOKEN_CKPT:-<none>}"
 echo "[momask-tokens] output_dir=${OUTPUT_DIR}"
 echo "[momask-tokens] token_steps=${TOKEN_STEPS} batch_size=${BATCH_SIZE} token_batch_size=${TOKEN_BATCH_SIZE} max_seq_len=${MAX_SEQ_LEN}"
+echo "[momask-tokens] lr=${TOKEN_LR} base_full_mask_prob=${BASE_FULL_MASK_PROB} generation_steps=${GENERATION_STEPS}"
 
 enroot start \
     --root \
@@ -70,21 +82,21 @@ enroot start \
             --token-batch-size ${TOKEN_BATCH_SIZE} \\
             --max-seq-len ${MAX_SEQ_LEN} \\
             --load-vq-checkpoint '${VQ_CKPT}' \\
-            --load-token-checkpoint '${TOKEN_CKPT}' \\
+            ${TOKEN_CKPT_ARG} \\
             --vq-steps 0 \\
             --token-steps ${TOKEN_STEPS} \\
-            --lr 1e-4 \\
+            --lr ${TOKEN_LR} \\
             --text-dim 64 \\
             --transformer-hidden-dim 512 \\
             --transformer-depth 8 \\
             --transformer-heads 8 \\
             --transformer-ffn-dim 2048 \\
             --transformer-dropout 0.0 \\
-            --base-cond-drop 0.0 \\
-            --residual-cond-drop 0.0 \\
-            --base-full-mask-prob 1.0 \\
-            --generation-steps 1 \\
-            --cache-token-device cuda \\
+            --base-cond-drop ${BASE_COND_DROP} \\
+            --residual-cond-drop ${RESIDUAL_COND_DROP} \\
+            --base-full-mask-prob ${BASE_FULL_MASK_PROB} \\
+            --generation-steps ${GENERATION_STEPS} \\
+            --cache-token-device ${CACHE_TOKEN_DEVICE} \\
             --log-every ${LOG_EVERY} \\
             --eval-batches ${EVAL_BATCHES} \\
             --save-every ${SAVE_EVERY} \\
