@@ -6,6 +6,7 @@ same model-agnostic implementations. This module keeps older
 """
 
 from shared.text.text_encoder import (
+    CLIPTextEncoder,
     Qwen3EmbeddingEncoder,
     RandomTextEncoder,
     TextEncoder,
@@ -13,6 +14,7 @@ from shared.text.text_encoder import (
 
 __all__ = [
     "TextEncoder",
+    "CLIPTextEncoder",
     "Qwen3EmbeddingEncoder",
     "RandomTextEncoder",
 ]

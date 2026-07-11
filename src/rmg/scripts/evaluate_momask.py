@@ -40,7 +40,7 @@ from momask.models import (
 )
 from rmg.data import HumanML3DDataset, collate
 from rmg.eval import RandomGuoEvaluator, RealGuoEvaluator, diversity, fid, mm_distance, r_precision
-from rmg.models import RandomTextEncoder
+from rmg.models import CLIPTextEncoder, RandomTextEncoder, TextEncoder
 from rmg.representation import H3D_FEATURE_DIM
 
 
@@ -83,6 +83,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--generation-steps", type=int, default=None, help="Defaults to checkpoint args.generation_steps.")
     p.add_argument("--guidance-scale", type=float, default=1.0)
     p.add_argument("--temperature", type=float, default=1.0)
+    p.add_argument("--text-encoder", choices=["checkpoint", "random", "clip"], default="checkpoint")
+    p.add_argument("--clip-model", default=None, help="Defaults to checkpoint args.clip_model or ViT-B/32.")
+    p.add_argument("--clip-cache-dir", default=None)
+    p.add_argument("--clip-backend", choices=["auto", "openai", "transformers"], default="auto")
     p.add_argument("--evaluator", choices=["real", "random"], default="real")
     p.add_argument("--text-to-motion-repo", default="external/text-to-motion")
     p.add_argument("--humanml3d-repo", default="external/HumanML3D")
@@ -119,6 +123,19 @@ def ckpt_args(ckpt: dict) -> dict:
     if not isinstance(args, dict):
         raise ValueError("checkpoint does not contain an args dict")
     return args
+
+
+def build_text_encoder(args: argparse.Namespace, saved_args: dict) -> TextEncoder:
+    kind = saved_args.get("text_encoder", "random") if args.text_encoder == "checkpoint" else args.text_encoder
+    if kind == "random":
+        return RandomTextEncoder(text_dim=int(saved_args.get("text_dim", 64)))
+    if kind == "clip":
+        return CLIPTextEncoder(
+            model_name=args.clip_model or str(saved_args.get("clip_model", "ViT-B/32")),
+            cache_dir=args.clip_cache_dir,
+            backend=args.clip_backend,
+        )
+    raise ValueError(f"unknown text encoder: {kind}")
 
 
 def build_models(ckpt: dict, device: torch.device) -> tuple[MotionRVQVAE, MaskedMotionTransformer, ResidualTransformer]:
@@ -254,7 +271,12 @@ def main() -> None:
     saved_args = ckpt_args(ckpt)
     steps = int(args.generation_steps or saved_args.get("generation_steps", 10))
     max_seq_len = int(args.max_seq_len or saved_args.get("max_seq_len", 80))
-    text_encoder = RandomTextEncoder(text_dim=int(saved_args.get("text_dim", 64)))
+    text_encoder = build_text_encoder(args, saved_args)
+    if text_encoder.text_dim != int(saved_args.get("text_dim", text_encoder.text_dim)):
+        raise ValueError(
+            f"text encoder dim {text_encoder.text_dim} does not match checkpoint text_dim "
+            f"{saved_args.get('text_dim')}"
+        )
     vqvae, masked, residual = build_models(ckpt, device)
 
     ds = HumanML3DDataset(
@@ -270,7 +292,8 @@ def main() -> None:
 
     print(
         f"[evaluate_momask] checkpoint={ckpt_path} split={args.split} clips={len(ds)} "
-        f"max_clips={args.max_clips} variants={variants} evaluator={args.evaluator} device={device}",
+        f"max_clips={args.max_clips} variants={variants} evaluator={args.evaluator} "
+        f"text_encoder={saved_args.get('text_encoder', 'random')} device={device}",
         flush=True,
     )
 

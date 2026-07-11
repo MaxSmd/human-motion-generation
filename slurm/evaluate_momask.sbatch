@@ -24,6 +24,7 @@ else
 fi
 
 IMAGE="${IMAGE:-${HOME}/rmg-momask.sqsh}"
+HF_CACHE="${HF_CACHE:-${HOME}/hf-cache}"
 DATA_ROOT="${DATA_ROOT:-/mnt/projects/drl4cvb/human-motion-representation/data/data/humanml3d_packed}"
 CKPT="${CKPT:-runs/momask-full-tokens-12858/momask_smoke_latest.pt}"
 MAX_CLIPS="${MAX_CLIPS:-512}"
@@ -34,6 +35,10 @@ VARIANTS="${VARIANTS:-full,base}"
 GUIDANCE_SCALE="${GUIDANCE_SCALE:-1.0}"
 TEMPERATURE="${TEMPERATURE:-1.0}"
 GENERATION_STEPS="${GENERATION_STEPS:-}"
+TEXT_ENCODER="${TEXT_ENCODER:-checkpoint}"
+CLIP_MODEL="${CLIP_MODEL:-}"
+CLIP_CACHE_DIR="${CLIP_CACHE_DIR:-${HF_CACHE}}"
+CLIP_BACKEND="${CLIP_BACKEND:-auto}"
 EVALUATOR="${EVALUATOR:-real}"
 OUTPUT="${OUTPUT:-}"
 
@@ -44,10 +49,12 @@ fi
 echo "[momask-eval] host=$(hostname)"
 echo "[momask-eval] repo=${REPO}"
 echo "[momask-eval] image=${IMAGE}"
+echo "[momask-eval] hf_cache=${HF_CACHE}"
 echo "[momask-eval] data_root=${DATA_ROOT}"
 echo "[momask-eval] ckpt=${CKPT}"
 echo "[momask-eval] max_clips=${MAX_CLIPS} batch_size=${BATCH_SIZE} variants=${VARIANTS}"
 echo "[momask-eval] generation_steps=${GENERATION_STEPS:-checkpoint-default}"
+echo "[momask-eval] text_encoder=${TEXT_ENCODER} clip_model=${CLIP_MODEL:-checkpoint-default} clip_backend=${CLIP_BACKEND}"
 echo "[momask-eval] output=${OUTPUT}"
 
 GENERATION_ARGS=""
@@ -68,6 +75,7 @@ enroot start \
     --mount /tmp:tmp \
     --mount "${REPO}:${REPO}" \
     --env "RMG_DATA_ROOT=${DATA_ROOT}" \
+    --env "HF_HOME=${HF_CACHE}" \
     --env "PYTHONPATH=${REPO}/src" \
     "${IMAGE}" \
     bash -lc "
@@ -85,6 +93,10 @@ enroot start \
             --min-seq-len ${MIN_SEQ_LEN} \
             --variants '${VARIANTS}' \
             ${GENERATION_ARGS} \
+            --text-encoder '${TEXT_ENCODER}' \
+            --clip-model '${CLIP_MODEL}' \
+            --clip-cache-dir '${CLIP_CACHE_DIR}' \
+            --clip-backend '${CLIP_BACKEND}' \
             --guidance-scale ${GUIDANCE_SCALE} \
             --temperature ${TEMPERATURE} \
             --evaluator '${EVALUATOR}' \

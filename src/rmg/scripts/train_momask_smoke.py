@@ -29,7 +29,7 @@ from momask.models import (
     TokenTransformerConfig,
 )
 from rmg.data import HumanML3DDataset, collate
-from rmg.models import RandomTextEncoder
+from rmg.models import CLIPTextEncoder, RandomTextEncoder, TextEncoder
 from rmg.representation import H3D_FEATURE_DIM, recover_joints_from_ric
 
 
@@ -106,6 +106,10 @@ def parse_args() -> argparse.Namespace:
     )
 
     p.add_argument("--text-dim", type=int, default=64)
+    p.add_argument("--text-encoder", choices=["random", "clip"], default="random")
+    p.add_argument("--clip-model", default="ViT-B/32")
+    p.add_argument("--clip-cache-dir", default=None)
+    p.add_argument("--clip-backend", choices=["auto", "openai", "transformers"], default="auto")
     p.add_argument("--transformer-hidden-dim", type=int, default=64)
     p.add_argument("--transformer-depth", type=int, default=2)
     p.add_argument("--transformer-heads", type=int, default=4)
@@ -193,7 +197,7 @@ def restore_model_args(args: argparse.Namespace, ckpt: dict) -> None:
     saved_args = ckpt.get("args", {})
     if not isinstance(saved_args, dict):
         return
-    for name in (
+    vq_names = (
         "vq_hidden_dim",
         "vq_latent_dim",
         "num_quantizers",
@@ -205,6 +209,11 @@ def restore_model_args(args: argparse.Namespace, ckpt: dict) -> None:
         "vq_velocity_weight",
         "no_momask_normalize",
         "feat_bias",
+    )
+    transformer_names = (
+        "text_encoder",
+        "clip_model",
+        "clip_backend",
         "text_dim",
         "transformer_hidden_dim",
         "transformer_depth",
@@ -212,9 +221,25 @@ def restore_model_args(args: argparse.Namespace, ckpt: dict) -> None:
         "transformer_ffn_dim",
         "transformer_dropout",
         "shared_residual_head",
-    ):
+    )
+    restore_names = vq_names + (transformer_names if "masked_transformer" in ckpt else ())
+    for name in restore_names:
         if name in saved_args:
             setattr(args, name, saved_args[name])
+
+
+def build_text_encoder(args: argparse.Namespace) -> TextEncoder:
+    if args.text_encoder == "random":
+        return RandomTextEncoder(text_dim=args.text_dim)
+    if args.text_encoder == "clip":
+        encoder = CLIPTextEncoder(
+            model_name=args.clip_model,
+            cache_dir=args.clip_cache_dir,
+            backend=args.clip_backend,
+        )
+        args.text_dim = encoder.text_dim
+        return encoder
+    raise ValueError(f"unknown text encoder: {args.text_encoder}")
 
 
 def masked_mae(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -374,7 +399,7 @@ def evaluate_tokens(
 @torch.no_grad()
 def cache_token_batches(
     vqvae: MotionRVQVAE,
-    text_encoder: RandomTextEncoder,
+    text_encoder: TextEncoder,
     loader: DataLoader,
     device: torch.device,
     normalizer: H3DNormalizer,
@@ -586,7 +611,8 @@ def main() -> None:
         print(f"[save] {out_path}")
         return
 
-    text_encoder = RandomTextEncoder(text_dim=args.text_dim)
+    text_encoder = build_text_encoder(args)
+    print(f"[momask-smoke] text_encoder={args.text_encoder} text_dim={args.text_dim}", flush=True)
     cached_batches = cache_token_batches(vqvae, text_encoder, loader, device, normalizer)
     token_batch_size = args.token_batch_size or args.batch_size
     token_cache = None
