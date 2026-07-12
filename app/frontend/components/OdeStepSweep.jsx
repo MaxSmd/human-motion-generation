@@ -66,12 +66,20 @@ export default function OdeStepSweep() {
     return () => { alive = false; clearInterval(t); };
   }, []);
 
-  // Regroup eval jobs into sweeps by their shared sweep_id (newest first).
+  // Regroup eval jobs into sweeps: explicitly by shared sweep_id (launched from
+  // this panel), and implicitly by (checkpoint, guidance) for manually launched
+  // eval runs — so e.g. a 200-step headline run plus a 400-step confirm at the
+  // same ω form a plottable step sweep without having been tagged. (newest first)
   const sweeps = useMemo(() => {
     const by = new Map();
     for (const j of jobs) {
-      const id = j.kind === "eval" ? j.params?.sweep_id : null;
-      if (!id) continue;
+      if (j.kind !== "eval") continue;
+      let id = j.params?.sweep_id;
+      if (!id) {
+        const ckpt = j.params?.checkpoint;
+        if (!ckpt || j.params?.num_sample_steps == null) continue;
+        id = `auto:${ckpt}|ω${parseGuidance(j.params?.guidance_scales) ?? "?"}`;
+      }
       if (!by.has(id)) by.set(id, []);
       by.get(id).push(j);
     }
@@ -81,9 +89,10 @@ export default function OdeStepSweep() {
         const createdAt = Math.min(...js.map((j) => j.submitted_at || 0));
         return {
           id, jobs: sorted, createdAt,
+          implicit: id.startsWith("auto:"),
           checkpoint: sorted[0]?.params?.checkpoint,
           guidance: parseGuidance(sorted[0]?.params?.guidance_scales),
-          stepList: sorted.map((j) => j.params?.num_sample_steps).filter((s) => s != null),
+          stepList: [...new Set(sorted.map((j) => j.params?.num_sample_steps).filter((s) => s != null))],
         };
       })
       .sort((a, b) => b.createdAt - a.createdAt);
@@ -205,7 +214,7 @@ export default function OdeStepSweep() {
             <select className="field-input max-w-[280px]" value={selected?.id || ""} onChange={(e) => setActiveSweepId(e.target.value)}>
               {sweeps.map((s) => (
                 <option key={s.id} value={s.id}>
-                  {ckptLabel(s.checkpoint)} · ω={s.guidance ?? "?"} · {s.jobs.length} steps
+                  {s.implicit ? "manual · " : ""}{ckptLabel(s.checkpoint)} · ω={s.guidance ?? "?"} · {s.jobs.length} run{s.jobs.length === 1 ? "" : "s"}
                 </option>
               ))}
             </select>
