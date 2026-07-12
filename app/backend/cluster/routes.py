@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from .. import config as cfgmod
 from ..analysis import curves as curvesmod
 from ..analysis import eval_tables
+from ..analysis import forensics as forensicsmod
 from ..analysis import joints as jointsmod
 from . import gtbrowse
 from . import jobs as jobsmod
@@ -203,6 +204,10 @@ class EvalRequest(BaseModel):
     use_ema: bool | None = None
     overrides: str | None = None
     ae_checkpoint: str | None = None     # MARDM-only: the stage-1 AE checkpoint
+    # Tags every job of an ODE-step sweep with a shared id so the Analysis tab
+    # can group them and plot metric-vs-num_sample_steps. Ignored by the builder
+    # (just carried through to job.params); each step count is its own eval run.
+    sweep_id: str | None = None
     # Cluster placement. Evals default to the 12g partition (they fit in <12GB;
     # the cluster warns at 1h / auto-cancels at 2h any job using <50% GPU mem
     # on the big cards). The 2h cap also bounds job LENGTH — split many-ω
@@ -355,14 +360,15 @@ def resume_job(job_id: str) -> dict:
 
 @router.get("/jobs/{job_id}/progress")
 def job_progress(job_id: str) -> dict:
-    """Live training progress: step / max_steps / completion + resubmit cycles,
-    enriched with the latest loss + throughput + ETA from the run's metrics.csv."""
+    """Live progress for any job, dispatched by kind. Train → step/max_steps
+    enriched with loss + throughput + ETA from the run's metrics.csv; eval → the
+    two-level ω-sweep + batch bars; viz → a coarse per-render bar."""
     _require_online()
-    prog = jobsmod.get_manager().train_progress(job_id)
+    prog = jobsmod.get_manager().job_progress(job_id)
     if prog is None:
-        raise HTTPException(404, f"no train job {job_id}")
-    # Best-effort metrics tail: latest loss + steps/s → ETA. Never fatal.
-    if prog.get("run_name"):
+        raise HTTPException(404, f"no job {job_id}")
+    # Train-only: best-effort metrics tail → latest loss + steps/s + ETA. Never fatal.
+    if prog.get("kind") == "train" and prog.get("run_name"):
         try:
             m = curvesmod.fetch_metrics(prog["run_name"])
             cols, rows = m.get("columns", []), m.get("rows", [])
@@ -440,6 +446,19 @@ def run_info(run: str) -> dict:
     _require_online()
     try:
         return curvesmod.fetch_run_info(run)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+
+
+@router.get("/analysis/forensics")
+def analysis_forensics(run: str) -> dict:
+    """Cached gen-vs-real motion-dynamics stats for a run (Validation panel).
+
+    404s when no `eval/forensics.json` exists yet — the frontend then falls back
+    to the documented static values from `docs/rmg_mid_validation.md`."""
+    _require_online()
+    try:
+        return forensicsmod.fetch_forensics(run)
     except FileNotFoundError as e:
         raise HTTPException(404, str(e)) from e
 

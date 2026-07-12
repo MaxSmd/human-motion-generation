@@ -366,7 +366,7 @@ class JobManager:
         if not job or job.kind != "train":
             return None
         out = {
-            "id": job.id, "run_name": job.run_name, "state": job.state,
+            "id": job.id, "kind": "train", "run_name": job.run_name, "state": job.state,
             "slurm_id": job.slurm_id, "resubmit_count": job.resubmit_count,
             "step": None, "complete": False, "max_steps": None,
         }
@@ -396,6 +396,111 @@ class JobManager:
             except (ValueError, KeyError, TypeError):
                 ms = None
         out["max_steps"] = int(ms) if ms not in (None, "", 0) else None
+        return out
+
+    def job_progress(self, job_id: str) -> dict | None:
+        """Live progress for ANY job, dispatched by kind. Train → step/max_steps
+        (resumable, pausable); eval → two-level ω-sweep + batch bars; viz → a
+        coarse per-render bar. Each reader is one SSH round-trip; the frontend
+        `JobProgress` panel renders whichever shape comes back."""
+        job = self.get(job_id)
+        if not job:
+            return None
+        if job.kind == "train":
+            return self.train_progress(job_id)
+        if job.kind == "eval":
+            return self._eval_progress(job)
+        if job.kind == "viz":
+            return self._viz_progress(job)
+        return {
+            "id": job.id, "kind": job.kind, "run_name": job.run_name,
+            "state": job.state, "slurm_id": job.slurm_id, "complete": False,
+        }
+
+    def _read_progress_marker(self, progress_dir: str) -> tuple[dict | None, bool, str]:
+        """Read `<dir>/.progress.json` + `.complete` + `results.json` (eval only;
+        empty for viz) in ONE SSH round-trip. Returns (marker|None, complete, results_text)."""
+        d = shlex.quote(progress_dir)
+        sep = "\x1e"
+        cmd = (
+            f"cat {d}/.progress.json 2>/dev/null; printf '{sep}'; "
+            f"test -f {d}/.complete && printf DONE; printf '{sep}'; "
+            f"cat {d}/results.json 2>/dev/null"
+        )
+        try:
+            raw = ssh.run(cmd, timeout=20, check=False).stdout
+        except ssh.SSHError:
+            return None, False, ""
+        prog_text, comp, results_text = (raw.split(sep) + ["", "", ""])[:3]
+        marker = None
+        if prog_text.strip():
+            try:
+                marker = json.loads(prog_text)
+            except ValueError:
+                marker = None
+        return marker, ("DONE" in comp), results_text
+
+    def _eval_total_omega(self, job: ClusterJob) -> int:
+        """How many guidance levels this eval sweeps — from the submitted param
+        (a list or a `[..]` string); 0 if unknown (older run w/o the marker)."""
+        gs = job.params.get("guidance_scales")
+        if isinstance(gs, (list, tuple)):
+            return len(gs)
+        if isinstance(gs, str) and gs.strip():
+            try:
+                return len(json.loads(gs))
+            except ValueError:
+                inner = gs.strip("[] ")
+                return inner.count(",") + 1 if inner else 0
+        return 0
+
+    def _eval_progress(self, job: ClusterJob) -> dict:
+        out = {
+            "id": job.id, "kind": "eval", "run_name": job.run_name, "state": job.state,
+            "slurm_id": job.slurm_id, "complete": False,
+            "stage": None, "outer": None, "inner": None,
+        }
+        if not job.run_name:
+            return out
+        marker, complete, results_text = self._read_progress_marker(
+            submit.eval_progress_dir(job.run_name))
+        out["complete"] = complete
+        if marker:
+            out["stage"] = marker.get("stage")
+            out["outer"] = marker.get("outer")
+            out["inner"] = marker.get("inner")
+            if marker.get("complete"):
+                out["complete"] = True
+        else:
+            # Older run (no marker): derive ω-level progress from partial results.json.
+            n_done = 0
+            if results_text.strip():
+                try:
+                    n_done = len(json.loads(results_text))
+                except ValueError:
+                    n_done = 0
+            n_total = self._eval_total_omega(job)
+            if n_total or n_done:
+                out["stage"] = "sample"
+                out["outer"] = {"i": n_done, "n": n_total or n_done}
+        return out
+
+    def _viz_progress(self, job: ClusterJob) -> dict:
+        out = {
+            "id": job.id, "kind": "viz", "run_name": job.run_name, "state": job.state,
+            "slurm_id": job.slurm_id, "complete": False,
+            "stage": None, "outer": None, "inner": None,
+        }
+        if not job.run_name:
+            return out
+        marker, complete, _ = self._read_progress_marker(
+            submit.viz_progress_dir(job.run_name))
+        out["complete"] = complete
+        if marker:
+            out["stage"] = marker.get("stage")
+            out["inner"] = marker.get("inner")
+            if marker.get("complete"):
+                out["complete"] = True
         return out
 
     def log_tail(self, job_id: str, lines: int = 300) -> str:

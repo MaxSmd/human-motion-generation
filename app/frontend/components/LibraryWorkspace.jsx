@@ -13,6 +13,8 @@ import VisualizeTab from "./VisualizeTab";
 import GTBrowserTab from "./GTBrowserTab";
 import TrainingViewerTab from "./TrainingViewerTab";
 import HistoryRail from "./HistoryRail";
+import HistoryPreview from "./HistoryPreview";
+import JobProgress from "./JobProgress";
 import { useJobHistory } from "@/lib/useJobHistory";
 import { WORKSPACE_CATEGORIES } from "@/lib/classifyJob";
 
@@ -23,7 +25,16 @@ export default function LibraryWorkspace({ clusterMode }) {
 
 function LibraryCluster() {
   const [showRail, setShowRail] = useState(true);
-  const { jobs } = useJobHistory(WORKSPACE_CATEGORIES.library);
+  const [preview, setPreview] = useState(null); // history job loaded into the centre
+  const { jobs, all, refresh } = useJobHistory(WORKSPACE_CATEGORIES.library);
+
+  const main = (
+    <div className="min-w-0 space-y-5">
+      <JobProgress jobs={all} onChange={refresh} />
+      {preview && <HistoryPreview job={preview} onClose={() => setPreview(null)} />}
+      <VisualizeTab />
+    </div>
+  );
 
   return (
     <div className="space-y-5">
@@ -38,13 +49,15 @@ function LibraryCluster() {
         </button>
       </div>
       {showRail ? (
-        <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_320px]">
-          <div className="min-w-0"><VisualizeTab /></div>
-          <HistoryRail jobs={jobs} categories={WORKSPACE_CATEGORIES.library}
-            emptyHint="Rendered clips collect here by kind." />
+        <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_340px] 2xl:grid-cols-[minmax(0,1fr)_380px]">
+          {main}
+          <div className="xl:sticky xl:top-6 xl:self-start">
+            <HistoryRail jobs={jobs} categories={WORKSPACE_CATEGORIES.library}
+              onOpen={setPreview} emptyHint="Rendered clips collect here by kind." />
+          </div>
         </div>
       ) : (
-        <VisualizeTab />
+        main
       )}
     </div>
   );

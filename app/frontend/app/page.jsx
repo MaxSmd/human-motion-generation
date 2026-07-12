@@ -66,7 +66,7 @@ export default function Home() {
 
   const panel = (
     <>
-      <nav className="mb-8 grid grid-cols-2 gap-2 sm:grid-cols-3">
+      <nav className="mb-8 grid max-w-3xl grid-cols-2 gap-2 sm:grid-cols-3">
         {tabs.map((t) => {
           const active = tab === t.id;
           return (
@@ -106,7 +106,7 @@ export default function Home() {
 
   return (
     <div className="min-h-screen">
-      <div className="mx-auto max-w-6xl px-6 pb-20 pt-10">
+      <div className="mx-auto w-full max-w-[1920px] px-6 pb-20 pt-10 lg:px-10">
         <header className="mb-9 flex flex-wrap items-end justify-between gap-6 border-b border-[var(--hairline)] pb-6">
           <div className="animate-fade-up">
             <div className="label mb-2 text-[var(--signal)]">Riemannian Motion Generation</div>

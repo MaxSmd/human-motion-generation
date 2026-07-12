@@ -12,6 +12,10 @@ export default function LineChart({
   yLabel = "",
   equal = false,
   yZero = false,
+  // Explicit x tick values (e.g. the exact guidance levels of a sweep). When
+  // given, the x-axis ticks at these values only — no auto-spaced ticks — and
+  // the domain is padded so edge points/labels don't overflow the frame.
+  xTicks = null,
   // Optional overlays (all additive, drawn under the series):
   bands = [],   // horizontal shaded bands: [{ y0, y1, color, label }]
   hlines = [],  // horizontal reference lines: [{ y, color, dash, label }]
@@ -35,6 +39,13 @@ export default function LineChart({
     for (const b of bands) { ymin = Math.min(ymin, b.y0); ymax = Math.max(ymax, b.y1); }
     for (const h of hlines) { ymin = Math.min(ymin, h.y); ymax = Math.max(ymax, h.y); }
     if (yZero) ymin = Math.min(0, ymin);
+    if (xTicks?.length) {
+      // fixed ticks: cover them exactly, then pad both sides so the outermost
+      // markers sit inside the plot instead of on (or past) the frame.
+      for (const t of xTicks) { xmin = Math.min(xmin, t); xmax = Math.max(xmax, t); }
+      const pad = (xmax - xmin || 1) * 0.05;
+      xmin -= pad; xmax += pad;
+    }
     if (xmin === xmax) xmax = xmin + 1;
     if (ymin === ymax) ymax = ymin + 1;
     if (equal) {
@@ -44,7 +55,7 @@ export default function LineChart({
       xmin = cx - half; xmax = cx + half; ymin = cy - half; ymax = cy + half;
     }
     return { xmin, xmax, ymin, ymax };
-  }, [series, equal, yZero, bands, hlines]);
+  }, [series, equal, yZero, bands, hlines, xTicks]);
 
   if (!dom) {
     return (
@@ -76,11 +87,16 @@ export default function LineChart({
             </text>
           </g>
         ))}
-        {/* x ticks */}
-        {ticks(dom.xmin, dom.xmax).map((t, i) => (
-          <text key={`x${i}`} x={sx(t)} y={height - m.b + 16} textAnchor="middle" className="fill-[var(--muted)]" style={{ fontSize: 9, fontFamily: "var(--font-mono)" }}>
-            {fmtTick(t)}
-          </text>
+        {/* x ticks — explicit values (with tick marks) when given, else auto */}
+        {(xTicks?.length ? xTicks : ticks(dom.xmin, dom.xmax)).map((t, i) => (
+          <g key={`x${i}`}>
+            {xTicks?.length ? (
+              <line x1={sx(t)} x2={sx(t)} y1={m.t + ih} y2={m.t + ih + 4} stroke="var(--hairline-strong)" strokeWidth="1" />
+            ) : null}
+            <text x={sx(t)} y={height - m.b + 16} textAnchor="middle" className="fill-[var(--muted)]" style={{ fontSize: 9, fontFamily: "var(--font-mono)" }}>
+              {fmtTick(t)}
+            </text>
+          </g>
         ))}
         {/* vertical regions (e.g. a constraint's active frame window) */}
         {regions.map((r, i) => {

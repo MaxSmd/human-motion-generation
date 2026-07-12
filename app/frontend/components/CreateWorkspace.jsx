@@ -22,6 +22,8 @@ import MediaViewer from "./MediaViewer";
 import RemoteCheckpointPicker from "./RemoteCheckpointPicker";
 import VizJobResult from "./VizJobResult";
 import HistoryRail from "./HistoryRail";
+import HistoryPreview from "./HistoryPreview";
+import JobProgress from "./JobProgress";
 import { useVizJob } from "@/lib/useVizJob";
 import { useJobHistory } from "@/lib/useJobHistory";
 import { WORKSPACE_CATEGORIES } from "@/lib/classifyJob";
@@ -50,7 +52,8 @@ export default function CreateWorkspace({ clusterMode, checkpoints = [] }) {
   const [mode, setMode] = useState("prompt");
   const [showRail, setShowRail] = useState(true);
   const [restore, setRestore] = useState(null); // {params, at} pushed from history
-  const { jobs } = useJobHistory(WORKSPACE_CATEGORIES.create);
+  const [preview, setPreview] = useState(null); // history job loaded into the centre
+  const { jobs, all, refresh } = useJobHistory(WORKSPACE_CATEGORIES.create);
 
   // Restoring a job's settings jumps to the right mode and prefills the editor.
   function onRestore(params, cat) {
@@ -60,7 +63,9 @@ export default function CreateWorkspace({ clusterMode, checkpoints = [] }) {
   }
 
   const main = (
-    <div className="min-w-0">
+    <div className="min-w-0 space-y-5">
+      {clusterMode && <JobProgress jobs={all} onChange={refresh} />}
+      {preview && <HistoryPreview job={preview} onClose={() => setPreview(null)} />}
       {mode === "prompt" && (
         <CreatePrompt clusterMode={clusterMode} checkpoints={checkpoints} restore={restore} />
       )}
@@ -88,10 +93,12 @@ export default function CreateWorkspace({ clusterMode, checkpoints = [] }) {
       </div>
 
       {showRail ? (
-        <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_320px]">
+        <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_340px] 2xl:grid-cols-[minmax(0,1fr)_380px]">
           {main}
-          <HistoryRail jobs={jobs} categories={WORKSPACE_CATEGORIES.create} onRestore={onRestore}
-            emptyHint="Generations you launch here collect by type." />
+          <div className="xl:sticky xl:top-6 xl:self-start">
+            <HistoryRail jobs={jobs} categories={WORKSPACE_CATEGORIES.create} onRestore={onRestore}
+              onOpen={setPreview} emptyHint="Generations you launch here collect by type." />
+          </div>
         </div>
       ) : (
         main

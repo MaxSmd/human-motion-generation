@@ -89,6 +89,7 @@ export const api = {
   runInfo: (run) => req(`/cluster/run-info?run=${encodeURIComponent(run)}`),
   analysisNpy: (job, name) =>
     req(`/cluster/analysis/npy?job=${encodeURIComponent(job)}&name=${encodeURIComponent(name)}`),
+  forensics: (run) => req(`/cluster/analysis/forensics?run=${encodeURIComponent(run)}`),
 };
 
 function post(path, body) {

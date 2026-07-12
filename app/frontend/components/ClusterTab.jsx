@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, mediaUrl } from "@/lib/api";
-import TrainingProgress from "./TrainingProgress";
+import JobProgress from "./JobProgress";
 
 const POLL_MS = 5000;
 const ACTIVE = new Set(["queued", "submitting", "pending", "running", "pulling"]);
@@ -54,7 +54,7 @@ export default function ClusterTab({ status }) {
 
       {err && <p className="rounded-lg border border-rose-500/30 bg-rose-500/5 px-4 py-2 text-[12px] text-rose-300">⚠ {err}</p>}
 
-      <TrainingProgress jobs={jobs} onChange={refresh} />
+      <JobProgress jobs={jobs} onChange={refresh} />
       <Jobs jobs={jobs} onChange={refresh} />
       <Queue squeue={squeue} jobs={jobs} onChange={refresh} />
     </div>

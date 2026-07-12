@@ -46,6 +46,19 @@ def train_run_dir(run_name: str) -> str:
     return f"{_runs_root('train')}/{run_name}"
 
 
+def eval_progress_dir(run_name: str) -> str:
+    """Abs path of an eval run's `eval/` subdir — where `evaluate.py` writes its
+    `results.json`, `.progress.json` and `.complete` markers (output_dir =
+    RUNS_ROOT/run_name, results under output_dir/eval/)."""
+    return f"{_runs_root('eval')}/{run_name}/eval"
+
+
+def viz_progress_dir(run_name: str) -> str:
+    """Abs path of a viz run's `viz/` subdir — where `visualize.py` writes its
+    rendered media, manifest and `.progress.json` marker."""
+    return f"{_runs_root('viz')}/{run_name}/viz"
+
+
 def sbatch_flags_for_train(params: dict) -> list[str]:
     """SBATCH CLI overrides for a train job (these override the directives baked
     into rmg/train.sbatch). Bigger presets default to the 24g partition for GPU

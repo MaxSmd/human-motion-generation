@@ -115,6 +115,7 @@ class AppState:
             ffn_mult=int(run_cfg.model.ffn_mult),
             text_dim=int(run_cfg.model.text_dim),
             time_freq_dim=int(run_cfg.model.time_freq_dim),
+            time_scale=float(run_cfg.model.get("time_scale", 1.0)),
             max_seq_len=int(run_cfg.model.max_seq_len),
         )
         model = RMGDiT(dit_cfg).to(self.device)

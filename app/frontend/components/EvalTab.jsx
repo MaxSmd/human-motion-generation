@@ -74,6 +74,12 @@ export default function EvalTab() {
     }));
   }
 
+  // The exact guidance levels evaluated across all runs — used as fixed x-axis
+  // ticks so the charts tick at the ω values themselves (no auto-scaled grid).
+  const omegas = [...new Set(
+    Object.values(cmp?.sweeps || {}).flatMap((byW) => Object.keys(byW).map(parseFloat))
+  )].sort((a, b) => a - b);
+
   async function copyLatex() {
     if (!cmp?.latex) return;
     await navigator.clipboard.writeText(cmp.latex);
@@ -183,16 +189,25 @@ export default function EvalTab() {
 
             {cmp.sweeps && Object.keys(cmp.sweeps).length > 0 && (
               <div className="mt-6">
-                <div className="label mb-3">guidance sweep · metric vs ω</div>
+                <div className="mb-3 flex items-baseline justify-between">
+                  <span className="label">guidance sweep · metric vs ω</span>
+                  <span className="font-mono text-[10px] text-[var(--muted)]">
+                    ω ∈ {"{"}{omegas.join(", ")}{"}"}
+                  </span>
+                </div>
                 <div className="grid gap-5 lg:grid-cols-2">
-                  <figure className="rounded-lg border border-[var(--hairline)] bg-ink p-3">
-                    <figcaption className="label mb-2">FID ↓ vs ω</figcaption>
-                    <LineChart series={sweepSeries("fid")} width={360} height={240} xLabel="ω" yLabel="FID" yZero />
-                  </figure>
-                  <figure className="rounded-lg border border-[var(--hairline)] bg-ink p-3">
-                    <figcaption className="label mb-2">R@3 ↑ vs ω</figcaption>
-                    <LineChart series={sweepSeries("r3")} width={360} height={240} xLabel="ω" yLabel="R@3" yZero />
-                  </figure>
+                  {[
+                    { metric: "fid", label: "FID ↓ vs ω", y: "FID", yZero: true },
+                    { metric: "r1", label: "R@1 ↑ vs ω", y: "R@1", yZero: false },
+                    { metric: "r3", label: "R@3 ↑ vs ω", y: "R@3", yZero: false },
+                    { metric: "mm_dist", label: "MM-Dist ↓ vs ω", y: "MM-Dist", yZero: false },
+                  ].map((c) => (
+                    <figure key={c.metric} className="rounded-lg border border-[var(--hairline)] bg-ink p-3">
+                      <figcaption className="label mb-2">{c.label}</figcaption>
+                      <LineChart series={sweepSeries(c.metric)} width={420} height={240}
+                        xLabel="ω" yLabel={c.y} yZero={c.yZero} xTicks={omegas} />
+                    </figure>
+                  ))}
                 </div>
               </div>
             )}

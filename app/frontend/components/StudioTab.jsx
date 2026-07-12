@@ -19,11 +19,13 @@
 // in next; the headline of this prototype is joint authoring + live eval.
 
 import { useEffect, useMemo, useState } from "react";
-import { api } from "@/lib/api";
+import { api, mediaUrl } from "@/lib/api";
+import { ACTIVE } from "@/lib/useVizJob";
 import { loadNpy } from "@/lib/npy";
 import { analyzeMotion, jointHoldStability, childrenFromParents } from "@/lib/motionMetrics";
 import ConstraintStage from "./ConstraintStage";
 import ConstraintAnalysis from "./ConstraintAnalysis";
+import RemoteCheckpointPicker from "./RemoteCheckpointPicker";
 
 const FALLBACK = [
   "pelvis", "L_Hip", "R_Hip", "Spine1", "L_Knee", "R_Knee", "Spine2",
@@ -76,6 +78,7 @@ export default function StudioTab({ checkpoints = [], clusterMode }) {
     text: "a person waves their right hand", guidance: 6.5, num_steps: 50, seed: 0, num_frames: 100,
   });
   const [checkpoint, setCheckpoint] = useState("");
+  const [presets, setPresets] = useState(null); // remote run config (cluster mode)
   const [pins, setPins] = useState([]);
   const [ranges, setRanges] = useState([]);
   const [selected, setSelected] = useState(null);
@@ -86,6 +89,7 @@ export default function StudioTab({ checkpoints = [], clusterMode }) {
   const [baselineJoints, setBaselineJoints] = useState(null); // joints of last ◇ baseline
   const [, setFrame] = useState(0);
   const [busy, setBusy] = useState(false);
+  const [busyState, setBusyState] = useState(null); // cluster job state while sampling
   const [error, setError] = useState(null);
 
   const jointNames = useMemo(() => meta.map((m) => m.name), [meta]);
@@ -99,6 +103,29 @@ export default function StudioTab({ checkpoints = [], clusterMode }) {
   const set = (k) => (e) =>
     setForm((f) => ({ ...f, [k]: e.target.type === "number" ? Number(e.target.value) : e.target.value }));
 
+  // Cluster mode has no local model/checkpoints, so the studio samples through
+  // a cluster viz job (mode=prompt): submit → poll to completion → load the
+  // pulled joints .npy. Slower than the local loop (queue + GPU + rsync), but
+  // it is the only sampling path that exists against the cluster.
+  async function sampleClusterNpy(body) {
+    let job = await api.submitViz({
+      mode: "prompt", checkpoint, prompts: body.text,
+      guidance: body.guidance, num_steps: body.num_steps, num_frames: body.num_frames,
+      model_preset: presets?.model_preset, train_preset: presets?.train_preset,
+      constraints: body.constraints, ranges: body.ranges,
+    });
+    setBusyState(job.state);
+    while (ACTIVE.has(job.state)) {
+      await new Promise((r) => setTimeout(r, 3000));
+      job = await api.job(job.id);
+      setBusyState(job.state);
+    }
+    if (job.state !== "done") throw new Error(job.error || `job ${job.state}`);
+    const out = (job.outputs || []).find((o) => o.npy_url);
+    if (!out) throw new Error("job finished but no joints .npy was pulled");
+    return loadNpy(mediaUrl(out.npy_url));
+  }
+
   async function sample({ asBaseline = false } = {}) {
     setBusy(true);
     setError(null);
@@ -108,12 +135,17 @@ export default function StudioTab({ checkpoints = [], clusterMode }) {
         constraints: asBaseline ? [] : toConstraints(pins),
         ranges: asBaseline ? [] : toRanges(ranges),
       };
-      if (checkpoint) body.checkpoint = checkpoint;
-      const res = await api.generate(body);
-      const npyUrl = res.joints_npy_url?.startsWith("http")
-        ? res.joints_npy_url
-        : `${apiBase()}${res.joints_npy_url}`;
-      const npy = await loadNpy(npyUrl);
+      let npy;
+      if (clusterMode) {
+        npy = await sampleClusterNpy(body);
+      } else {
+        if (checkpoint) body.checkpoint = checkpoint;
+        const res = await api.generate(body);
+        const npyUrl = res.joints_npy_url?.startsWith("http")
+          ? res.joints_npy_url
+          : `${apiBase()}${res.joints_npy_url}`;
+        npy = await loadNpy(npyUrl);
+      }
       const m = analyzeMotion(npy, 20);
       setMetrics(m);
       if (asBaseline) {
@@ -130,6 +162,7 @@ export default function StudioTab({ checkpoints = [], clusterMode }) {
       setError(err.message);
     } finally {
       setBusy(false);
+      setBusyState(null);
     }
   }
 
@@ -188,19 +221,18 @@ export default function StudioTab({ checkpoints = [], clusterMode }) {
             <Field label="frames"><input type="number" className="field-input" value={form.num_frames} onChange={set("num_frames")} /></Field>
             <Field label="seed"><input type="number" className="field-input" value={form.seed} onChange={set("seed")} /></Field>
           </div>
-          <Field label="checkpoint">
-            <select className="field-input" value={checkpoint} onChange={(e) => setCheckpoint(e.target.value)}>
-              <option value="">server default</option>
-              {checkpoints.map((c) => <option key={c.path} value={c.path}>{c.run} / {c.name}</option>)}
-            </select>
-          </Field>
+          {clusterMode ? (
+            <RemoteCheckpointPicker value={checkpoint} onChange={setCheckpoint} onConfig={setPresets} />
+          ) : (
+            <LocalCheckpointPicker checkpoints={checkpoints} value={checkpoint} onChange={setCheckpoint} />
+          )}
           <div className="flex gap-2">
-            <button onClick={() => sample()} disabled={busy} className="btn-signal flex-1">
-              {busy ? "sampling…" : "▶ apply & resample"}
+            <button onClick={() => sample()} disabled={busy || (clusterMode && !checkpoint)} className="btn-signal flex-1">
+              {busy ? (busyState ? `${busyState} on cluster…` : "sampling…") : "▶ apply & resample"}
             </button>
             <button
               onClick={() => sample({ asBaseline: true })}
-              disabled={busy}
+              disabled={busy || (clusterMode && !checkpoint)}
               title="Sample with NO constraints and store as the comparison baseline"
               className="rounded-md border border-[var(--hairline)] px-3 py-2 text-[12px] text-[var(--muted)] hover:border-[var(--hairline-strong)] hover:text-slate-200"
             >
@@ -208,7 +240,13 @@ export default function StudioTab({ checkpoints = [], clusterMode }) {
             </button>
           </div>
           {error && <p className="text-[12px] text-rose-300">⚠ {error}</p>}
-          {clusterMode && <p className="label">prototype samples via the local /generate endpoint</p>}
+          {clusterMode && (
+            <p className="label normal-case tracking-normal">
+              {checkpoint
+                ? "samples run as a cluster viz job (queue → GPU → pull) — expect a couple of minutes per sample"
+                : "pick a training run + checkpoint above — the studio needs a trained model to sample from"}
+            </p>
+          )}
         </section>
 
         {/* contextual joint editor */}
@@ -249,6 +287,59 @@ export default function StudioTab({ checkpoints = [], clusterMode }) {
 function apiBase() {
   // mirror lib/api API_BASE without re-importing the symbol name
   return (process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000").replace(/\/$/, "");
+}
+
+// ───────────────────────────────────────── local run → checkpoint picker
+// Local /generate takes any training checkpoint (<run>/checkpoints/*.pt under
+// RMG_RUNS_DIR). Grouping by run makes "which model am I sampling?" explicit —
+// "server default" is just the newest checkpoint on disk (or RMG_CHECKPOINT).
+function LocalCheckpointPicker({ checkpoints = [], value, onChange }) {
+  const byRun = useMemo(() => {
+    const m = {};
+    for (const c of checkpoints) (m[c.run] = m[c.run] || []).push(c);
+    return m;
+  }, [checkpoints]);
+  const runs = Object.keys(byRun);
+  const [run, setRun] = useState("");
+
+  // keep the run dropdown in sync when the checkpoint is set from outside
+  useEffect(() => {
+    if (!value) return;
+    const c = checkpoints.find((x) => x.path === value);
+    if (c && c.run !== run) setRun(c.run);
+  }, [value, checkpoints]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (runs.length === 0) {
+    return (
+      <div>
+        <div className="label mb-1.5">checkpoint</div>
+        <p className="rounded-md border border-dashed border-[var(--hairline)] px-3 py-2 text-[11px] text-[var(--muted)]">
+          no local checkpoints found — sampling uses the server default
+          (RMG_CHECKPOINT). Copy a run with <span className="font-mono">checkpoints/</span> into
+          RMG_RUNS_DIR to pick one here.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="grid grid-cols-2 gap-3">
+      <Field label="training run">
+        <select className="field-input" value={run}
+          onChange={(e) => { setRun(e.target.value); onChange(""); }}>
+          <option value="">server default</option>
+          {runs.map((r) => <option key={r} value={r}>{r}</option>)}
+        </select>
+      </Field>
+      <Field label="checkpoint">
+        <select className="field-input" value={value} disabled={!run}
+          onChange={(e) => onChange(e.target.value)}>
+          <option value="">{run ? "select…" : "latest on disk"}</option>
+          {(byRun[run] || []).map((c) => <option key={c.path} value={c.path}>{c.name}</option>)}
+        </select>
+      </Field>
+    </div>
+  );
 }
 
 // ───────────────────────────────────────── contextual per-joint editor

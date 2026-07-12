@@ -39,5 +39,8 @@ export function useJobHistory(categories, { pollMs = 4000 } = {}) {
     return all.filter((j) => set.has(classifyJob(j)));
   }, [all, key]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  return { jobs, error, refresh };
+  // `jobs` is category-filtered for the history rail; `all` is the unfiltered
+  // list (the live-progress panel needs it — the running job may be a kind this
+  // workspace filters out, e.g. an eval while you're on Create).
+  return { jobs, all, error, refresh };
 }

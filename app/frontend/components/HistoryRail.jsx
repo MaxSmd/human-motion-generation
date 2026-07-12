@@ -21,10 +21,11 @@ function ago(sec) {
 }
 
 // A per-workspace history list. `jobs` arrives already filtered to the
-// workspace's categories (newest first). Chips narrow further by category; rows
-// expand to show the pulled clips + the exact params, and (when supported) push
-// those params back into the editor via onRestore.
-export default function HistoryRail({ jobs = [], categories, onRestore, emptyHint }) {
+// workspace's categories (newest first). Chips narrow further by category;
+// clicking a row loads the job into the workspace's centre preview (onOpen);
+// the chevron expands the row to show the pulled clips + the exact params, and
+// (when supported) push those params back into the editor via onRestore.
+export default function HistoryRail({ jobs = [], categories, onRestore, onOpen, emptyHint }) {
   const [chip, setChip] = useState("all");
 
   // Only offer chips for categories actually present, so the bar stays tidy.
@@ -57,7 +58,7 @@ export default function HistoryRail({ jobs = [], categories, onRestore, emptyHin
             {emptyHint || "Generations you launch will collect here."}
           </p>
         ) : (
-          shown.map((j) => <Row key={j.id} job={j} onRestore={onRestore} />)
+          shown.map((j) => <Row key={j.id} job={j} onRestore={onRestore} onOpen={onOpen} />)
         )}
       </div>
     </div>
@@ -74,7 +75,7 @@ function Chip({ active, onClick, label, color }) {
   );
 }
 
-function Row({ job, onRestore }) {
+function Row({ job, onRestore, onOpen }) {
   const [open, setOpen] = useState(false);
   const cat = classifyJob(job);
   const meta = categoryMeta(cat);
@@ -85,21 +86,30 @@ function Row({ job, onRestore }) {
   const outputs = job.outputs || [];
 
   return (
-    <div className="rounded-lg border border-[var(--hairline)] bg-ink">
-      <button onClick={() => setOpen((o) => !o)} className="flex w-full items-start gap-2 px-2.5 py-2 text-left">
-        <span className="mt-0.5 h-2 w-2 shrink-0 rounded-full" style={{ background: meta.color }} title={meta.label} />
-        <span className="min-w-0 flex-1">
-          <span className="flex items-center gap-1.5">
-            <span className="truncate text-[11px] text-slate-300">{caption || meta.label}</span>
+    <div className="rounded-lg border border-[var(--hairline)] bg-ink transition hover:border-[var(--hairline-strong)]">
+      <div className="flex w-full items-start gap-2 px-2.5 py-2">
+        {/* clicking the row body loads the job into the centre preview; the
+            chevron alone toggles the inline detail expansion */}
+        <button onClick={() => (onOpen ? onOpen(job) : setOpen((o) => !o))}
+          className="flex min-w-0 flex-1 items-start gap-2 text-left"
+          title={onOpen ? "load into preview" : undefined}>
+          <span className="mt-0.5 h-2 w-2 shrink-0 rounded-full" style={{ background: meta.color }} title={meta.label} />
+          <span className="min-w-0 flex-1">
+            <span className="flex items-center gap-1.5">
+              <span className="truncate text-[11px] text-slate-300">{caption || meta.label}</span>
+            </span>
+            <span className="mt-0.5 flex items-center gap-1.5 text-[10px] text-[var(--muted)]">
+              <span style={{ color: sColor }} className={busy ? "animate-pulse-soft" : ""}>{job.state}</span>
+              <span>· {meta.label}</span>
+              {job.submitted_at ? <span>· {ago(job.submitted_at)}</span> : null}
+            </span>
           </span>
-          <span className="mt-0.5 flex items-center gap-1.5 text-[10px] text-[var(--muted)]">
-            <span style={{ color: sColor }} className={busy ? "animate-pulse-soft" : ""}>{job.state}</span>
-            <span>· {meta.label}</span>
-            {job.submitted_at ? <span>· {ago(job.submitted_at)}</span> : null}
-          </span>
-        </span>
-        <span className="shrink-0 text-[10px] text-[var(--muted)]">{open ? "▾" : "▸"}</span>
-      </button>
+        </button>
+        <button onClick={() => setOpen((o) => !o)} title="details"
+          className="shrink-0 px-1 text-[10px] text-[var(--muted)] hover:text-slate-200">
+          {open ? "▾" : "▸"}
+        </button>
+      </div>
 
       {open && (
         <div className="space-y-2 border-t border-[var(--hairline)] px-2.5 py-2">

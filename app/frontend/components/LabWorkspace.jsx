@@ -9,6 +9,8 @@ import { useState } from "react";
 import ModelTab from "./ModelTab";
 import AnalysisTab from "./AnalysisTab";
 import HistoryRail from "./HistoryRail";
+import HistoryPreview from "./HistoryPreview";
+import JobProgress from "./JobProgress";
 import { useJobHistory } from "@/lib/useJobHistory";
 import { WORKSPACE_CATEGORIES } from "@/lib/classifyJob";
 
@@ -20,10 +22,13 @@ const MODES = [
 export default function LabWorkspace({ model }) {
   const [mode, setMode] = useState("run");
   const [showRail, setShowRail] = useState(true);
-  const { jobs } = useJobHistory(WORKSPACE_CATEGORIES.lab);
+  const [preview, setPreview] = useState(null); // history job loaded into the centre
+  const { jobs, all, refresh } = useJobHistory(WORKSPACE_CATEGORIES.lab);
 
   const main = (
     <div className="min-w-0 space-y-5">
+      <JobProgress jobs={all} onChange={refresh} />
+      {preview && <HistoryPreview job={preview} onClose={() => setPreview(null)} />}
       {mode === "run" ? <ModelTab model={model} /> : <AnalysisTab />}
     </div>
   );
@@ -47,10 +52,12 @@ export default function LabWorkspace({ model }) {
       </div>
 
       {showRail ? (
-        <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_320px]">
+        <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_340px] 2xl:grid-cols-[minmax(0,1fr)_380px]">
           {main}
-          <HistoryRail jobs={jobs} categories={WORKSPACE_CATEGORIES.lab}
-            emptyHint="Train & eval runs collect here." />
+          <div className="xl:sticky xl:top-6 xl:self-start">
+            <HistoryRail jobs={jobs} categories={WORKSPACE_CATEGORIES.lab}
+              onOpen={setPreview} emptyHint="Train & eval runs collect here." />
+          </div>
         </div>
       ) : (
         main
