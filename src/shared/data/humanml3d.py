@@ -26,11 +26,50 @@ from torch import Tensor
 from torch.utils.data import Dataset
 
 from shared.geometry import Skeleton, normalize_quaternions
+from shared.geometry.skeleton import quat_mul, quat_rotate
 
 # SMPL 22-joint left/right pairs (HumanML3D-standard mirror).
 LR_PAIRS: tuple[tuple[int, int], ...] = (
     (1, 2), (4, 5), (7, 8), (10, 11), (13, 14), (16, 17), (18, 19), (20, 21),
 )
+
+
+def canonicalize_crop(translation: Tensor, quats: Tensor) -> tuple[Tensor, Tensor]:
+    """Per-crop SE(2) canonicalization: first-frame root XZ → origin, first-frame
+    heading → +Z. Height (Y) is left absolute.
+
+    Our packed clips keep the (leg-length-rescaled) AMASS world frame, so a crop
+    can start meters from the origin facing any direction — a nuisance orbit the
+    model must spend capacity on, and a mismatch with the prior's µ_T = 0. The
+    official HumanML3D pipeline re-bases every clip (XZ origin, face +Z) before
+    building features, so this brings the training distribution in line with
+    that convention. Eval-side it is a no-op by construction: the 263-D features
+    canonicalize global placement themselves (bit-verified round-trip).
+
+    Heading is the yaw of the root joint's forward axis (+Z of the canonical
+    T-pose rotated by the root quaternion) at the first frame; same convention
+    as `flow.scene._alignment_yaw` (0 = +Z, +90° = +X). If that axis is nearly
+    vertical (body lying/hanging, ‖f_xz‖ ≈ 0), the yaw is ill-defined and only
+    the translation shift is applied.
+    """
+    t = translation.clone()
+    t[:, 0] = t[:, 0] - translation[0, 0]
+    t[:, 2] = t[:, 2] - translation[0, 2]
+
+    fwd = quat_rotate(quats[0, 0], torch.tensor([0.0, 0.0, 1.0], dtype=quats.dtype))
+    if float(fwd[0] ** 2 + fwd[2] ** 2) < 1e-8:
+        return t, quats
+    yaw = torch.atan2(fwd[0], fwd[2])
+    half = 0.5 * yaw
+    # R_y(-yaw) as a quaternion: rotates the first-frame heading onto +Z.
+    q_fix = torch.stack(
+        [torch.cos(half), torch.zeros_like(half), -torch.sin(half), torch.zeros_like(half)]
+    ).to(quats.dtype)
+
+    t = quat_rotate(q_fix.unsqueeze(0), t)
+    q = quats.clone()
+    q[:, 0] = quat_mul(q_fix.expand_as(q[:, 0]), q[:, 0])
+    return t, q
 
 
 def mirror_motion(translation: Tensor, quats: Tensor) -> tuple[Tensor, Tensor]:
@@ -164,6 +203,7 @@ class HumanML3DDataset(Dataset):
         subset_seed: int = 0,
         subset_n: int = 0,
         preload: bool = False,
+        canonicalize_crops: bool = False,
     ) -> None:
         if split not in ("train", "val", "test"):
             raise ValueError(f"split must be one of train/val/test, got {split}")
@@ -209,6 +249,11 @@ class HumanML3DDataset(Dataset):
         # rmg leaves it off because its packed data already ships baked-in
         # mirrors; mardm enables it explicitly for its pipeline.
         self.mirror_augment = mirror_augment and (split == "train")
+
+        # Opt-in per-crop SE(2) canonicalization (see canonicalize_crop). OFF by
+        # default — every existing checkpoint was trained on world-frame crops,
+        # and a trained model must be evaluated on the convention it saw.
+        self.canonicalize_crops = canonicalize_crops
 
         self.representation: ClipRepresentation = representation
 
@@ -262,6 +307,9 @@ class HumanML3DDataset(Dataset):
         if T < self.min_seq_len:
             # Should not happen for a well-built dataset; skip to the next index.
             return self.__getitem__((idx + 1) % len(self))
+
+        if self.canonicalize_crops:
+            translation, quats = canonicalize_crop(translation, quats)
 
         # Optional runtime mirror augmentation (train only, opt-in). rmg leaves
         # this off — its packed data already ships every clip in both

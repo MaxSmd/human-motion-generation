@@ -52,11 +52,21 @@ class ConditioningFusion(nn.Module):
         text_dim: int,
         hidden_dim: int,
         time_freq_dim: int = 256,
+        time_scale: float = 1.0,
     ) -> None:
         super().__init__()
         self.text_dim = text_dim
         self.hidden_dim = hidden_dim
         self.time_freq_dim = time_freq_dim
+        # Multiplier applied to t before the sinusoidal embedding. With the
+        # default 1.0 and t ∈ [0, 1], the embedding arguments t·f span ≤ 1 rad
+        # on every frequency band — i.e. the basis is nearly linear in t and
+        # most bands are unused. Standard DiT/flow stacks embed t·1000 instead,
+        # giving the conditioning MLP a genuinely multi-scale basis. Kept at
+        # 1.0 for checkpoint compatibility with every existing run; set
+        # model.time_scale=1000 for future from-scratch runs. Must match
+        # between training and evaluation of the same checkpoint.
+        self.time_scale = float(time_scale)
 
         # Learnable null embedding for unconditional / dropped samples.
         self.null_text = nn.Parameter(torch.zeros(text_dim))
@@ -92,7 +102,7 @@ class ConditioningFusion(nn.Module):
             cond = torch.where(drop_cond_mask.unsqueeze(-1), null_b, cond)
 
         text_h = self.text_mlp(cond)  # (B, hidden)
-        time_freq = sinusoidal_time_embedding(t, self.time_freq_dim)
+        time_freq = sinusoidal_time_embedding(t * self.time_scale, self.time_freq_dim)
         time_h = self.time_mlp(time_freq)  # (B, hidden)
         c = self.fuse(torch.cat([time_h, text_h], dim=-1))  # (B, hidden)
         return c

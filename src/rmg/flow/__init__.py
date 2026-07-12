@@ -18,6 +18,7 @@ from .scene import (
     place_joints,
     place_motion,
     scene_energy,
+    scene_energy_series,
 )
 from .prior import WrappedGaussianPrior, rest_pose_mu, rmg_manifold
 from .sampler import OracleVelocity, RiemannianEulerSampler, SamplerCfg
@@ -48,6 +49,7 @@ __all__ = [
     "place_motion",
     "place_joints",
     "scene_energy",
+    "scene_energy_series",
     "contact_energy",
     "foot_skate_energy",
     "build_room_energy_fn",

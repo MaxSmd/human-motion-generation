@@ -65,7 +65,7 @@ from rmg.representation import (
     decode,
     tplusr_to_h3d_features_with_quats,
 )
-from shared.utils import EMA, load_checkpoint, set_seed
+from shared.utils import EMA, load_checkpoint, set_seed, write_progress
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +101,7 @@ def _build_model(
         hidden_dim=cfg.model.hidden_dim,
         depth=cfg.model.depth, num_heads=cfg.model.num_heads, ffn_mult=cfg.model.ffn_mult,
         text_dim=cfg.model.text_dim, time_freq_dim=cfg.model.time_freq_dim,
+        time_scale=float(cfg.model.get("time_scale", 1.0)),
         max_seq_len=cfg.model.max_seq_len,
     )
     model = RMGDiT(dit_cfg).to(device)
@@ -162,6 +163,7 @@ def _sample_and_featurize(
     lengths: torch.Tensor,
     guidance_scale: float,
     device: torch.device,
+    use_length_mask: bool = False,
 ) -> list[torch.Tensor]:
     """Generate motions for `texts` and return per-sample 263-D feature tensors.
     Decoding is delegated to the configured Representation (T+R uses §D.3
@@ -169,8 +171,15 @@ def _sample_and_featurize(
     B = len(texts)
     Tmax = int(lengths.max().item())
     cond = text_encoder.encode(texts, device=device)
+    # Optional length mask: True = valid frame. Passing it makes each clip's
+    # frames attend only within its own length during sampling (as in training),
+    # instead of across the whole padded batch-Tmax. Frames beyond L are cropped
+    # away regardless.
+    mask = None
+    if use_length_mask:
+        mask = torch.arange(Tmax, device=device)[None, :] < lengths.to(device)[:, None]
     samples = sampler.sample(
-        model, shape=(B, Tmax), cond=cond, guidance_scale=guidance_scale,
+        model, shape=(B, Tmax), cond=cond, mask=mask, guidance_scale=guidance_scale,
     )                                                       # (B, Tmax, ambient_dim)
     feats = []
     for i in range(B):
@@ -202,6 +211,11 @@ def main(cfg: DictConfig) -> None:
         "mm_repeats": 10,                       # MModality: K samples per text
         "diversity_times": 300,
         "seed": 0,
+        # Pass a per-clip validity mask to the sampler so generation attends
+        # only within each clip's true length (matches training). ON by default:
+        # measured ~25% FID improvement (1.10→0.822 @ mid ω6.5, 200 steps, 1024
+        # clips) vs the legacy no-mask path. Set False to reproduce legacy runs.
+        "use_length_mask": True,
     })
     cfg.eval = OmegaConf.merge(eval_cfg, cfg.get("eval", OmegaConf.create({})))
     set_seed(int(cfg.eval.seed))
@@ -250,15 +264,22 @@ def main(cfg: DictConfig) -> None:
 
     # --- Iterate test set, gather real + generated features at all guidance scales ---
     all_results: dict[float, dict[str, float | list]] = {}
+    # Live progress markers (read by the app's job_progress): outer = which ω of
+    # the sweep, inner = batch within the current ω. Written into <run>/eval/.
+    eval_out = Path(cfg.output_dir) / "eval"
+    n_omega = len(cfg.eval.guidance_scales)
+    n_batches = len(loader)
 
-    for omega in cfg.eval.guidance_scales:
+    for omega_idx, omega in enumerate(cfg.eval.guidance_scales):
         print(f"\n=== guidance ω = {omega} ===")
         real_motion_feats, gen_motion_feats, text_feats = [], [], []
         n_seen = 0
         n_text_fallback = 0
         crop_rng = np.random.default_rng(int(cfg.eval.seed) + int(float(omega) * 10))
+        outer = {"i": omega_idx, "n": n_omega, "label": f"ω={omega}"}
+        write_progress(eval_out, stage="sample", outer=outer, inner={"i": 0, "n": n_batches})
 
-        for batch in tqdm(loader, desc=f"sample ω={omega}"):
+        for batch_idx, batch in enumerate(tqdm(loader, desc=f"sample ω={omega}")):
             x1 = batch.x1.to(device)
             mask = batch.mask
             lengths = batch.lengths
@@ -268,6 +289,7 @@ def main(cfg: DictConfig) -> None:
                 model, sampler, text_encoder, skeleton, representation,
                 texts=batch.texts, lengths=lengths,
                 guidance_scale=float(omega), device=device,
+                use_length_mask=bool(cfg.eval.use_length_mask),
             )
             # Real motions: same code path, just on the dataset's encoded x1.
             real_feats = []
@@ -308,6 +330,8 @@ def main(cfg: DictConfig) -> None:
             text_feats.append(text_emb.cpu().numpy())
 
             n_seen += x1.shape[0]
+            write_progress(eval_out, stage="sample", outer=outer,
+                           inner={"i": batch_idx + 1, "n": n_batches})
             if cfg.eval.max_clips > 0 and n_seen >= cfg.eval.max_clips:
                 break
 
@@ -358,7 +382,10 @@ def main(cfg: DictConfig) -> None:
 
         K = int(cfg.eval.mm_repeats)
         mm_per_text = []
+        n_mm = len(mm_texts)
         for mm_idx, (text, L) in enumerate(zip(mm_texts, mm_lengths)):
+            write_progress(eval_out, stage="multimodality", outer=outer,
+                           inner={"i": mm_idx, "n": n_mm})
             tmm = time.perf_counter()
             cond = text_encoder.encode([text] * K, device=device)
             t_cond = time.perf_counter()
@@ -400,7 +427,15 @@ def main(cfg: DictConfig) -> None:
             )
         print(f"[evaluate] wrote partial results ({len(all_results)}/{len(cfg.eval.guidance_scales)} ω) "
               f"to {out_dir / 'results.json'}", flush=True)
+        # ω done → advance the outer bar so the app reflects the finished level
+        # even during the gap before the next ω's first batch.
+        write_progress(eval_out, stage="sample",
+                       outer={"i": omega_idx + 1, "n": n_omega, "label": f"ω={omega}"},
+                       inner={"i": n_batches, "n": n_batches})
 
+    write_progress(eval_out, stage="done", complete=True,
+                   outer={"i": n_omega, "n": n_omega})
+    (eval_out / ".complete").write_text(str(len(all_results)))
     print(f"\n[evaluate] done — all {len(all_results)} guidance levels saved.", flush=True)
 
 

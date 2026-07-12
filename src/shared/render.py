@@ -365,6 +365,90 @@ def _draw_constraint_panel(fig, rect: tuple[float, float, float, float],
     return _update
 
 
+# Energy panel + joint-glow colours ("how hard is the skeleton being punished").
+_C_ENERGY = "#ff5c5c"                 # total penalty fill/line (hot)
+_C_GLOW_CORE = "#ff2b2b"              # violating-joint core
+_C_GLOW_HALO = "#ff7a3c"             # soft halo behind it
+_C_COMPONENTS = {                     # per-term penalty lines
+    "room": "#6aa9ff",
+    "obstacle": _C_OBST,              # amber — matches the drawn obstacles
+    "contact": "#c792ea",
+    "foot_skate": "#6ee7a8",
+}
+_COMPONENT_LABELS = {
+    "room": "room / walls",
+    "obstacle": "obstacles",
+    "contact": "contacts",
+    "foot_skate": "foot-skate",
+}
+
+
+def _draw_energy_panel(fig, rect: tuple[float, float, float, float],
+                       energy: dict, T: int):
+    """Draw the constraint-violation PENALTY over time — the "how hard is the
+    skeleton being punished" curve — in the same dark scientific style.
+
+    `energy` is `{total: (T,), per_joint: (T, J), components: {name: (T,)}}`
+    (see `flow.scene.scene_energy_series`). The per-frame total is drawn as a
+    filled red area with each non-zero component term overlaid; a cursor plus a
+    numeric readout track the current frame. Returns a per-frame `update(t)`.
+    """
+    from matplotlib.patches import Rectangle  # noqa: F401  (backend already selected)
+
+    total = np.nan_to_num(np.asarray(energy["total"], dtype=float))
+    frames = np.arange(len(total))
+
+    fig.text(rect[0], rect[1] + rect[3] + 0.012, "Constraint penalty", color=_FG,
+             fontsize=10, fontfamily="monospace", ha="left", va="bottom")
+
+    ax = fig.add_axes(rect)
+    ax.set_facecolor(_PANEL)
+    for spine in ax.spines.values():
+        spine.set_color(_GRID)
+    ax.tick_params(colors=_FG, labelsize=7, length=2)
+    ax.grid(True, color=_GRID, linewidth=0.5, alpha=0.6)
+    ax.set_xlim(0, max(T - 1, 1))
+    ax.set_xlabel("frame", color=_FG, fontsize=8, fontfamily="monospace")
+    ax.set_ylabel("penalty  (a.u.)", color=_FG, fontsize=8, fontfamily="monospace")
+
+    peak = float(np.nanmax(total)) if total.size else 0.0
+    ax.set_ylim(0, max(peak * 1.15, 1e-6))
+
+    # Total penalty: filled area + line.
+    ax.fill_between(frames, total, color=_C_ENERGY, alpha=0.22, zorder=1)
+    ax.plot(frames, total, "-", lw=1.8, color=_C_ENERGY, zorder=3, label="total")
+
+    # Component breakdown — only terms that actually fire, to keep it honest.
+    for name, series in (energy.get("components") or {}).items():
+        s = np.nan_to_num(np.asarray(series, dtype=float))
+        if s.size == len(total) and float(np.nanmax(s)) > 1e-9:
+            ax.plot(frames, s, "-", lw=1.0, alpha=0.85,
+                    color=_C_COMPONENTS.get(name, _FG),
+                    label=_COMPONENT_LABELS.get(name, name), zorder=2)
+
+    if peak <= 1e-9:
+        ax.text(0.5, 0.55, "no constraint violated — motion stays feasible",
+                color="#6ee7a8", fontsize=11, fontfamily="monospace",
+                ha="center", va="center", transform=ax.transAxes)
+    else:
+        leg = ax.legend(loc="upper right", fontsize=7, facecolor=_PANEL,
+                        edgecolor=_GRID, framealpha=0.6)
+        for t_ in leg.get_texts():
+            t_.set_color(_FG)
+
+    cursor = ax.axvline(0, color=_C_ROOT, lw=1.2, alpha=0.9, zorder=4)
+    readout = ax.text(0.01, 0.96, "", color="#f5f7fa", fontsize=8,
+                      fontfamily="monospace", ha="left", va="top",
+                      transform=ax.transAxes)
+
+    def _update(t: int) -> None:
+        cursor.set_xdata([t, t])
+        val = float(total[t]) if t < len(total) else 0.0
+        readout.set_text(f"penalty[{t:>3}] = {val:7.3f}")
+
+    return _update
+
+
 def render_joints(
     joints: np.ndarray,                 # (T, 22, 3)
     out_path: Path,                     # media path; suffix is forced to match fmt
@@ -373,6 +457,7 @@ def render_joints(
     fmt: str = "auto",
     scene: dict | None = None,          # optional room/obstacle scene (see flow.scene)
     constraints: list[dict] | None = None,  # optional sampling-time bend constraints
+    energy: dict | None = None,         # optional per-frame/per-joint penalty (see flow.scene)
 ) -> tuple[Path, Path]:
     """Render joints to MP4/GIF and dump joints as `.npy`. Returns (media, npy).
 
@@ -388,10 +473,17 @@ def render_joints(
     axis limits are widened to frame the whole room — "obstacle mode".
 
     When `constraints` is given (a list of resolved bend-constraint dicts
-    `{joint, name, min_deg, max_deg, frame_start, frame_end}`), a full-width
-    panel is added below the four viz panels: fixed pins render as text, clamped
-    ranges render as a bend-angle-over-time plot with the allowed band shaded and
-    a cursor that tracks the current frame.
+    `{joint, name, min_deg, max_deg, frame_start, frame_end}`), a panel is added
+    below the four viz panels: fixed pins render as text, clamped ranges render
+    as a bend-angle-over-time plot with the allowed band shaded and a cursor that
+    tracks the current frame.
+
+    When `energy` is given (the `flow.scene.scene_energy_series` dict `{total,
+    per_joint, components}` for a world-constrained sample), a second bottom
+    panel plots the constraint-violation penalty over time AND every joint that
+    is being penalised lights up with a red glow (sized by its violation depth)
+    in all four viz panels — so you literally see where and when the skeleton is
+    punished for leaving the room / hitting an obstacle / missing a contact.
     """
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -424,11 +516,22 @@ def render_joints(
         return center[axis] - radius, center[axis] + radius
 
     has_constraints = bool(constraints)
-    fig = plt.figure(figsize=(19, 6.9 if has_constraints else 5.4))
+    # Per-joint glow: normalise the violation depths to [0, 1] so a stray huge
+    # penalty can't blow the marker sizes up. `None` ⇒ nothing to light up.
+    glow = None
+    if energy and energy.get("per_joint") is not None:
+        pj = np.nan_to_num(np.asarray(energy["per_joint"], dtype=float))
+        gmax = float(pj.max()) if pj.size else 0.0
+        if gmax > 1e-9:
+            glow = pj / gmax                                       # (T, J) in [0,1]
+    has_energy = energy is not None
+    has_bottom = has_constraints or has_energy
+
+    fig = plt.figure(figsize=(19, 6.9 if has_bottom else 5.4))
     fig.patch.set_facecolor(_BG)
-    # With a constraint panel, lift the viz row into the top of a taller figure
-    # and reserve the strip between the row and the progress bar for the panel.
-    gs_top, gs_bottom = (0.90, 0.42) if has_constraints else (0.86, 0.10)
+    # With a bottom panel, lift the viz row into the top of a taller figure and
+    # reserve the strip between the row and the progress bar for the panel(s).
+    gs_top, gs_bottom = (0.90, 0.42) if has_bottom else (0.86, 0.10)
     gs = GridSpec(
         1, 4, figure=fig, width_ratios=[1, 1, 1, 1.5],
         left=0.015, right=0.985, top=gs_top, bottom=gs_bottom, wspace=0.12,
@@ -461,7 +564,16 @@ def render_joints(
             j: ax.plot([], [], "-", lw=1.4, color=c, alpha=0.55)[0]
             for j, c in _TRAIL_JOINTS.items()
         }
-        views2d.append((h, v, lines, trails))
+        # Punishment glow: a soft halo + bright core scatter over violating
+        # joints, updated per frame from the normalised per-joint penalty.
+        glow_sc = None
+        if glow is not None:
+            halo = ax.scatter([], [], s=[], c=_C_GLOW_HALO, alpha=0.16,
+                              edgecolors="none", zorder=4)
+            core = ax.scatter([], [], s=[], c=_C_GLOW_CORE, alpha=0.85,
+                              edgecolors="none", zorder=5)
+            glow_sc = (halo, core)
+        views2d.append((h, v, lines, trails, glow_sc))
 
     # --- 3-D perspective panel -----------------------------------------------
     ax3d = fig.add_subplot(gs[0, 3], projection="3d")
@@ -477,6 +589,13 @@ def render_joints(
         j: ax3d.plot([], [], [], "-", lw=1.4, color=c, alpha=0.55)[0]
         for j, c in _TRAIL_JOINTS.items()
     }
+    glow3d = None
+    if glow is not None:
+        halo3d = ax3d.scatter([], [], [], s=[], c=_C_GLOW_HALO, alpha=0.16,
+                              edgecolors="none", depthshade=False)
+        core3d = ax3d.scatter([], [], [], s=[], c=_C_GLOW_CORE, alpha=0.85,
+                              edgecolors="none", depthshade=False)
+        glow3d = (halo3d, core3d)
     # Static ground plane (a faint grid quad) at y = floor in display space.
     gx = np.linspace(*_lim(0), 2)
     gz = np.linspace(*_lim(2), 2)
@@ -516,20 +635,49 @@ def render_joints(
     bar_bg.add_patch(plt.Rectangle((0, 0), 1, 1, color=_GRID, alpha=0.5))
     bar_fill = bar_bg.add_patch(plt.Rectangle((0, 0), 0, 1, color=_C_ROOT))
 
-    # --- Constraint panel (optional) -----------------------------------------
-    cursor_update = None
+    # --- Bottom panel(s): bend constraints and/or the penalty curve ----------
+    # One panel spans full width; when both are present they sit side by side.
+    cursor_updates = []
+    if has_constraints and has_energy:
+        c_rect, e_rect = (0.05, 0.10, 0.41, 0.22), (0.56, 0.10, 0.41, 0.22)
+    else:
+        c_rect = e_rect = (0.06, 0.10, 0.90, 0.22)
     if has_constraints:
-        cursor_update = _draw_constraint_panel(
-            fig, (0.06, 0.10, 0.90, 0.22), joints, constraints)
+        u = _draw_constraint_panel(fig, c_rect, joints, constraints)
+        if u is not None:
+            cursor_updates.append(u)
+    if has_energy:
+        cursor_updates.append(_draw_energy_panel(fig, e_rect, energy, T))
+
+    def _set_glow(sc, xs, ys, zs, sizes):
+        """Point a (halo, core) scatter pair at the violating joints. `zs` is
+        None for a 2-D panel; the halo is drawn 3× the core area."""
+        if sc is None:
+            return
+        halo, core = sc
+        if zs is None:
+            xy = np.column_stack([xs, ys]) if len(xs) else np.empty((0, 2))
+            halo.set_offsets(xy); core.set_offsets(xy)
+        else:
+            halo._offsets3d = (xs, zs, ys); core._offsets3d = (xs, zs, ys)
+        halo.set_sizes(sizes * 2.4); core.set_sizes(sizes)
 
     def update(t):
         lo_t = max(0, t - _TRAIL_WINDOW)
-        for h, v, lines, trails in views2d:
+        # Which joints are being punished this frame, and how big to draw them.
+        if glow is not None:
+            g = glow[t]
+            gidx = np.nonzero(g > 0.02)[0]
+            gsize = 18.0 + 130.0 * g[gidx]
+        for h, v, lines, trails, glow_sc in views2d:
             for line, chain in zip(lines, _T2M_CHAINS):
                 idx = list(chain)
                 line.set_data(joints[t, idx, h], joints[t, idx, v])
             for j, tr in trails.items():
                 tr.set_data(joints[lo_t:t + 1, j, h], joints[lo_t:t + 1, j, v])
+            if glow is not None:
+                _set_glow(glow_sc, joints[t, gidx, h], joints[t, gidx, v],
+                          None, gsize)
 
         _setup_3d()
         for line, chain in zip(chain_lines3d, _T2M_CHAINS):
@@ -539,9 +687,12 @@ def render_joints(
         for j, tr in trails3d.items():
             tr.set_data(joints[lo_t:t + 1, j, 0], joints[lo_t:t + 1, j, 2])
             tr.set_3d_properties(joints[lo_t:t + 1, j, 1])
+        if glow is not None:
+            _set_glow(glow3d, joints[t, gidx, 0], joints[t, gidx, 1],
+                      joints[t, gidx, 2], gsize)  # xs, ys(up), zs → swapped inside
 
-        if cursor_update is not None:
-            cursor_update(t)
+        for cu in cursor_updates:
+            cu(t)
 
         clock.set_text(f"frame {t + 1:>3}/{T}   ·   {t / max(fps, 1):4.1f}s")
         bar_fill.set_width((t + 1) / T)

@@ -58,6 +58,7 @@ from shared.utils import (
     Logger,
     LoggerConfig,
     TrainState,
+    build_rewarm_scheduler,
     build_scheduler,
     collect_rng_state,
     find_latest_checkpoint,
@@ -88,6 +89,7 @@ def _build_dataset(cfg: DictConfig, split: str, representation: Representation) 
         subset_seed=int(cfg.data.get("subset_seed", 0)),
         subset_n=int(cfg.data.get("subset_n", 0)),
         preload=bool(cfg.data.get("preload", False)),
+        canonicalize_crops=bool(cfg.data.get("canonicalize_crops", False)),
     )
 
 
@@ -129,6 +131,7 @@ def _build_model(cfg: DictConfig, representation: Representation) -> RMGDiT:
         ffn_mult=cfg.model.ffn_mult,
         text_dim=cfg.model.text_dim,
         time_freq_dim=cfg.model.time_freq_dim,
+        time_scale=float(cfg.model.get("time_scale", 1.0)),
         max_seq_len=cfg.model.max_seq_len,
     )
     return RMGDiT(dit_cfg)
@@ -257,6 +260,13 @@ def main(cfg: DictConfig) -> None:
 
     # -------------------- resume? --------------------
     step = 0
+    # Continued-training re-warm: when extending a run past a schedule that
+    # already annealed the LR to ~0 (min_lr_ratio=0 at the old max_steps),
+    # resuming on the old schedule trains at LR≈0 and learns nothing. Instead we
+    # SKIP the old scheduler state and build a fresh re-warm schedule over the
+    # extension (see build_rewarm_scheduler). Off by default — normal runs and
+    # ordinary walltime resubmits keep the single smooth cosine.
+    rewarm = bool(cfg.train.scheduler.get("rewarm", False))
     latest = find_latest_checkpoint(output_dir)
     if latest is not None:
         print(f"[train] resuming from {latest}")
@@ -264,13 +274,29 @@ def main(cfg: DictConfig) -> None:
         model.load_state_dict(state.model)
         ema.load_state_dict(state.ema) if state.ema else None
         opt.load_state_dict(state.optimizer)
-        if state.scheduler is not None:
+        if state.scheduler is not None and not rewarm:
             sched.load_state_dict(state.scheduler)
         if scaler is not None and state.scaler is not None:
             scaler.load_state_dict(state.scaler)
         if state.rng:
             restore_rng_state(state.rng)
         step = state.step
+        if rewarm:
+            warmup = int(cfg.train.scheduler.get("rewarm_warmup_steps", 5000))
+            peak_ratio = float(cfg.train.scheduler.get("rewarm_peak_ratio", 0.3))
+            # origin = the step the extension began (old max_steps). Fixed across
+            # every walltime resubmit so the warm-up fires exactly once; default
+            # to the current resume step only for the very first block.
+            origin = int(cfg.train.scheduler.get("rewarm_origin", step))
+            sched = build_rewarm_scheduler(
+                opt, origin=origin, max_steps=int(cfg.train.max_steps),
+                warmup_steps=warmup, peak_ratio=peak_ratio,
+                base_lr=float(cfg.train.optimizer.lr), current_step=step,
+            )
+            print(f"[train] RE-WARM extension: origin {origin} → max {cfg.train.max_steps}, "
+                  f"resuming at step {step}, warmup {warmup} → peak "
+                  f"{peak_ratio * float(cfg.train.optimizer.lr):.2e}, cosine→0. "
+                  f"LR now = {sched.get_last_lr()[0]:.3e}")
 
     # -------------------- logger --------------------
     logger = Logger(LoggerConfig(

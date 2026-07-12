@@ -394,6 +394,83 @@ def foot_skate_energy(joints_world: Tensor, scene: Scene, foot_idx, weight: floa
     return float(weight) * (plant_pair * horiz2).sum(dim=-1).mean()
 
 
+def scene_energy_series(joints_world: Tensor, scene: Scene) -> dict:
+    """Per-frame / per-joint constraint-violation breakdown, for visualization.
+
+    This is NOT used during sampling — it mirrors `scene_energy` (+ contacts +
+    foot skate) but KEEPS the frame and joint axes instead of aggregating them,
+    so the renderer can (a) plot the penalty over time and (b) colour each joint
+    by how hard it is being punished. `joints_world` is a single already-placed
+    motion `(T, J, 3)` (room coordinates, post-`place_joints`/`place_motion`); a
+    leading batch dim is accepted and the first element is used.
+
+    Returns a torch-free dict:
+      * `total`      (T,)    per-frame penalty (same squared aggregation the
+                             guidance energy uses, but not meaned over frames),
+      * `per_joint`  (T, J)  per-joint LINEAR violation depth (metres), the glow
+                             signal — linear reads better than squared,
+      * `components` {name: (T,)} the `room` / `obstacle` / `contact` /
+                             `foot_skate` split of `total` (for the legend).
+    """
+    with torch.no_grad():
+        j = joints_world.detach().float()
+        if j.dim() == 3:
+            j = j.unsqueeze(0)                                     # (1,T,J,3)
+        _, T, _ = j.shape[:3]
+        m = max(0.0, float(scene.padding))
+        w, d, h = scene.room
+
+        # Room containment + obstacle avoidance: per-joint linear ReLU depth.
+        sdf_room = _sdf_box(j, center=(0.0, h / 2, 0.0), half=(w / 2, h / 2, d / 2))
+        room_v = (sdf_room + m).clamp_min(0.0)                    # (1,T,J)
+        obst_v = torch.zeros_like(room_v)
+        for o in scene.objects:
+            sdf = _obstacle_sdf(j, o)
+            if sdf is not None:
+                obst_v = obst_v + (m - sdf).clamp_min(0.0)
+        per_joint = room_v + obst_v                               # (1,T,J) linear
+        room_e = room_v.pow(2).sum(dim=-1)                        # (1,T) — matches _agg
+        obst_e = obst_v.pow(2).sum(dim=-1)                        # (1,T)
+
+        # Contacts: squared shortfall on one joint over its window (added to that
+        # joint's glow linearly so you see WHICH limb is failing to reach).
+        contact_e = j.new_zeros((j.shape[0], T))
+        for c in parse_contacts(scene.contacts):
+            fs, fe = c.frame_window(T)
+            if fe <= fs:
+                continue
+            jp = j[:, fs:fe, c.joint_idx, :]                      # (1,Tw,3)
+            tgt = _contact_target(jp, c, scene)
+            short = (torch.linalg.vector_norm(jp - tgt, dim=-1) - float(c.tol)).clamp_min(0.0)
+            contact_e[:, fs:fe] = contact_e[:, fs:fe] + float(c.weight) * short.pow(2)
+            per_joint[:, fs:fe, c.joint_idx] += float(c.weight) * short
+
+        # Foot anti-skate: plant·‖horizontal velocity‖², attributed to the feet.
+        foot_e = j.new_zeros((j.shape[0], T))
+        if scene.foot_skate_weight > 0.0:
+            feet_idx = list(FOOT_CONTACT_IDX)
+            feet = j[..., feet_idx, :]                            # (1,T,F,3)
+            plant = torch.sigmoid((0.05 - feet[..., 1]) / 0.02)
+            vel = (feet[:, 1:] - feet[:, :-1]) * float(scene.fps)
+            horiz2 = vel[..., 0] ** 2 + vel[..., 2] ** 2          # (1,T-1,F)
+            plant_pair = 0.5 * (plant[:, 1:] + plant[:, :-1])
+            skate = float(scene.foot_skate_weight) * (plant_pair * horiz2)  # (1,T-1,F)
+            foot_e[:, 1:] = foot_e[:, 1:] + skate.sum(dim=-1)
+            per_joint[:, 1:, feet_idx] += skate
+
+        total = room_e + obst_e + contact_e + foot_e             # (1,T)
+        return {
+            "total": total[0].cpu().numpy(),
+            "per_joint": per_joint[0].cpu().numpy(),
+            "components": {
+                "room": room_e[0].cpu().numpy(),
+                "obstacle": obst_e[0].cpu().numpy(),
+                "contact": contact_e[0].cpu().numpy(),
+                "foot_skate": foot_e[0].cpu().numpy(),
+            },
+        }
+
+
 def build_room_energy_fn(scene: Scene, skeleton: Skeleton, num_joints: int = NUM_JOINTS):
     """Build `energy_fn(xhat) -> scalar` for the sampler's guidance hook.
 

@@ -28,6 +28,16 @@ scheduler:
   warmup_ratio: 0.05            # ~15k warmup steps; a touch shorter than base's
                                 # 8% since the run is 2x longer
   min_lr_ratio: 0.0
+  # Continued-training re-warm (OFF by default; enable only to extend a run past
+  # a schedule that already annealed to 0 — e.g. 300k→600k). When true, resume
+  # skips the old (zeroed) scheduler state and builds a fresh warmup→cosine over
+  # the extension, peaking at rewarm_peak_ratio·lr. See build_rewarm_scheduler.
+  rewarm: false
+  rewarm_warmup_steps: 5000
+  rewarm_peak_ratio: 0.3        # peak = 0.3·1e-4 = 3e-5 (gentle; keeps converged
+                                # weights in-basin)
+  rewarm_origin: 300000         # step the extension begins (old max_steps); FIXED
+                                # across walltime resubmits so warm-up fires once
 
 grad_clip: 0.5
 # Finite-spike guard (train.py): skip optimizer+EMA steps whose loss/grad_norm

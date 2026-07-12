@@ -61,6 +61,7 @@ from rmg.flow import (  # noqa: E402
     parse_bends,
     parse_scene,
     place_motion,
+    scene_energy_series,
 )
 from rmg.models import (  # noqa: E402
     DiTConfig,
@@ -74,12 +75,13 @@ from rmg.representation import (  # noqa: E402
     forward_kinematics,
 )
 from rmg.representation.tplusr import decode as tplusr_decode  # noqa: E402
-from shared.utils import EMA, load_checkpoint, set_seed  # noqa: E402
+from shared.utils import EMA, load_checkpoint, set_seed, write_progress  # noqa: E402
 from shared.render import render_joints  # noqa: E402
 
 
 def _render(joints: np.ndarray, save_path: Path, title: str, fps: int,
-            scene: dict | None = None, constraints: list[dict] | None = None):
+            scene: dict | None = None, constraints: list[dict] | None = None,
+            energy: dict | None = None):
     """Render (T, 22, 3) joint positions via the shared multi-panel animation.
 
     Delegates the actual drawing to `shared.render.render_joints` (the same
@@ -115,7 +117,7 @@ def _render(joints: np.ndarray, save_path: Path, title: str, fps: int,
 
     media_path, npy_path = render_joints(
         joints, save_path, title=title, fps=fps, fmt="auto", scene=scene,
-        constraints=constraints)
+        constraints=constraints, energy=energy)
     print(f"[visualize] wrote {media_path}  (+ joints at {npy_path.name})", flush=True)
     return media_path
 
@@ -199,6 +201,7 @@ def _build_model(cfg: DictConfig, representation, device) -> RMGDiT:
         ffn_mult=cfg.model.ffn_mult,
         text_dim=cfg.model.text_dim,
         time_freq_dim=cfg.model.time_freq_dim,
+        time_scale=float(cfg.model.get("time_scale", 1.0)),
         max_seq_len=cfg.model.max_seq_len,
     )
     model = RMGDiT(dit_cfg).to(device)
@@ -385,7 +388,8 @@ def main(cfg: DictConfig) -> None:
         clip_ids = [c.strip() for c in str(cfg.viz.clips).split(",") if c.strip()]
         manifest: list[dict] = []
         skipped: list[str] = []
-        for cid in clip_ids:
+        for idx, cid in enumerate(clip_ids):
+            write_progress(out_dir, stage="render", inner={"i": idx, "n": len(clip_ids)})
             try:
                 translation, quats, caption = _load_real_clip(data_root, cid)
             except KeyError:
@@ -408,6 +412,8 @@ def main(cfg: DictConfig) -> None:
                 f"no requested clips were found in the packed dataset "
                 f"({data_root}): {skipped or clip_ids}. Pick ids from the GT browser."
             )
+        write_progress(out_dir, stage="done", complete=True,
+                       inner={"i": len(clip_ids), "n": len(clip_ids)})
         _write_manifest(out_dir, manifest)
         return
 
@@ -459,6 +465,9 @@ def main(cfg: DictConfig) -> None:
                 print(f"[visualize] room scene: {scene_obj.room} m, {len(scene_obj.objects)} obstacle(s), "
                       f"spawn={scene_obj.spawn}, guidance={guidance_weight}", flush=True)
 
+        # prompts are sampled in one batched ODE integration, so the bar sits at
+        # "sampling" until it returns, then advances per rendered prompt.
+        write_progress(out_dir, stage="sampling", inner={"i": 0, "n": len(prompts)})
         with torch.no_grad():
             cond = text_encoder.encode(prompts, device=device)
             samples = sampler.sample(
@@ -469,20 +478,28 @@ def main(cfg: DictConfig) -> None:
 
         manifest = []
         for i, prompt in enumerate(prompts):
+            write_progress(out_dir, stage="render", inner={"i": i, "n": len(prompts)})
             tpr = tplusr_decode(samples[i])
             if scene_obj is not None:
                 tpr.translation, tpr.quaternions = place_motion(
                     tpr.translation, tpr.quaternions, scene_obj.spawn)
-            joints = forward_kinematics(
+            joints_t = forward_kinematics(
                 skel, tpr.quaternions.float(), tpr.translation.float()
-            ).cpu().numpy()
+            )                                                # (T,J,3), already placed
+            joints = joints_t.cpu().numpy()
+            # World-constraint penalty over time + per-joint glow — the "how is
+            # the skeleton being punished" overlay. Computed on the SAME placed
+            # joints via the SAME SDFs the guidance energy used, so it's faithful.
+            energy = scene_energy_series(joints_t, scene_obj) if scene_obj is not None else None
             safe = "".join(c if c.isalnum() else "_" for c in prompt)[:48]
             gif = _render(joints, out_dir / f"gen-{i:02d}-{safe}.mp4",
                           title=prompt[:60], fps=int(cfg.viz.fps), scene=scene_dict,
-                          constraints=constraint_viz or None)
+                          constraints=constraint_viz or None, energy=energy)
             if gif is None:
                 continue
             manifest.append({"file": gif.name, "kind": "pred", "caption": prompt})
+        write_progress(out_dir, stage="done", complete=True,
+                       inner={"i": len(prompts), "n": len(prompts)})
         _write_manifest(out_dir, manifest)
         return
 
@@ -517,7 +534,8 @@ def main(cfg: DictConfig) -> None:
         sampler = _build_sampler(cfg, representation, skel)
 
         manifest = []
-        for cid in clip_ids:
+        for idx, cid in enumerate(clip_ids):
+            write_progress(out_dir, stage="sample", inner={"i": idx, "n": len(clip_ids)})
             try:
                 translation, quats, caption = _load_real_clip(data_root, cid)
             except KeyError:
@@ -557,6 +575,8 @@ def main(cfg: DictConfig) -> None:
                                title=f"PRED [{cid}] {caption[:55]}", fps=int(cfg.viz.fps))
             if pred_gif is not None:
                 manifest.append({"file": pred_gif.name, "kind": "pred", "clip_id": cid, "caption": caption})
+        write_progress(out_dir, stage="done", complete=True,
+                       inner={"i": len(clip_ids), "n": len(clip_ids)})
         _write_manifest(out_dir, manifest)
         return
 
@@ -592,7 +612,8 @@ def main(cfg: DictConfig) -> None:
             )
         print(f"[visualize] rendering {len(files)} sample dump(s)", flush=True)
         manifest = []
-        for p in files:
+        for idx, p in enumerate(files):
+            write_progress(out_dir, stage="render", inner={"i": idx, "n": len(files)})
             if not p.exists():
                 print(f"[visualize] samples file {p} not found — skipping", flush=True)
                 continue
@@ -632,6 +653,8 @@ def main(cfg: DictConfig) -> None:
                 "sample dumps are corrupt (model generation diverged to NaN/Inf). "
                 "Inspect the .npy files written next to each (attempted) GIF."
             )
+        write_progress(out_dir, stage="done", complete=True,
+                       inner={"i": len(files), "n": len(files)})
         _write_manifest(out_dir, manifest)
         return
 
