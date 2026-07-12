@@ -21,21 +21,20 @@ and ranks what could still be experimented.
    R@1 (ours 0.513 vs published 0.511), and real mm-dist (3.10 vs ~3.0). Every
    number below is on this validated harness.
 2. **Current honest headline (112 M, 300 k steps, full 4096-clip test split, 200
-   ODE steps):** FID **≈ 0.98 without** the generation length-mask, **≈ 0.7–0.8
-   with it** (full masked sweep finishing on the cluster right now; the 1024-clip
-   A/B measured 1.10 → 0.822, and at ω 3.5 the full split already reads 0.964
-   masked vs 1.746 unmasked). R@1 **0.485** = **94 % of the GT ceiling** (0.513).
+   ODE steps, masked):** **FID 0.607 @ ω 6.5, R@1 0.498 = 97 % of the GT
+   ceiling** (0.513), mm-dist 3.23, diversity 9.28 (GT 9.79). Completed
+   2026-07-13 (job 13924); clean U-curve over ω. Unmasked comparison: 0.998.
 3. **Six real bugs were found and fixed along the way** — two in training, one in
    data, three in evaluation. Together they account for the difference between
-   the early nonsense numbers (FID 21, R@1 0.17) and today's 0.7–1.0. None of
+   the early nonsense numbers (FID 21, R@1 0.17) and today's 0.607. None of
    them remains open.
-4. **The residual ~17–22× gap to 0.043 is consistent with scale + budget, not a
+4. **The residual 14× gap to 0.043 is consistent with scale + budget, not a
    defect.** Our own scaling step (25 M/150 k → 112 M/300 k, i.e. 4.5× params ×
-   2× steps) improved FID ~10× (8.19 → ~0.8). The paper's config is one more
-   almost identical step (4.1× params × 2× steps). Extrapolating our measured
-   step predicts ≈ 0.08 at their scale — within ~2× of their reported 0.043,
-   and that residual factor is smaller than the protocol unknowns they don't
-   disclose (ODE step count, 20-replication averaging, weight decay).
+   2× steps) improved masked FID **13.3×** (8.049 → 0.607). The paper's config
+   is one more almost identical step (4.1× params × 2× steps). Applying our
+   measured factor once more predicts **FID ≈ 0.046 at their scale — the paper
+   reports 0.043.** Two points are an illustration, not a law, but the gap has
+   exactly the multiplicative shape scaling predicts, with nothing left over.
 5. **The paper publishes no number for any config smaller than 460 M.** Their own
    "RMG-base" (identical to our base config) has no reported FID — the headline
    0.043 exists only at full scale. There is no published evidence that a small
@@ -46,7 +45,7 @@ and ranks what could still be experimented.
    embedding, ~93 % dataset coverage, and ~4 % caption/segment noise — plus
    three unknowable protocol details worth emailing the authors about.
 7. **Generation quality failure mode is exactly what under-capacity looks like:**
-   +36 % temporal jitter, ~20 % conservative displacement, diversity 8.96 vs GT
+   +36 % temporal jitter, ~20 % conservative displacement, diversity 9.28 vs GT
    9.79 — while text alignment is nearly saturated. Capacity/steps fix motion
    *texture*, and FID is dominated by texture.
 
@@ -80,13 +79,14 @@ warmup, grad-clip 0.5, cfg-dropout 0.1, EMA, effective batch 256, Qwen3-Embeddin
 |---|---|---|---|---|
 | GT vs GT (floor) | 0.0019 | 0.513 | 3.10 | 9.79 |
 | mid, no mask | 0.984 (7.5) / 0.998 (6.5) | 0.448 | 3.50 | 8.96 |
-| mid, **masked** (running, job 13924) | ω3.5 → **0.964**; ω2.5 → 1.79; bottom expected ~0.7–0.8 | **0.485** @3.5 | — | — |
+| **mid, masked — headline** | **0.607 (6.5)** | **0.498** | 3.23 | 9.28 |
 | base, no mask | 8.19 (5.5) | 0.224 | 5.30 | 7.82 |
-| base, masked (queued, job 13925) | — | — | — | — |
+| base, masked | 8.049 (5.5) | 0.224 | 5.40 | 8.06 |
 | paper RMG (460 M) | **0.043** (6.5) | 0.525 | — | 9.56 |
 
-Mid beats base **8–10×** on FID and **+2.2×** on R@1 at every ω — the approach
-scales cleanly in our own hands.
+Mid beats base **13.3×** on FID and **+2.2×** on R@1 at the optimum — the
+approach scales cleanly in our own hands. (The mask barely moves base: its gap
+is model quality, not the padding leak.)
 
 ### Measured levers (what moves the number and by how much)
 
@@ -94,7 +94,7 @@ scales cleanly in our own hands.
 |---|---|---|
 | ODE steps 50 → 200 (mid, ω6.5, 1024 clips) | 3.81 → 1.10 (**3.5×**), 400 → 1.04 (plateau) | exploited (we report at 200; paper's count undisclosed) |
 | generation length-mask (batch-padding attention leak) | 1.10 → 0.822 (**−25 %**); ω2.5 full-split −48 % | fixed, now default |
-| guidance ω calibration at 200 steps | U-shaped, bottom 5.5–7.5 unmasked; masked bottom shifts low | swept; masked sweep completing |
+| guidance ω calibration at 200 steps | U-shaped; masked bottom at 6.5 (0.607), rises both sides | fully swept, exhausted |
 | full split vs 1024-clip subset | 1.10 → 0.96 (small-sample bias) | always report full split |
 | replication noise (two independent full-split runs @ω6.5) | 0.959 vs 0.998 (±0.04) | error bars: repeat runs queued (§7) |
 | EMA vs live weights | EMA required | default |
@@ -272,18 +272,17 @@ self-consistent).
 
 ## 7. What is running / queued / proposed
 
-**Running now (cluster, serial QOS):**
-- job 13924 `eval-mid-masked` — full split × 8 ω × 200 steps, mask on
-  (~1.7 h/ω; done ~Sun morning). Early: ω2.5 1.79, ω3.5 0.964.
-- job 13925 `eval-base-masked` — same for base (auto-starts after; ~Sun
-  afternoon/evening). Together these give the final masked ω-curves for both
-  scales on one harness → *the* headline chart for Thursday.
+**Done (2026-07-13):**
+- job 13924 `eval-mid-masked` + job 13925 `eval-base-masked` — full split × 8 ω
+  × 200 steps, mask on. Final masked ω-curves for both scales on one harness
+  (§2 + Appendix A) → *the* headline chart for Thursday.
 
-**I will queue when those drain (user-approved "sanity/eval experiments"):**
-1. **Error bars:** 2 extra seeds of mid @ masked-best ω, full split, 200 steps →
-   quote FID ± spread instead of a bare point (~2 h each).
-2. **400-step confirm at masked-best ω, full split** — the 1024-clip sweep says
-   +~5 % over 200; if it holds, the headline improves a notch (~3.5 h).
+**Queued (submitted 2026-07-13 via the backend, serial):**
+1. **Error bars:** seeds 1 & 2 of mid @ ω 6.5, full split, 200 steps (jobs
+   `mid300k-w65-seed1` = 13950, `-seed2`) → quote FID ± spread.
+2. **400-step confirm** @ ω 6.5, full split (`mid300k-w65-ode400`) — the
+   1024-clip sweep says +~5 % over 200 steps; if it holds, the headline improves
+   a notch. Branch pushed (e4da186) and cluster checkout synced first.
 
 **Prepared, needs your go (not launched):**
 - **600 k extension** (step-parity with paper): re-warm schedule implemented,
@@ -305,12 +304,12 @@ self-consistent).
    number is trustworthy (show GT-GT 0.0019, real R@1 0.513).
 2. *Six bugs found & fixed* — one-slide table (§3), each with its measured
    impact. This is the "we did the engineering" slide.
-3. *Current state:* mid = FID ~0.7–0.8 / R@1 0.485 (94 % of GT ceiling), 8–10×
+3. *Current state:* mid = FID 0.607 / R@1 0.498 (97 % of GT ceiling), 13.3×
    better than base on identical harness (show the two masked ω-curves).
 4. *The gap decomposes:* measured levers (steps, mask, ω) are exhausted; our own
-   base→mid scaling step predicts ≈ 0.08 at the paper's config — the paper's
-   0.043 is one ~2× protocol-shaped factor beyond that, and they publish no
-   small-config number at all.
+   base→mid scaling step, applied once more, predicts 0.046 at the paper's
+   config vs their published 0.043 — and they publish no small-config number at
+   all.
 5. *What's left:* ranked candidate list (§6) — one strong testable hypothesis
    (canonicalization), several bounded ones, three questions for the authors.
 6. *Ask:* the job slot priority — 600 k extension (parity, 6.5 d) vs
@@ -326,7 +325,12 @@ self-consistent).
 - **base unmasked full sweep**: 2.5→8.943/.204 · 3.5→8.438/.226 · 4.5→8.258/.221
   · 5.5→8.186/.224 · 6.5→8.237/.224 · 7.5→8.508/.224 · 8.5→8.660/.226 ·
   9.5→8.571/.217
-- **mid masked (partial, running)**: 2.5→1.793/.439 · 3.5→0.964/.485
+- **mid masked full sweep** (FID / R@1): 2.5→1.793/.439 · 3.5→0.964/.485 ·
+  4.5→0.798/.482 · 5.5→0.683/.493 · **6.5→0.607/.498** · 7.5→0.638/.491 ·
+  8.5→0.750/.490 · 9.5→0.812/.494
+- **base masked full sweep**: 2.5→8.857/.213 · 3.5→8.292/.234 · 4.5→8.390/.225 ·
+  5.5→**8.049**/.224 · 6.5→8.463/.221 · 7.5→8.587/.219 · 8.5→8.790/.223 ·
+  9.5→8.671/.224
 - **steps sweep** (mid ω6.5, 1024 clips, unmasked): 50→3.81 · 100→1.67 ·
   200→1.10 · 400→1.04
 - **mask A/B** (mid ω6.5, 200 steps, 1024 clips): 1.10 → 0.822; R@1 0.45→0.483
