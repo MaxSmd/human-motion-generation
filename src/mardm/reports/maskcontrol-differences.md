@@ -70,16 +70,36 @@ and is expected to carry most of the realism recovery.
 
 ## Phase-1 numbers (2026-07-15, MARDM-M @300k canonical, CFG w=3.0)
 
-Optimization-only (no regularizer, no repair), 5 pelvis keyframes:
+512 test clips, 5 pelvis keyframes. Unguided baseline shares seeds with each
+guided run (FID 0.268 is the 512-sample small-sample value, higher than the
+full-test 0.154; only within-column deltas are meaningful).
 
 | | Avg. err | Loc. err | Traj. err | FID | R@1 |
 |---|---|---|---|---|---|
-| unguided (512 clips) | 0.648 m | 0.363 | 0.541 | 0.268 | 0.504 |
-| guided (512 clips) | 0.015 m | 0.003 | 0.012 | 1.447 | 0.385 |
+| unguided | 0.648 m | 0.363 | 0.541 | 0.268 | 0.504 |
+| guided, optimization-only | 0.015 m | 0.003 | 0.012 | 1.447 | 0.385 |
+| guided + repair (2 rounds, frac 0.5) | 0.076 m | 0.017 | 0.057 | 0.905 | 0.385 |
 
-Control matches MaskControl's accurate mode with zero training; the 5.4× FID
-degradation is the measured cost of having neither their regularizer (phase 2)
-nor a restore mechanism — the motivating row for both. Qualitative signature:
-on locomotion clips the optimizer satisfies pelvis waypoints by damping gait
-(clip 004822: foot speed 0.57 → 0.10 m/s) rather than by cancelling steps.
-Repair-round results land here once jobs 14185/14186 finish.
+Optimization-only control matches MaskControl's accurate mode with zero
+training; its 5.4× FID degradation is the measured cost of having neither their
+regularizer (phase 2) nor a restore mechanism.
+
+**Re-prediction repair recovers ~40% of the FID gap** (1.447 → 0.905, vs 0.268
+floor) at a 5× control cost (0.015 → 0.076 m, still well inside the 0.5 m
+threshold — loc err only 0.017). But it does NOT fix the qualitative failure it
+was meant to: on the hardest conflict clip (004822, "walk in place" fighting the
+prior's forward-walk habit) foot speed goes 0.57 → 0.10 → 0.06 m/s — repair
+made the freeze slightly *worse*, because re-prediction restores consistency
+with the committed context, and when >half the sequence already encodes frozen
+legs the prior predicts more of them. Aggregate motion smoothness does improve
+(mean jerk 121 → 77 m/s³ vs 57 unguided; mean foot speed 0.75 → 0.58 vs 0.56),
+i.e. repair removes the high-frequency artifacts optimization injects but cannot
+re-inject gait that optimization suppressed.
+
+**Conclusion: the zero-training restore cannot substitute for the trained
+regularizer.** MaskControl's implicit restore works because its
+regularizer-warm-started perturbations are small, so the surrounding context
+stays on-manifold and re-prediction pulls toward it. Ours are large, so
+re-prediction pulls toward the pathology. This sharpens the phase-2 motivation:
+the warm start is not an optimization nicety, it is what makes any restore
+mechanism work.
