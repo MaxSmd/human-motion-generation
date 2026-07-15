@@ -123,3 +123,25 @@ def test_generate_guided_with_optimization() -> None:
     )
     assert latents.shape == (1, 16, 5)
     assert torch.isfinite(latents).all()
+
+
+def test_generate_guided_with_repair_rounds() -> None:
+    torch.manual_seed(0)
+    ae, mardm = _tiny()
+    _unzero_diff_head(mardm)
+    mean, std = _stats()
+    m_lens = torch.tensor([6, 3])
+    T = 6 * ae.downsample_rate
+    mask = torch.zeros(2, T, 22, dtype=torch.bool)
+    mask[:, ::9, 0] = True
+    control = ControlSignal(torch.randn(2, T, 22, 3) * 0.1, mask)
+    latents = generate_guided(
+        mardm, ae, torch.randn(2, 32), m_lens, control, mean, std,
+        timesteps=2, cond_scale=2.0,
+        guidance=GuidanceConfig(inner_iters=2, lr=0.05, ode_steps_guidance=3,
+                                ode_steps_final=4, repair_rounds=2, repair_frac=0.5,
+                                repair_iters=1),
+    )
+    assert latents.shape == (2, 16, 6)
+    assert torch.isfinite(latents).all()
+    assert (latents[1, :, 3:] == 0).all()        # padding survives repair remasking

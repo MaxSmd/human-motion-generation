@@ -122,6 +122,8 @@ def main_impl(cfg: DictConfig) -> None:
         ode_steps_guidance=int(cfg.guid.ode_steps_guidance),
         ode_steps_final=int(cfg.guid.ode_steps_final),
         post_iters=int(cfg.guid.post_iters), post_lr=float(cfg.guid.post_lr),
+        repair_rounds=int(cfg.guid.repair_rounds), repair_frac=float(cfg.guid.repair_frac),
+        repair_iters=int(cfg.guid.repair_iters),
         verbose=bool(cfg.guid.verbose),
     )
     baseline_cfg = GuidanceConfig(
@@ -211,6 +213,9 @@ def main(cfg: DictConfig) -> None:
         "ode_steps_final": 25,     # euler steps for committed samples
         "post_iters": 0,           # direct latent optimization after AR loop
         "post_lr": 0.01,
+        "repair_rounds": 0,        # re-prediction repair passes after the AR loop
+        "repair_frac": 0.5,        # fraction of tokens remasked per repair round
+        "repair_iters": 10,        # light-guidance inner steps during repair
         "render": False,           # also write GIFs (needs matplotlib)
         "fps": 20,
         "verbose": False,          # print inner-loop loss trajectory

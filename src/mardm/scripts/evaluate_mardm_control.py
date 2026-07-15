@@ -119,6 +119,8 @@ def main_impl(cfg: DictConfig) -> None:
         ode_steps_guidance=int(cfg.ctrl.ode_steps_guidance),
         ode_steps_final=int(cfg.ctrl.ode_steps_final),
         post_iters=int(cfg.ctrl.post_iters), post_lr=float(cfg.ctrl.post_lr),
+        repair_rounds=int(cfg.ctrl.repair_rounds), repair_frac=float(cfg.ctrl.repair_frac),
+        repair_iters=int(cfg.ctrl.repair_iters),
     )
     run_cfgs: dict[str, GuidanceConfig] = {"guided": gcfg}
     if bool(cfg.ctrl.baseline):
@@ -283,6 +285,9 @@ def main(cfg: DictConfig) -> None:
         "ode_steps_final": 25,
         "post_iters": 0,
         "post_lr": 0.01,
+        "repair_rounds": 0,                    # re-prediction repair passes
+        "repair_frac": 0.5,
+        "repair_iters": 10,
         "baseline": True,                      # also run unguided with same seeds
     })
     cfg.ctrl = OmegaConf.merge(ctrl_cfg, cfg.get("ctrl", OmegaConf.create({})))
