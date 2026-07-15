@@ -82,3 +82,4 @@ degradation is the measured cost of having neither their regularizer (phase 2)
 nor a restore mechanism — the motivating row for both. Qualitative signature:
 on locomotion clips the optimizer satisfies pelvis waypoints by damping gait
 (clip 004822: foot speed 0.57 → 0.10 m/s) rather than by cancelling steps.
+Repair-round results land here once jobs 14185/14186 finish.

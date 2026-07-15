@@ -24,7 +24,7 @@ Optional re-prediction repair (`repair_rounds > 0`) makes MaskControl's implicit
 remask-and-repredict restore explicit for our nested-commit AR loop: tokens the
 unguided prior most disagrees with get remasked and re-predicted under light
 guidance, pulling the motion back on-manifold without losing the waypoints. See
-reports/control-phase1/maskcontrol-differences.md for the exact mapping.
+src/mardm/reports/maskcontrol-differences.md for the exact mapping.
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ class GuidanceConfig:
     post_iters: int = 0          # direct latent optimization after the AR loop
     post_lr: float = 0.01
     # Re-prediction repair (explicit analogue of MaskControl's remask-and-
-    # repredict restore; see reports/control-phase1/maskcontrol-differences.md).
+    # repredict restore; see src/mardm/reports/maskcontrol-differences.md).
     # After the AR loop: remask the `repair_frac` of tokens the UNGUIDED prior
     # most disagrees with and re-predict them under light guidance
     # (`repair_iters` inner steps), `repair_rounds` times.
