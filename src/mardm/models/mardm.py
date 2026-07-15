@@ -187,7 +187,12 @@ class MARDM(nn.Module):
         return cond
 
     def forward(self, latents: Tensor, cond: Tensor, padding_mask: Tensor,
-                force_mask: bool = False, mask: Tensor | None = None) -> Tensor:
+                force_mask: bool = False, mask: Tensor | None = None,
+                control_residuals: list[Tensor] | None = None) -> Tensor:
+        """`control_residuals`: optional per-block additive residuals (one
+        (B, L, latent_dim) tensor per MARTransformer block, in original token
+        order) from `mardm.control.regularizer`. None (default) is the exact
+        base computation — no new parameters, checkpoints load unchanged."""
         cond = self.mask_cond(cond, force_mask=force_mask)
         x = self.input_process(latents)          # (L, B, latent_dim)
         cond = self.cond_emb(cond)               # (B, latent_dim)
@@ -200,9 +205,16 @@ class MARDM(nn.Module):
             x = torch.gather(x, 1, sort_indices.unsqueeze(-1).expand(-1, -1, x.size(-1)))
             inverse_indices = torch.argsort(sort_indices, dim=1)
             padding_mask = torch.gather(padding_mask, 1, sort_indices)
+            if control_residuals is not None:
+                control_residuals = [
+                    torch.gather(r, 1, sort_indices.unsqueeze(-1).expand(-1, -1, r.size(-1)))
+                    for r in control_residuals
+                ]
 
-        for block in self.MARTransformer:
+        for i, block in enumerate(self.MARTransformer):
             x = block(x, cond, padding_mask)
+            if control_residuals is not None:
+                x = x + control_residuals[i]
 
         if inverse_indices is not None:
             x = torch.gather(x, 1, inverse_indices.unsqueeze(-1).expand(-1, -1, x.size(-1)))

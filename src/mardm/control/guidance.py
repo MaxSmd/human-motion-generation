@@ -76,13 +76,26 @@ def _sample_tokens(mardm: MARDM, z: Tensor, noise: Tensor, cond_scale: float,
 
 
 def _compute_z(mardm: MARDM, latents: Tensor, cond: Tensor, padding_mask: Tensor,
-               flat_mask: Tensor, cond_scale: float) -> Tensor:
-    """Transformer condition for the masked tokens, uncond half stacked under CFG."""
+               flat_mask: Tensor, cond_scale: float,
+               regularizer=None, control_feats: Tensor | None = None) -> Tensor:
+    """Transformer condition for the masked tokens, uncond half stacked under CFG.
+
+    With a trained `regularizer` (phase 2, `mardm.control.regularizer`), its
+    residuals are injected into BOTH CFG branches — the spatial signal is
+    caption-independent.
+    """
     b, l, _ = latents.shape
     with torch.no_grad():
-        z = mardm.forward(latents, cond, padding_mask).reshape(b * l, -1)[flat_mask]
+        res = (regularizer.residuals(latents, cond, padding_mask, control_feats)
+               if regularizer is not None else None)
+        z = mardm.forward(latents, cond, padding_mask,
+                          control_residuals=res).reshape(b * l, -1)[flat_mask]
         if cond_scale != 1.0:
-            z_uncond = mardm.forward(latents, cond, padding_mask, force_mask=True)
+            res_u = (regularizer.residuals(latents, cond, padding_mask, control_feats,
+                                           force_mask=True)
+                     if regularizer is not None else None)
+            z_uncond = mardm.forward(latents, cond, padding_mask, force_mask=True,
+                                     control_residuals=res_u)
             z = torch.cat([z, z_uncond.reshape(b * l, -1)[flat_mask]], dim=0)
     return z
 
@@ -90,11 +103,12 @@ def _compute_z(mardm: MARDM, latents: Tensor, cond: Tensor, padding_mask: Tensor
 def _guided_commit(mardm: MARDM, ae: AE, latents: Tensor, is_mask: Tensor, cond: Tensor,
                    padding_mask: Tensor, cond_scale: float, control: ControlSignal,
                    mean: Tensor, std: Tensor, g: GuidanceConfig, inner_iters: int,
-                   tag: str) -> Tensor:
+                   tag: str, regularizer=None, control_feats: Tensor | None = None) -> Tensor:
     """One masked-prediction step: optimize z for the masked tokens, commit samples."""
     b, l, d = latents.shape
     flat_mask = is_mask.reshape(b * l)
-    z = _compute_z(mardm, latents, cond, padding_mask, flat_mask, cond_scale)
+    z = _compute_z(mardm, latents, cond, padding_mask, flat_mask, cond_scale,
+                   regularizer=regularizer, control_feats=control_feats)
     # Fixed noise per step so the inner optimization is deterministic.
     noise = torch.randn(int(flat_mask.sum()), d, device=latents.device)
 
@@ -135,11 +149,16 @@ def generate_guided(
     timesteps: int,
     cond_scale: float,
     guidance: GuidanceConfig | None = None,
+    regularizer=None,
 ) -> Tensor:
     """Masked-AR sampling with per-step z-optimization against `control`.
 
     cond: (B, text_dim); m_lens: (B,) latent lengths; control targets/mask are
     at decoded-frame resolution (see `mardm.control.losses`).
+    `regularizer`: optional trained `ControlMARDM` (phase 2) — its residuals
+    are injected into every transformer pass (both CFG branches); combine with
+    `inner_iters=0` for regularizer-only sampling, or > 0 for the full
+    MaskControl-style regularizer + optimization stack.
     Returns latents (B, ae_dim, L) for AE.decode, like `MARDM.generate`.
     """
     g = guidance or GuidanceConfig()
@@ -150,6 +169,12 @@ def generate_guided(
     b = len(m_lens)
     d = mardm.ae_dim
     padding_mask = ~lengths_to_mask(m_lens, l)
+
+    control_feats = None
+    if regularizer is not None:
+        from .regularizer import control_signal_features
+        control_feats = control_signal_features(
+            control, l, regularizer.frames_per_latent).to(device)
 
     latents = torch.where(
         padding_mask.unsqueeze(-1),
@@ -167,7 +192,8 @@ def generate_guided(
         latents = torch.where(is_mask.unsqueeze(-1), mardm.mask_latent.detach().repeat(b, l, 1), latents)
         latents = _guided_commit(mardm, ae, latents, is_mask, cond, padding_mask,
                                  cond_scale, control, mean, std, g, g.inner_iters,
-                                 tag=f"step {step + 1}/{timesteps}")
+                                 tag=f"step {step + 1}/{timesteps}",
+                                 regularizer=regularizer, control_feats=control_feats)
         masked_rand_schedule = masked_rand_schedule.masked_fill(~is_mask, 1e5)
 
     # Re-prediction repair: remask the tokens the UNGUIDED prior most disagrees
@@ -177,7 +203,8 @@ def generate_guided(
     for rnd in range(g.repair_rounds if control.num_constraints > 0 else 0):
         valid = ~padding_mask                              # (b, l)
         flat_valid = valid.reshape(b * l)
-        z_prior = _compute_z(mardm, latents, cond, padding_mask, flat_valid, cond_scale)
+        z_prior = _compute_z(mardm, latents, cond, padding_mask, flat_valid, cond_scale,
+                             regularizer=regularizer, control_feats=control_feats)
         with torch.no_grad():
             noise_r = torch.randn(int(flat_valid.sum()), d, device=device)
             x_prior = _sample_tokens(mardm, z_prior, noise_r, cond_scale, g.ode_steps_final)
@@ -198,7 +225,8 @@ def generate_guided(
         latents = torch.where(is_mask.unsqueeze(-1), mardm.mask_latent.detach().repeat(b, l, 1), latents)
         latents = _guided_commit(mardm, ae, latents, is_mask, cond, padding_mask,
                                  cond_scale, control, mean, std, g, g.repair_iters,
-                                 tag=f"repair {rnd + 1}/{g.repair_rounds}")
+                                 tag=f"repair {rnd + 1}/{g.repair_rounds}",
+                                 regularizer=regularizer, control_feats=control_feats)
 
     if g.post_iters > 0 and control.num_constraints > 0:
         lat_opt = latents.detach().clone().requires_grad_(True)

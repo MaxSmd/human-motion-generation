@@ -10,10 +10,13 @@ from __future__ import annotations
 import torch
 
 from mardm.control import (
+    ControlMARDM,
     ControlSignal,
     GuidanceConfig,
+    control_forward_loss,
     control_loss,
     control_metrics,
+    control_signal_features,
     generate_guided,
     latents_to_joints,
 )
@@ -145,3 +148,80 @@ def test_generate_guided_with_repair_rounds() -> None:
     assert latents.shape == (2, 16, 6)
     assert torch.isfinite(latents).all()
     assert (latents[1, :, 3:] == 0).all()        # padding survives repair remasking
+
+
+def _control(b: int, t: int, k_every: int = 7) -> ControlSignal:
+    mask = torch.zeros(b, t, 22, dtype=torch.bool)
+    mask[:, ::k_every, 0] = True
+    return ControlSignal(torch.randn(b, t, 22, 3) * 0.1, mask)
+
+
+def test_regularizer_identity_at_init() -> None:
+    # Zero-init joins: base(latents) == base(latents, residuals) at init.
+    torch.manual_seed(0)
+    ae, mardm = _tiny()
+    reg = ControlMARDM(mardm, frames_per_latent=ae.downsample_rate).eval()
+    b, l = 2, 6
+    latents = torch.randn(b, l, 16)
+    cond = torch.randn(b, 32)
+    padding = torch.zeros(b, l, dtype=torch.bool)
+    control = _control(b, l * ae.downsample_rate)
+    feats = control_signal_features(control, l, ae.downsample_rate)
+    res = reg.residuals(latents, cond, padding, feats)
+    z_base = mardm.forward(latents, cond, padding)
+    z_reg = mardm.forward(latents, cond, padding, control_residuals=res)
+    assert torch.allclose(z_base, z_reg, atol=1e-6)
+    assert all(float(r.detach().abs().max()) == 0.0 for r in res)
+
+
+def test_regularizer_state_dict_excludes_base() -> None:
+    ae, mardm = _tiny()
+    reg = ControlMARDM(mardm, frames_per_latent=ae.downsample_rate)
+    keys = list(reg.state_dict().keys())
+    assert keys and all(k.split(".")[0] in ("copy_blocks", "control_in", "zero_proj")
+                        for k in keys)
+    # round-trip: a fresh instance loads the checkpoint standalone
+    reg2 = ControlMARDM(mardm, frames_per_latent=ae.downsample_rate)
+    reg2.load_state_dict(reg.state_dict())
+
+
+def test_control_forward_loss_trains_regularizer_only() -> None:
+    torch.manual_seed(0)
+    ae, mardm = _tiny()
+    _unzero_diff_head(mardm)
+    for p in mardm.parameters():
+        p.requires_grad_(False)
+    for p in ae.parameters():
+        p.requires_grad_(False)
+    reg = ControlMARDM(mardm, frames_per_latent=ae.downsample_rate).train()
+    mean, std = _stats()
+
+    latents = ae.encode(torch.randn(2, 32, 67))            # (2, 16, 8)
+    m_lens = torch.tensor([8, 6])
+    control = _control(2, 8 * ae.downsample_rate)
+    l_diff, l_s = control_forward_loss(reg, ae, latents, torch.randn(2, 32),
+                                       m_lens, control, mean, std)
+    assert torch.isfinite(l_diff) and torch.isfinite(l_s)
+    (0.1 * l_diff + 0.9 * l_s).backward()
+    grads = [p.grad for p in reg.parameters() if p.grad is not None]
+    assert grads and any(float(g.abs().sum()) > 0 for g in grads)
+    assert all(p.grad is None for p in mardm.parameters())
+    assert all(p.grad is None for p in ae.parameters())
+
+
+def test_generate_guided_with_regularizer() -> None:
+    torch.manual_seed(0)
+    ae, mardm = _tiny()
+    reg = ControlMARDM(mardm, frames_per_latent=ae.downsample_rate).eval()
+    for p in reg.parameters():
+        p.requires_grad_(False)
+    mean, std = _stats()
+    m_lens = torch.tensor([5, 3])
+    control = _control(2, 5 * ae.downsample_rate)
+    latents = generate_guided(
+        mardm, ae, torch.randn(2, 32), m_lens, control, mean, std,
+        timesteps=2, cond_scale=2.0, regularizer=reg,
+        guidance=GuidanceConfig(inner_iters=0, post_iters=0, ode_steps_final=4),
+    )
+    assert latents.shape == (2, 16, 5)
+    assert torch.isfinite(latents).all()

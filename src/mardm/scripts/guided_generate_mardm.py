@@ -35,6 +35,7 @@ import torch
 from omegaconf import DictConfig, OmegaConf
 
 from mardm.control import (
+    ControlMARDM,
     ControlSignal,
     GuidanceConfig,
     control_metrics,
@@ -96,6 +97,24 @@ def _load_mardm(cfg: DictConfig, ckpt: str | Path, ae: AE, device: torch.device)
     return mardm
 
 
+def _load_regularizer(cfg: DictConfig, ckpt: str | Path, mardm: MARDM, ae: AE,
+                      device: torch.device, use_ema: bool) -> ControlMARDM:
+    reg = ControlMARDM(mardm, frames_per_latent=ae.downsample_rate).to(device)
+    state = load_checkpoint(Path(ckpt), map_location=device)
+    reg.load_state_dict(state.model)
+    if use_ema and state.ema is not None:
+        ema = EMA(reg, decay=0.0)
+        ema.load_state_dict(state.ema)
+        ema.copy_to(reg)
+        print(f"[guided] loaded regularizer EMA weights from step {state.step}", flush=True)
+    else:
+        print(f"[guided] loaded regularizer live weights from step {state.step}", flush=True)
+    reg.eval()
+    for p in reg.parameters():
+        p.requires_grad_(False)
+    return reg
+
+
 def main_impl(cfg: DictConfig) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     out_dir = Path(cfg.output_dir) / "guided"
@@ -129,8 +148,22 @@ def main_impl(cfg: DictConfig) -> None:
     baseline_cfg = GuidanceConfig(
         inner_iters=0, post_iters=0, ode_steps_final=gcfg.ode_steps_final)
     joint_ids = [int(j) for j in cfg.guid.joints]
+
+    regularizer = None
+    if cfg.guid.regularizer_checkpoint:
+        regularizer = _load_regularizer(cfg, cfg.guid.regularizer_checkpoint, mardm, ae,
+                                        device, bool(cfg.guid.regularizer_use_ema))
+    # (name, guidance config, regularizer) — unguided baseline, optional
+    # regularizer-only ablation, then the full stack.
+    runs_spec: list[tuple[str, GuidanceConfig, ControlMARDM | None]] = [
+        ("unguided", baseline_cfg, None)]
+    if regularizer is not None:
+        runs_spec.append(("reg_only", baseline_cfg, regularizer))
+    runs_spec.append(("guided", gcfg, regularizer))
     print(f"[guided] controlling joints {joint_ids} at {int(cfg.guid.num_keyframes)} keyframes; "
-          f"inner_iters={gcfg.inner_iters} lr={gcfg.lr} post_iters={gcfg.post_iters}", flush=True)
+          f"inner_iters={gcfg.inner_iters} lr={gcfg.lr} post_iters={gcfg.post_iters} "
+          f"repair_rounds={gcfg.repair_rounds} regularizer={'yes' if regularizer else 'no'} "
+          f"runs={[n for n, _, _ in runs_spec]}", flush=True)
 
     per_clip: dict[str, dict] = {}
     for idx in range(n_clips):
@@ -152,12 +185,12 @@ def main_impl(cfg: DictConfig) -> None:
         cond = text_encoder.encode([caption], device=device)
         m_lens = torch.tensor([latent_len], device=device)
         runs: dict[str, dict] = {}
-        for name, run_cfg in (("unguided", baseline_cfg), ("guided", gcfg)):
+        for name, run_cfg, run_reg in runs_spec:
             set_seed(int(cfg.guid.seed) + idx)               # identical noise draws
             latents = generate_guided(
                 mardm, ae, cond, m_lens, control, mean, std,
                 timesteps=int(cfg.guid.timesteps), cond_scale=float(cfg.guid.guidance),
-                guidance=run_cfg,
+                guidance=run_cfg, regularizer=run_reg,
             )
             with torch.no_grad():
                 joints = latents_to_joints(latents.permute(0, 2, 1), ae,
@@ -176,22 +209,22 @@ def main_impl(cfg: DictConfig) -> None:
                  mask=control.mask[0].numpy())
         per_clip[cid] = {"caption": caption, "length": int(L), **{
             f"{name}_{k}": v for name, m in runs.items() for k, v in m.items()}}
-        print(f"[guided] {cid}  L={L:3d}  avg_err {runs['unguided']['avg_err']:.3f}m -> "
-              f"{runs['guided']['avg_err']:.3f}m  loc_err {runs['unguided']['loc_err']:.2f} -> "
-              f"{runs['guided']['loc_err']:.2f}  cap={caption[:44]!r}", flush=True)
+        print(f"[guided] {cid}  L={L:3d}  avg_err " +
+              " -> ".join(f"{runs[n]['avg_err']:.3f}m" for n, _, _ in runs_spec) +
+              f"  cap={caption[:44]!r}", flush=True)
 
-    summary = {"per_clip": per_clip, "n_clips": len(per_clip),
+    run_names = [n for n, _, _ in runs_spec]
+    summary = {"per_clip": per_clip, "n_clips": len(per_clip), "runs": run_names,
                "joints": joint_ids, "num_keyframes": int(cfg.guid.num_keyframes),
                "guidance_config": gcfg.__dict__}
-    for name in ("unguided", "guided"):
+    for name in run_names:
         for k in ("traj_err", "loc_err", "avg_err"):
             summary[f"mean_{name}_{k}"] = float(
                 np.mean([v[f"{name}_{k}"] for v in per_clip.values()]))
     (out_dir / "metrics.json").write_text(json.dumps(summary, indent=2))
-    print(f"\n[guided] mean avg_err: unguided={summary['mean_unguided_avg_err']:.3f}m  "
-          f"guided={summary['mean_guided_avg_err']:.3f}m", flush=True)
-    print(f"[guided] mean loc_err(0.5m): unguided={summary['mean_unguided_loc_err']:.2f}  "
-          f"guided={summary['mean_guided_loc_err']:.2f}", flush=True)
+    for k in ("avg_err", "loc_err"):
+        print(f"[guided] mean {k}: " + "  ".join(
+            f"{name}={summary[f'mean_{name}_{k}']:.3f}" for name in run_names), flush=True)
     print(f"[guided] done — trajectories + metrics under {out_dir}", flush=True)
 
 
@@ -216,6 +249,8 @@ def main(cfg: DictConfig) -> None:
         "repair_rounds": 0,        # re-prediction repair passes after the AR loop
         "repair_frac": 0.5,        # fraction of tokens remasked per repair round
         "repair_iters": 10,        # light-guidance inner steps during repair
+        "regularizer_checkpoint": "",  # trained ControlMARDM (phase 2); adds reg_only run
+        "regularizer_use_ema": True,
         "render": False,           # also write GIFs (needs matplotlib)
         "fps": 20,
         "verbose": False,          # print inner-loop loss trajectory
