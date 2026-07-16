@@ -103,3 +103,33 @@ stays on-manifold and re-prediction pulls toward it. Ours are large, so
 re-prediction pulls toward the pathology. This sharpens the phase-2 motivation:
 the warm start is not an optimization nicety, it is what makes any restore
 mechanism work.
+
+## Phase-2 attempt 1 (2026-07-15): GT-anchored L_s trains a no-op — diagnosed
+
+First regularizer training (90k steps, α=0.1) used the one-step clean estimate
+`x̂₁ = x_t + (1−t)·v` for L_s, with `x_t = t·x₁ + (1−t)·x₀` built from the TRUE
+token. **This leaks the ground truth into the loss anchor**: with GT-derived
+control targets, L_s is minimized by accurate denoising alone — at large t,
+x̂₁ ≈ x₁ regardless of the control signal; at small t the estimate is noise-
+dominated. No gradient pressure to *use* S ever arises. The evidence was in
+the training curve (l_s flat: 0.042 @step 1 → 0.072 val @90k) and confirmed by
+eval (512 clips, same protocol as above):
+
+| | Avg. err | Loc. err | Traj. err | FID | R@1 |
+|---|---|---|---|---|---|
+| reg_only (attempt 1) | 0.643 m | 0.374 | 0.564 | 0.334 | 0.523 |
+| reg + opt (attempt 1) | 0.015 m | 0.004 | 0.016 | 1.383 | 0.348 |
+
+reg_only ≡ unguided (0.643 vs 0.648 m); reg+opt ≡ phase-1 optimization-only.
+The architecture is fine (zero-init identity verified); the loss was vacuous.
+
+**Why MaskControl doesn't have this bug:** their DES-based L_s is computed on
+the model's own *from-noise generation*, so it measures generation-time
+control error. The one-step estimate was our shortcut, and it broke the loss's
+information structure.
+
+**Fix (attempt 2):** L_s samples the masked tokens from pure noise through
+`ls_ode_steps` differentiable euler steps conditioned on z (the same machinery
+phase-1 guidance uses), scattered into true-latent context. Exactly
+differentiable, still no DES — the paper claim is unchanged; only the anchor
+moved from GT to noise.

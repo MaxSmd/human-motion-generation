@@ -138,6 +138,7 @@ def control_forward_loss(
     control: ControlSignal,
     mean: Tensor,
     std: Tensor,
+    ls_ode_steps: int = 4,
 ) -> tuple[Tensor, Tensor]:
     """Regularizer training step: (L_diff, L_s) under MARDM's masking scheme.
 
@@ -147,9 +148,18 @@ def control_forward_loss(
     `MARDM.forward_loss`'s BERT-style masking, injects the regularizer's
     residuals, then:
       * L_diff — the base's per-token SiT diffusion loss on masked tokens;
-      * L_s   — one-step clean estimate x̂₁ = x_t + (1−t)·v_θ (exact for the
-        linear path) scattered into the TRUE-latent context, decoded through
-        the frozen AE to world-frame joints, masked joint error vs `control`.
+      * L_s   — masked tokens sampled FROM PURE NOISE through `ls_ode_steps`
+        differentiable euler ODE steps conditioned on z, scattered into the
+        TRUE-latent context, decoded through the frozen AE to world-frame
+        joints, masked joint error vs `control`.
+
+    L_s must NOT be GT-anchored: the first training run used the one-step
+    clean estimate x̂₁ = x_t + (1−t)·v, whose x_t contains t·x₁ — with
+    GT-derived targets that loss is minimized by accurate denoising alone, so
+    the regularizer never learns to use the control signal (l_s stayed flat
+    for 90k steps; reg_only evaluated at the unguided control error). Sampling
+    from noise measures the actual generation-time control error, which is the
+    quantity MaskControl's DES-based loss measures — ours just does it exactly.
     """
     base = reg.base
     latents = latents.permute(0, 2, 1)               # (B, L, ae_dim)
@@ -189,14 +199,12 @@ def control_forward_loss(
         target=target_flat.repeat(mul, 1)[flat_mask.repeat(mul)],
     )
 
-    # L_s: differentiable clean estimate on the masked tokens.
+    # L_s: masked tokens generated from pure noise (differentiable w.r.t. z).
     z_m = z_flat[flat_mask]
-    x1_m = target_flat[flat_mask]
-    t = torch.rand(x1_m.shape[0], device=device)
-    x0 = torch.randn_like(x1_m)
-    xt = t.unsqueeze(-1) * x1_m + (1.0 - t).unsqueeze(-1) * x0
-    v = base.DiffMLPs.net(xt, t, z_m)
-    x1_hat = xt + (1.0 - t).unsqueeze(-1) * v
+    noise = torch.randn(z_m.shape[0], d, device=device)
+    sample_fn = base.DiffMLPs.gen_transport.sample_ode(
+        sampling_method="euler", num_steps=ls_ode_steps)
+    x1_hat = sample_fn(noise, base.DiffMLPs.net, c=z_m)[-1]
     full = target_flat.clone()
     full[flat_mask] = x1_hat
     joints = latents_to_joints(full.reshape(b, l, d), ae, mean, std)

@@ -176,7 +176,8 @@ def _step_loss(ae: AE, reg: ControlMARDM, text_encoder: TextEncoder, batch,
                               [int(j) for j in cfg.control.joints])
     m_lens = (lengths // ae.downsample_rate).clamp(min=1)
     return control_forward_loss(reg, ae, latents, cond, m_lens, control,
-                                mean.to(device), std.to(device))
+                                mean.to(device), std.to(device),
+                                ls_ode_steps=int(cfg.control.ls_ode_steps))
 
 
 @torch.no_grad()

@@ -52,6 +52,10 @@ control:
   alpha: 0.1                    # loss = alpha * L_diff + (1 - alpha) * L_s (MaskControl)
   cond_drop_prob: 0.1           # manual CFG dropout (frozen base won't drop)
   joints: [0, 10, 11, 15, 20, 21]  # pelvis, feet, head, wrists (OmniControl set)
+  # Euler steps for the from-noise differentiable sample inside L_s. Must
+  # sample from noise, NOT a GT-anchored clean estimate — the anchored variant
+  # leaks the target and trains a no-op regularizer (see regularizer.py).
+  ls_ode_steps: 4
 
 text_encoder:
   type: qwen3
@@ -61,8 +65,8 @@ text_encoder:
   max_length: 256
 
 train:
-  max_steps: 60_000             # placeholder for the <=1-day budget; set via throughput probe
-  micro_batch_size: 32          # L_s decode+FK per sequence is the extra cost vs gen training
+  max_steps: 50_000             # placeholder for the <=1-day budget; set via throughput probe
+  micro_batch_size: 96          # CAMP kills 24g jobs below ~30% VRAM after 2h — keep the card full
   grad_accum: 1
   optimizer:
     name: AdamW
