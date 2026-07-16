@@ -27,6 +27,8 @@ fi
 IMAGE="${IMAGE:-${HOME}/rmg-momask.sqsh}"
 HF_CACHE="${HF_CACHE:-${HOME}/hf-cache}"
 DATA_ROOT="${DATA_ROOT:-/mnt/projects/drl4cvb/human-motion-representation/data/data/humanml3d_packed}"
+HUMANML3D_REPO="${HUMANML3D_REPO:-external/HumanML3D}"
+HUMANML3D_TEXTS_ZIP="${HUMANML3D_TEXTS_ZIP:-}"
 CKPT="${CKPT:-runs/momask-full-tokens-clip150k/momask_smoke_latest.pt}"
 MAX_CLIPS="${MAX_CLIPS:-256}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
@@ -52,10 +54,17 @@ echo "[momask-constraints] repo=${REPO}"
 echo "[momask-constraints] image=${IMAGE}"
 echo "[momask-constraints] hf_cache=${HF_CACHE}"
 echo "[momask-constraints] data_root=${DATA_ROOT}"
+echo "[momask-constraints] humanml3d_repo=${HUMANML3D_REPO}"
+echo "[momask-constraints] humanml3d_texts_zip=${HUMANML3D_TEXTS_ZIP:-<auto>}"
 echo "[momask-constraints] ckpt=${CKPT}"
 echo "[momask-constraints] max_clips=${MAX_CLIPS} batch_size=${BATCH_SIZE}"
 echo "[momask-constraints] steps=${GENERATION_STEPS} guidance=${GUIDANCE_SCALE} anchor_stride=${ANCHOR_STRIDE}"
 echo "[momask-constraints] output=${OUTPUT}"
+
+TEXTS_ZIP_ARG=""
+if [ -n "${HUMANML3D_TEXTS_ZIP}" ]; then
+    TEXTS_ZIP_ARG="--humanml3d-texts-zip '${HUMANML3D_TEXTS_ZIP}'"
+fi
 
 enroot start \
     --root \
@@ -75,6 +84,8 @@ enroot start \
         python -u -m rmg.scripts.evaluate_momask_constraints \
             --checkpoint '${CKPT}' \
             --data-root '${DATA_ROOT}' \
+            --humanml3d-repo '${HUMANML3D_REPO}' \
+            ${TEXTS_ZIP_ARG} \
             --split test \
             --max-clips ${MAX_CLIPS} \
             --batch-size ${BATCH_SIZE} \

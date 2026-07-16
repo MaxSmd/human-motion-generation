@@ -20,7 +20,9 @@ import argparse
 import json
 import math
 import os
+import random
 import time
+import zipfile
 from pathlib import Path
 
 import numpy as np
@@ -37,9 +39,9 @@ from momask.models import (
     TokenTransformerConfig,
 )
 from rmg.data import HumanML3DDataset, collate
-from rmg.eval import RandomGuoEvaluator, RealGuoEvaluator, diversity, fid, mm_distance, r_precision
 from rmg.models import CLIPTextEncoder, RandomTextEncoder, TextEncoder
 from rmg.representation import H3D_FEATURE_DIM, quat_rotate, recover_joints_from_ric
+from shared.eval import RandomGuoEvaluator, RealGuoEvaluator, diversity, fid, mm_distance, r_precision
 
 
 class H3DNormalizer:
@@ -78,6 +80,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--evaluator", choices=["real", "random"], default="real")
     p.add_argument("--text-to-motion-repo", default="external/text-to-motion")
     p.add_argument("--humanml3d-repo", default="external/HumanML3D")
+    p.add_argument(
+        "--humanml3d-texts-zip",
+        default=None,
+        help="Optional direct path to HumanML3D/HumanML3D/texts.zip for VIP caption tokens.",
+    )
+    p.add_argument(
+        "--vip-tokens",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use HumanML3D's original word/POS tokens from texts.zip for R-Precision/MM-Dist.",
+    )
     p.add_argument("--diversity-times", type=int, default=300)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -171,6 +184,67 @@ def build_evaluator(args: argparse.Namespace, device: torch.device):
         humanml3d_repo=args.humanml3d_repo,
         device=device,
     )
+
+
+def load_caption_tokens(texts_zip: str | Path) -> dict[str, dict[str, list[str]]]:
+    """clip_id -> {caption_text: [word/POS tokens]} from HumanML3D's texts.zip."""
+    zp = Path(texts_zip)
+    if not zp.exists():
+        raise FileNotFoundError(f"HumanML3D texts.zip not found: {zp}")
+    out: dict[str, dict[str, list[str]]] = {}
+    with zipfile.ZipFile(zp) as zf:
+        for name in zf.namelist():
+            if not name.endswith(".txt"):
+                continue
+            cid = Path(name).stem
+            cap_to_tokens: dict[str, list[str]] = {}
+            for line in zf.read(name).decode("utf-8").splitlines():
+                parts = line.strip().split("#")
+                if len(parts) < 2:
+                    continue
+                cap = parts[0].strip()
+                tokens = parts[1].strip().split()
+                if cap and tokens:
+                    cap_to_tokens[cap] = tokens
+            if cap_to_tokens:
+                out[cid] = cap_to_tokens
+    print(f"[constraints] loaded VIP caption tokens for {len(out)} clips from {zp}", flush=True)
+    return out
+
+
+def resolve_texts_zip(args: argparse.Namespace) -> Path:
+    if args.humanml3d_texts_zip:
+        return Path(args.humanml3d_texts_zip)
+    repo = Path(args.humanml3d_repo)
+    candidates = [
+        repo / "HumanML3D" / "texts.zip",
+        repo / "texts.zip",
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+    return candidates[0]
+
+
+def encode_text_batch(
+    evaluator,
+    texts: list[str],
+    clip_ids: list[str],
+    caption_tokens: dict[str, dict[str, list[str]]] | None,
+) -> tuple[np.ndarray, int]:
+    if caption_tokens is None:
+        return evaluator.encode_text_from_strings(texts).cpu().numpy(), 0
+    tokens = [caption_tokens.get(cid, {}).get(text) for cid, text in zip(clip_ids, texts)]
+    missing_idxs = [i for i, tok in enumerate(tokens) if tok is None]
+    present_idxs = [i for i, tok in enumerate(tokens) if tok is not None]
+    out = np.empty((len(texts), evaluator.text_dim), dtype=np.float32)
+    if present_idxs:
+        present_tokens = [tokens[i] for i in present_idxs]
+        out[present_idxs] = evaluator.encode_text_from_tokens(present_tokens).cpu().numpy()
+    if missing_idxs:
+        missing_texts = [texts[i] for i in missing_idxs]
+        out[missing_idxs] = evaluator.encode_text_from_strings(missing_texts).cpu().numpy()
+    return out, len(missing_idxs)
 
 
 def token_mask_from_frame_mask(mask: Tensor, token_len: int) -> Tensor:
@@ -307,6 +381,7 @@ def encode_motion(evaluator, motion: Tensor, lengths: Tensor) -> np.ndarray:
 
 def main() -> None:
     args = parse_args()
+    random.seed(args.seed)
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     device = torch.device(args.device)
@@ -319,6 +394,13 @@ def main() -> None:
     text_encoder = build_text_encoder(args, saved_args)
     vqvae, masked, residual = build_models(ckpt, device)
     evaluator = build_evaluator(args, device)
+    caption_tokens = None
+    if args.evaluator == "real" and args.vip_tokens:
+        texts_zip = resolve_texts_zip(args)
+        try:
+            caption_tokens = load_caption_tokens(texts_zip)
+        except FileNotFoundError as e:
+            print(f"[constraints] WARN: {e}; falling back to spaCy text encoding", flush=True)
 
     ds = HumanML3DDataset(
         root=args.data_root,
@@ -338,11 +420,13 @@ def main() -> None:
         "traj_vq": {},
     }
     n_seen = 0
+    n_text_fallback = 0
     t0 = time.perf_counter()
 
     print(
         f"[constraints] ckpt={args.checkpoint} clips={len(ds)} max_clips={args.max_clips} "
-        f"steps={steps} guidance={args.guidance_scale} anchor_stride={args.anchor_stride}",
+        f"steps={steps} guidance={args.guidance_scale} anchor_stride={args.anchor_stride} "
+        f"text_tokens={'vip' if caption_tokens is not None else 'spacy'}",
         flush=True,
     )
 
@@ -356,6 +440,7 @@ def main() -> None:
         frame_mask = batch.mask[:take].to(device)
         lengths = batch.lengths[:take]
         texts = batch.texts[:take]
+        clip_ids = batch.clip_ids[:take]
         cond = text_encoder.encode(texts, device=device)
 
         gen = generate_full(
@@ -384,7 +469,9 @@ def main() -> None:
         buckets["unconstrained"].append(encode_motion(evaluator, gen, lengths))
         buckets["traj_projected"].append(encode_motion(evaluator, projected, lengths))
         buckets["traj_vq"].append(encode_motion(evaluator, traj_vq, lengths))
-        text_embs.append(evaluator.encode_text_from_strings(texts).cpu().numpy())
+        text_np, n_missing = encode_text_batch(evaluator, texts, clip_ids, caption_tokens)
+        text_embs.append(text_np)
+        n_text_fallback += n_missing
 
         n_seen += take
         if args.max_clips > 0 and n_seen >= args.max_clips:
@@ -392,6 +479,7 @@ def main() -> None:
 
     real = np.concatenate(buckets["real"], axis=0)
     text = np.concatenate(text_embs, axis=0)
+    diag_rng = np.random.default_rng(args.seed)
     results = {
         "_meta": {
             "checkpoint": args.checkpoint,
@@ -402,9 +490,19 @@ def main() -> None:
             "generation_steps": steps,
             "guidance_scale": args.guidance_scale,
             "anchor_stride": args.anchor_stride,
+            "text_token_source": "vip" if caption_tokens is not None else "spacy",
+            "vip_token_fallbacks": int(n_text_fallback),
             "elapsed_sec": time.perf_counter() - t0,
-        }
+        },
+        "_diagnostics": {
+            "r_precision_real": r_precision(text, real, top_k=3, rng=diag_rng).tolist(),
+            "mm_dist_real": float(mm_distance(text, real)),
+            "diversity_real": float(diversity(real, diversity_times=args.diversity_times, rng=diag_rng)),
+        },
     }
+    if caption_tokens is not None:
+        print(f"[constraints] VIP token fallbacks={n_text_fallback}", flush=True)
+    print(f"\n[diagnostics]\n{json.dumps(results['_diagnostics'], indent=2)}", flush=True)
     for name in ("unconstrained", "traj_projected", "traj_vq"):
         emb = np.concatenate(buckets[name], axis=0)
         quality = compute_quality(real, emb, text, args.diversity_times, args.seed)

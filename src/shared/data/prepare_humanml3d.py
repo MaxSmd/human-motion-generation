@@ -507,10 +507,11 @@ _FEAT_CTX: dict = {}
 
 
 def _features_worker_init(tgt_offsets_np: np.ndarray, feet_thre: float,
-                          joints_root_s: str, out_dir_s: str) -> None:
+                          joints_root_s: str, out_dir_s: str,
+                          humanml3d_repo_s: str) -> None:
     torch.set_num_threads(1)  # N workers × N BLAS threads oversubscribes the node
     from shared.geometry.humanml3d_upstream import _load_upstream_process_file
-    ns = _load_upstream_process_file()
+    ns = _load_upstream_process_file(humanml3d_repo_s)
     ns["tgt_offsets"] = torch.from_numpy(tgt_offsets_np).float()
     _FEAT_CTX["process_file"] = ns["process_file"]
     _FEAT_CTX["feet_thre"] = feet_thre
@@ -586,7 +587,7 @@ def stage_features(
 
     n_written = n_skipped = 0
     failures: list[str] = []
-    init_args = (tgt_offsets.numpy(), feet_thre, str(joints_root), str(out_vecs))
+    init_args = (tgt_offsets.numpy(), feet_thre, str(joints_root), str(out_vecs), str(humanml3d_repo))
     with Pool(processes=workers, initializer=_features_worker_init, initargs=init_args) as pool:
         for w, s, f in tqdm(pool.imap_unordered(_features_worker, index, chunksize=8),
                             total=len(index), desc="features"):

@@ -4,8 +4,6 @@
 #SBATCH --qos=students_normal
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
-#SBATCH --time=23:55:00
-#SBATCH --signal=B:USR1@120
 #SBATCH --output=slurm/logs/momask-vq-full-%j.out
 #SBATCH --error=slurm/logs/momask-vq-full-%j.err
 #
@@ -59,7 +57,7 @@ enroot start \
         set -euo pipefail
         cd ${REPO}
         pip install -e . --no-deps --quiet
-        python -u scripts/train_momask_smoke.py \\
+        python -u -m rmg.scripts.train_momask_smoke \\
             --data-root '${DATA_ROOT}' \\
             --max-clips 999999 \\
             --batch-size ${BATCH_SIZE} \\

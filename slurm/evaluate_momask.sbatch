@@ -26,6 +26,8 @@ fi
 IMAGE="${IMAGE:-${HOME}/rmg-momask.sqsh}"
 HF_CACHE="${HF_CACHE:-${HOME}/hf-cache}"
 DATA_ROOT="${DATA_ROOT:-/mnt/projects/drl4cvb/human-motion-representation/data/data/humanml3d_packed}"
+HUMANML3D_REPO="${HUMANML3D_REPO:-external/HumanML3D}"
+HUMANML3D_TEXTS_ZIP="${HUMANML3D_TEXTS_ZIP:-}"
 CKPT="${CKPT:-runs/momask-full-tokens-12858/momask_smoke_latest.pt}"
 MAX_CLIPS="${MAX_CLIPS:-512}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
@@ -51,6 +53,8 @@ echo "[momask-eval] repo=${REPO}"
 echo "[momask-eval] image=${IMAGE}"
 echo "[momask-eval] hf_cache=${HF_CACHE}"
 echo "[momask-eval] data_root=${DATA_ROOT}"
+echo "[momask-eval] humanml3d_repo=${HUMANML3D_REPO}"
+echo "[momask-eval] humanml3d_texts_zip=${HUMANML3D_TEXTS_ZIP:-<auto>}"
 echo "[momask-eval] ckpt=${CKPT}"
 echo "[momask-eval] max_clips=${MAX_CLIPS} batch_size=${BATCH_SIZE} variants=${VARIANTS}"
 echo "[momask-eval] generation_steps=${GENERATION_STEPS:-checkpoint-default}"
@@ -66,6 +70,11 @@ if [ -n "${GENERATION_STEPS}" ]; then
             ;;
     esac
     GENERATION_ARGS="--generation-steps ${GENERATION_STEPS}"
+fi
+
+TEXTS_ZIP_ARG=""
+if [ -n "${HUMANML3D_TEXTS_ZIP}" ]; then
+    TEXTS_ZIP_ARG="--humanml3d-texts-zip '${HUMANML3D_TEXTS_ZIP}'"
 fi
 
 enroot start \
@@ -86,6 +95,8 @@ enroot start \
         python -u -m rmg.scripts.evaluate_momask \
             --checkpoint '${CKPT}' \
             --data-root '${DATA_ROOT}' \
+            --humanml3d-repo '${HUMANML3D_REPO}' \
+            ${TEXTS_ZIP_ARG} \
             --split test \
             --max-clips ${MAX_CLIPS} \
             --batch-size ${BATCH_SIZE} \
