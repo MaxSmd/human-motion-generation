@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, mediaUrl } from "@/lib/api";
 import JobProgress from "./JobProgress";
+import { useLightbox } from "./Lightbox";
 
 const POLL_MS = 5000;
 const ACTIVE = new Set(["queued", "submitting", "pending", "running", "pulling"]);
@@ -260,6 +261,7 @@ function JobRow({ job, onChange }) {
   const [log, setLog] = useState(null);
   const [loading, setLoading] = useState(false);
   const preRef = useRef(null);
+  const { open: openLightbox } = useLightbox();
   const color = STATE_COLOR[job.state] || "var(--muted)";
 
   const fetchLog = useCallback(async () => {
@@ -287,6 +289,18 @@ function JobRow({ job, onChange }) {
         </span>
         <span className="font-mono text-slate-300">{job.kind}{job.mode ? `/${job.mode}` : ""}</span>
         {job.slurm_id && <span className="font-mono text-[var(--muted)]">#{job.slurm_id}</span>}
+        {/* Fused viz jobs share ONE sbatch — so they also share a slurm id, a queue
+            wait and a fate. Say so, or the repeated id looks like a bug. */}
+        {job.fused_ids?.length > 1 && (
+          <span className="rounded border border-[var(--hairline-strong)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--muted)]" title={`This submission renders ${job.fused_ids.length} jobs in one go`}>
+            fused ×{job.fused_ids.length}
+          </span>
+        )}
+        {job.fused_into && (
+          <span className="rounded border border-[var(--hairline-strong)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--muted)]" title={`Rendered inside job ${job.fused_into}'s submission`}>
+            fused in
+          </span>
+        )}
         <span className="truncate font-mono text-[var(--muted)]">{job.run_name}</span>
         {job.error && <span className="text-rose-300">{job.error}</span>}
         <span className="ml-auto flex items-center gap-2">
@@ -313,11 +327,12 @@ function JobRow({ job, onChange }) {
       {job.outputs?.length > 0 && (
         <div className="mt-2 flex gap-2 overflow-x-auto">
           {job.outputs.map((o, i) => (
-            <a key={i} href={mediaUrl(o.media_url)} target="_blank" rel="noreferrer" className="shrink-0">
+            <button key={i} type="button" onClick={() => openLightbox(job.outputs, i)}
+              className="shrink-0" title={o.caption}>
               {o.media_url.toLowerCase().endsWith(".mp4")
-                ? <video src={mediaUrl(o.media_url)} className="h-16 w-16 rounded border border-[var(--hairline)] object-cover" muted />
-                : <img src={mediaUrl(o.media_url)} alt={o.caption} className="h-16 w-16 rounded border border-[var(--hairline)] object-cover" />}
-            </a>
+                ? <video src={mediaUrl(o.media_url)} className="h-16 w-16 rounded border border-[var(--hairline)] object-cover transition hover:border-[var(--signal)]" muted />
+                : <img src={mediaUrl(o.media_url)} alt={o.caption} className="h-16 w-16 rounded border border-[var(--hairline)] object-cover transition hover:border-[var(--signal)]" />}
+            </button>
           ))}
         </div>
       )}

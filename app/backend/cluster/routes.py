@@ -7,7 +7,7 @@ import shlex
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from .. import config as cfgmod
+from .. import config as cfgmod, gtreg
 from ..analysis import curves as curvesmod
 from ..analysis import eval_tables
 from ..analysis import forensics as forensicsmod
@@ -122,6 +122,14 @@ def cluster_gt_clips(
     )
 
 
+@router.get("/gt-registry")
+def cluster_gt_registry() -> dict:
+    """Which clips already have a stored GT render. The Visualize form uses this
+    to tell you which selections cost a GT render and which come free (the job
+    renders the prediction only, and the stored GT is paired back in on pull)."""
+    return gtreg.stats()
+
+
 @router.post("/cancel/{slurm_id}")
 def cluster_cancel(slurm_id: str) -> dict:
     _require_online()
@@ -144,6 +152,7 @@ class VizRequest(BaseModel):
     num_frames: int = 100
     num_steps: int = 50
     guidance: float = 6.5
+    seed: int = 0                    # mode=prompt: sampling seed (reproducibility)
     use_ema: bool = True
     subset_fraction: float = 0.01
     subset_seed: int = 0
@@ -155,6 +164,17 @@ class VizRequest(BaseModel):
     ranges: list[dict] | None = None         # hinge limits (projection)
     scene: dict | None = None                # euclidean room/obstacles/spawn
     room_guidance: float = 0.0               # room/obstacle guidance weight
+    # Constraint→text ablation tag. Not consumed by the sbatch builder — it just
+    # rides along in job.params so the Lab's Constraint Analysis tab can regroup
+    # the arms of a study ({study, arm, base_prompt, seed}) after the fact.
+    ablation: dict | None = None
+    # Cluster placement. Viz defaults to the 12g partition — a render is lighter
+    # than an eval, which already fits there, and the 24g cards are for training.
+    # These are also part of the fusion key: jobs only share an sbatch if they'd
+    # land in the same place, so overriding one opts it out of fusion.
+    partition: str | None = None
+    walltime: str | None = None
+    sbatch_extra: str | None = None
 
 
 class TrainRequest(BaseModel):
@@ -469,5 +489,18 @@ def analysis_npy(job: str, name: str) -> dict:
     _require_mode()
     try:
         return jointsmod.analyze(jointsmod.resolve_npy(job, name))
+    except (FileNotFoundError, ValueError) as e:
+        raise HTTPException(404, str(e)) from e
+
+
+@router.get("/analysis/compare-npy")
+def analysis_compare_npy(job: str, real: str, gen: str) -> dict:
+    """Per-joint positional error (MPJPE-style) between a compare job's GT and
+    generated clip of the same motion. Both files are pulled job .npy (local)."""
+    _require_mode()
+    try:
+        return jointsmod.compare_pair(
+            jointsmod.resolve_npy(job, real), jointsmod.resolve_npy(job, gen)
+        )
     except (FileNotFoundError, ValueError) as e:
         raise HTTPException(404, str(e)) from e

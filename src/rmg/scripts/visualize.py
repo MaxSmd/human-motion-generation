@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sys
 import zipfile
 from pathlib import Path
@@ -243,9 +244,6 @@ def _load_specs(cfg, env_var: str, cfg_key: str) -> list[dict]:
     (set by the app's viz-job submitter — avoids quoting a structured list
     through the Hydra CLI), falling back to `cfg.viz.<cfg_key>`. Returns []
     when none. Used for both fixed-angle constraints and hinge ranges."""
-    import json
-    import os
-
     raw = os.environ.get(env_var, "").strip()
     if raw:
         try:
@@ -258,12 +256,81 @@ def _load_specs(cfg, env_var: str, cfg_key: str) -> list[dict]:
     return list(specs or [])
 
 
+def _room_guidance(cfg) -> float:
+    return float(os.environ.get("RMG_ROOM_GUIDANCE") or cfg.viz.get("room_guidance", 0.0))
+
+
+def _load_batch() -> list[dict] | None:
+    """Fused mode=prompt batch, from JSON env var `RMG_BATCH`: one entry per render,
+    each with its OWN prompt + constraints/ranges/scene/num_frames/seed. The app
+    fuses every compatible queued viz job into one submission this way, so a whole
+    study (e.g. the constraint analysis' 24 cells) renders in ONE job instead of
+    taking 24 turns at the back of the SLURM queue.
+
+    Returns None when unset — the per-job env vars (PROMPTS + RMG_CONSTRAINTS/…)
+    then drive the run as before, one constraint set broadcast over every prompt."""
+    raw = os.environ.get("RMG_BATCH", "").strip()
+    if not raw:
+        return None
+    try:
+        items = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"RMG_BATCH is not valid JSON: {e}") from e
+    if not items:
+        raise ValueError("RMG_BATCH is set but empty")
+    return list(items)
+
+
+def _batch_group_key(item: dict) -> str:
+    """Items sharing this key sample together in one batched ODE. Everything in it
+    is baked into the sampling call itself — the projector and room energy are built
+    for a specific constraint set and frame count, and the seed must be set before
+    the batch runs — so items differing in any of it need their own pass."""
+    return json.dumps([
+        item.get("constraints") or [], item.get("ranges") or [], item.get("scene"),
+        float(item.get("room_guidance") or 0.0),
+        int(item.get("num_frames", 100)), int(item.get("seed", 0)),
+    ], sort_keys=True, default=str)
+
+
+def _build_constraints(cfg, representation, skel, device, item, n_frames):
+    """Sampling-time constraints for one group: fixed angles (inpainting) + hinge
+    ranges (swing-twist projection) + euclidean room/obstacle guidance & exact spawn
+    placement. Returns (project_fn, energy_fn, guidance_weight, constraint_viz,
+    scene_obj) — all inert when the item carries no constraints."""
+    project_fn = energy_fn = None
+    guidance_weight = 0.0
+    constraint_viz: list[dict] = []
+    c_specs = list(item.get("constraints") or [])
+    r_specs = list(item.get("ranges") or [])
+    scene_obj = parse_scene(item.get("scene"))
+    if not (c_specs or r_specs or scene_obj):
+        return project_fn, energy_fn, guidance_weight, constraint_viz, scene_obj
+    if cfg.representation.name not in CONSTRAINABLE_REPRESENTATIONS:
+        raise ValueError(
+            f"constraints need a quaternion representation "
+            f"({CONSTRAINABLE_REPRESENTATIONS}); got {cfg.representation.name!r}."
+        )
+    nj = int(representation.num_joints)
+    bend_specs = [*parse_bends(c_specs), *parse_bends(r_specs)]
+    if bend_specs:
+        project_fn = build_bend_projector(
+            bend_specs, skel, num_frames=n_frames, num_joints=nj, device=device)
+        constraint_viz = _constraint_viz(bend_specs, n_frames)
+        print(f"[visualize] applying {len(c_specs)} bend pin(s) + {len(r_specs)} bend range(s): "
+              f"{c_specs} {r_specs}", flush=True)
+    if scene_obj:
+        guidance_weight = float(item.get("room_guidance") or 0.0)
+        if guidance_weight:
+            energy_fn = build_room_energy_fn(scene_obj, skel, num_joints=nj)
+        print(f"[visualize] room scene: {scene_obj.room} m, {len(scene_obj.objects)} obstacle(s), "
+              f"spawn={scene_obj.spawn}, guidance={guidance_weight}", flush=True)
+    return project_fn, energy_fn, guidance_weight, constraint_viz, scene_obj
+
+
 def _load_scene(cfg) -> dict | None:
     """Room/scene dict for mode=prompt — from JSON env var `RMG_SCENE` (set by
     the app) or `cfg.viz.scene`. Returns None when absent."""
-    import json
-    import os
-
     raw = os.environ.get("RMG_SCENE", "").strip()
     if raw:
         try:
@@ -282,6 +349,10 @@ def main(cfg: DictConfig) -> None:
         "checkpoint": "???",                           # required for prompt/compare
         "samples_file": "",                            # required for mode=samples (one or more step-*.pt, comma-separated)
         "clips": "000021,000019,000022,000026",        # comma-separated
+        # mode=compare: clip ids whose GT render the caller already has (the app's
+        # GT registry). GT is pure in its clip id, so re-rendering it is wasted GPU
+        # time — render only the prediction for these and let the caller pair them.
+        "skip_gt": "",                                 # comma-separated
         "prompts": "a person walks forward in a circle"
                    "|a person sits down on the floor"
                    "|a person waves their left hand"
@@ -426,80 +497,96 @@ def main(cfg: DictConfig) -> None:
         model = _build_model(cfg, representation, device)
         sampler = _build_sampler(cfg, representation, skel)
 
-        prompts = [p.strip() for p in str(cfg.viz.prompts).split("|") if p.strip()]
-        n_frames = int(cfg.viz.num_frames)
-        print(f"[visualize] sampling {len(prompts)} prompts "
-              f"({n_frames} frames, "
-              f"{int(cfg.viz.num_sample_steps)} ODE steps, "
+        # Every render is a batch ITEM: its own prompt, constraints, scene, frame
+        # count and seed. A plain job builds one item per prompt, all sharing the
+        # job-level constraint env vars; a FUSED job (RMG_BATCH) carries several
+        # jobs' worth of items, each with its own. One code path serves both.
+        batch = _load_batch()
+        if batch is None:
+            shared = {
+                "constraints": _load_specs(cfg, "RMG_CONSTRAINTS", "constraints"),
+                "ranges": _load_specs(cfg, "RMG_RANGES", "ranges"),
+                "scene": _load_scene(cfg),
+                "room_guidance": _room_guidance(cfg),
+                "num_frames": int(cfg.viz.num_frames),
+                "seed": int(cfg.viz.seed),
+            }
+            batch = [
+                {**shared, "prompt": p.strip()}
+                for p in str(cfg.viz.prompts).split("|") if p.strip()
+            ]
+        if not batch:
+            raise ValueError("mode=prompt has no prompts to render")
+
+        # The projector/room energy are built for a specific constraint set and the
+        # seed is set per pass, so only items agreeing on all of it can share an ODE
+        # integration. Group them; each group samples once, batched.
+        groups: dict[str, list[dict]] = {}
+        for item in batch:
+            groups.setdefault(_batch_group_key(item), []).append(item)
+        # Cap the ODE batch so a big fused group can't OOM the (12g) card.
+        chunk_size = int(os.environ.get("RMG_BATCH_CHUNK", "8"))
+        chunks = [
+            g[i:i + chunk_size] for g in groups.values() for i in range(0, len(g), chunk_size)
+        ]
+        print(f"[visualize] sampling {len(batch)} prompt(s) in {len(chunks)} batch(es) "
+              f"over {len(groups)} constraint group(s) "
+              f"({int(cfg.viz.num_sample_steps)} ODE steps, "
               f"ω={float(cfg.viz.guidance_scale)})", flush=True)
 
-        # Optional sampling-time constraints (broadcast across the batch):
-        # fixed angles (inpainting) + hinge ranges (swing-twist projection) +
-        # euclidean room/obstacle guidance & exact spawn placement.
-        fixed_values = fixed_mask = project_fn = energy_fn = None
-        guidance_weight = 0.0
-        constraint_viz: list[dict] = []
-        c_specs = _load_specs(cfg, "RMG_CONSTRAINTS", "constraints")
-        r_specs = _load_specs(cfg, "RMG_RANGES", "ranges")
-        scene_dict = _load_scene(cfg)
-        scene_obj = parse_scene(scene_dict)
-        if c_specs or r_specs or scene_obj:
-            if cfg.representation.name not in CONSTRAINABLE_REPRESENTATIONS:
-                raise ValueError(
-                    f"constraints need a quaternion representation "
-                    f"({CONSTRAINABLE_REPRESENTATIONS}); got {cfg.representation.name!r}."
-                )
-            nj = int(representation.num_joints)
-            bend_specs = [*parse_bends(c_specs), *parse_bends(r_specs)]
-            if bend_specs:
-                project_fn = build_bend_projector(
-                    bend_specs, skel, num_frames=n_frames, num_joints=nj, device=device)
-                constraint_viz = _constraint_viz(bend_specs, n_frames)
-                print(f"[visualize] applying {len(c_specs)} bend pin(s) + {len(r_specs)} bend range(s): "
-                      f"{c_specs} {r_specs}", flush=True)
-            if scene_obj:
-                import os
-                guidance_weight = float(os.environ.get("RMG_ROOM_GUIDANCE", cfg.viz.get("room_guidance", 0.0)))
-                if guidance_weight:
-                    energy_fn = build_room_energy_fn(scene_obj, skel, num_joints=nj)
-                print(f"[visualize] room scene: {scene_obj.room} m, {len(scene_obj.objects)} obstacle(s), "
-                      f"spawn={scene_obj.spawn}, guidance={guidance_weight}", flush=True)
-
-        # prompts are sampled in one batched ODE integration, so the bar sits at
-        # "sampling" until it returns, then advances per rendered prompt.
-        write_progress(out_dir, stage="sampling", inner={"i": 0, "n": len(prompts)})
-        with torch.no_grad():
-            cond = text_encoder.encode(prompts, device=device)
-            samples = sampler.sample(
-                model, shape=(len(prompts), n_frames), cond=cond,
-                fixed_values=fixed_values, fixed_mask=fixed_mask, project_fn=project_fn,
-                energy_fn=energy_fn, guidance_weight=guidance_weight,
-            )                                                # (B, T, ambient_dim)
-
         manifest = []
-        for i, prompt in enumerate(prompts):
-            write_progress(out_dir, stage="render", inner={"i": i, "n": len(prompts)})
-            tpr = tplusr_decode(samples[i])
-            if scene_obj is not None:
-                tpr.translation, tpr.quaternions = place_motion(
-                    tpr.translation, tpr.quaternions, scene_obj.spawn)
-            joints_t = forward_kinematics(
-                skel, tpr.quaternions.float(), tpr.translation.float()
-            )                                                # (T,J,3), already placed
-            joints = joints_t.cpu().numpy()
-            # World-constraint penalty over time + per-joint glow — the "how is
-            # the skeleton being punished" overlay. Computed on the SAME placed
-            # joints via the SAME SDFs the guidance energy used, so it's faithful.
-            energy = scene_energy_series(joints_t, scene_obj) if scene_obj is not None else None
-            safe = "".join(c if c.isalnum() else "_" for c in prompt)[:48]
-            gif = _render(joints, out_dir / f"gen-{i:02d}-{safe}.mp4",
-                          title=prompt[:60], fps=int(cfg.viz.fps), scene=scene_dict,
-                          constraints=constraint_viz or None, energy=energy)
-            if gif is None:
-                continue
-            manifest.append({"file": gif.name, "kind": "pred", "caption": prompt})
+        done = 0
+        for chunk in chunks:
+            head = chunk[0]                    # group-wide by construction
+            n_frames = int(head.get("num_frames", 100))
+            set_seed(int(head.get("seed", 0)))
+            project_fn, energy_fn, guidance_weight, constraint_viz, scene_obj = (
+                _build_constraints(cfg, representation, skel, device, head, n_frames))
+            scene_dict = head.get("scene")
+            prompts = [it["prompt"] for it in chunk]
+
+            # A chunk is sampled in one batched ODE integration, so the bar sits at
+            # "sampling" until it returns, then advances per rendered prompt.
+            write_progress(out_dir, stage="sampling", inner={"i": done, "n": len(batch)})
+            with torch.no_grad():
+                cond = text_encoder.encode(prompts, device=device)
+                samples = sampler.sample(
+                    model, shape=(len(prompts), n_frames), cond=cond,
+                    fixed_values=None, fixed_mask=None, project_fn=project_fn,
+                    energy_fn=energy_fn, guidance_weight=guidance_weight,
+                )                                            # (B, T, ambient_dim)
+
+            for i, item in enumerate(chunk):
+                write_progress(out_dir, stage="render", inner={"i": done, "n": len(batch)})
+                prompt = item["prompt"]
+                tpr = tplusr_decode(samples[i])
+                if scene_obj is not None:
+                    tpr.translation, tpr.quaternions = place_motion(
+                        tpr.translation, tpr.quaternions, scene_obj.spawn)
+                joints_t = forward_kinematics(
+                    skel, tpr.quaternions.float(), tpr.translation.float()
+                )                                            # (T,J,3), already placed
+                joints = joints_t.cpu().numpy()
+                # World-constraint penalty over time + per-joint glow — the "how is
+                # the skeleton being punished" overlay. Computed on the SAME placed
+                # joints via the SAME SDFs the guidance energy used, so it's faithful.
+                energy = scene_energy_series(joints_t, scene_obj) if scene_obj is not None else None
+                safe = "".join(c if c.isalnum() else "_" for c in prompt)[:48]
+                # `done` (not the chunk index) keeps names unique across groups.
+                gif = _render(joints, out_dir / f"gen-{done:02d}-{safe}.mp4",
+                              title=prompt[:60], fps=int(cfg.viz.fps), scene=scene_dict,
+                              constraints=constraint_viz or None, energy=energy)
+                done += 1
+                if gif is None:
+                    continue
+                # `job` routes the file back to the app job that asked for it when
+                # this run is a fusion of several; absent on a plain job.
+                entry = {"file": gif.name, "kind": "pred", "caption": prompt}
+                if item.get("job"):
+                    entry["job"] = item["job"]
+                manifest.append(entry)
         write_progress(out_dir, stage="done", complete=True,
-                       inner={"i": len(prompts), "n": len(prompts)})
+                       inner={"i": len(batch), "n": len(batch)})
         _write_manifest(out_dir, manifest)
         return
 
@@ -529,6 +616,12 @@ def main(cfg: DictConfig) -> None:
         if not clip_ids:
             raise ValueError("mode=compare requires +viz.clips='<id>,...' or 'auto'")
 
+        skip_gt = {c.strip() for c in str(cfg.viz.get("skip_gt", "")).split(",") if c.strip()}
+        if skip_gt:
+            print(f"[visualize] compare: caller already holds GT for "
+                  f"{sorted(skip_gt & set(clip_ids))} — rendering prediction only",
+                  flush=True)
+
         text_encoder = _build_text_encoder(cfg)
         model = _build_model(cfg, representation, device)
         sampler = _build_sampler(cfg, representation, skel)
@@ -554,12 +647,13 @@ def main(cfg: DictConfig) -> None:
             translation = translation[:n_frames]
             quats = quats[:n_frames]
 
-            # GT (cropped to n_frames).
-            gt_joints = forward_kinematics(skel, quats, translation).numpy()
-            gt_gif = _render(gt_joints, out_dir / f"real-{cid}.mp4",
-                             title=f"GT [{cid}] {caption[:55]}", fps=int(cfg.viz.fps))
-            if gt_gif is not None:
-                manifest.append({"file": gt_gif.name, "kind": "gt", "clip_id": cid, "caption": caption})
+            # GT (cropped to n_frames) — unless the caller already has this one.
+            if cid not in skip_gt:
+                gt_joints = forward_kinematics(skel, quats, translation).numpy()
+                gt_gif = _render(gt_joints, out_dir / f"real-{cid}.mp4",
+                                 title=f"GT [{cid}] {caption[:55]}", fps=int(cfg.viz.fps))
+                if gt_gif is not None:
+                    manifest.append({"file": gt_gif.name, "kind": "gt", "clip_id": cid, "caption": caption})
 
             # Prediction: same caption, matched (capped) length.
             print(f"[visualize] compare {cid}: sampling {n_frames} frames for "

@@ -20,7 +20,7 @@ import json
 import secrets
 import shlex
 
-from .. import config as cfgmod
+from .. import config as cfgmod, gtreg
 from . import ssh
 from .squeue import resolve_run_dir
 
@@ -59,17 +59,14 @@ def viz_progress_dir(run_name: str) -> str:
     return f"{_runs_root('viz')}/{run_name}/viz"
 
 
-def sbatch_flags_for_train(params: dict) -> list[str]:
-    """SBATCH CLI overrides for a train job (these override the directives baked
-    into rmg/train.sbatch). Bigger presets default to the 24g partition for GPU
-    memory headroom; `partition` / `walltime` params override either default.
+def _sbatch_flags(params: dict, partition: str | None) -> list[str]:
+    """SBATCH CLI overrides shared by every kind (these override the directives
+    baked into the sbatch scripts). `partition` is the caller's resolved default;
+    a `partition` param always wins, and `walltime` overrides the script's --time.
     `sbatch_extra` is free-form (`--constraint=…`, `--gres=…`, `--exclude=…`,
-    `--nodelist=…`) — e.g. to pin a 12g job onto a Turing+ node and avoid the
-    sm_61 TITAN Xp cards the CUDA-13 container can't run."""
+    `--nodelist=…`) — e.g. to pin a 12g job onto a Turing+ node."""
+    partition = params.get("partition") or partition
     flags: list[str] = []
-    partition = params.get("partition")
-    if not partition and params.get("model_preset") in ("dit_small", "dit_mid", "dit_large"):
-        partition = "24g"
     if partition:
         flags.append(f"--partition={partition}")
     if params.get("walltime"):
@@ -85,22 +82,25 @@ def sbatch_flags_for_train(params: dict) -> list[str]:
     return flags
 
 
+def sbatch_flags_for_train(params: dict) -> list[str]:
+    """Bigger presets default to the 24g partition for GPU memory headroom; the
+    small ones take whatever train.sbatch bakes in (no --partition flag)."""
+    big = params.get("model_preset") in ("dit_small", "dit_mid", "dit_large")
+    return _sbatch_flags(params, "24g" if big else None)
+
+
 def sbatch_flags_for_eval(params: dict) -> list[str]:
-    """SBATCH CLI overrides for an eval job. Evals fit in <12GB even for
-    dit_mid (measured <50% of a 24g card), and the cluster auto-cancels jobs
-    under 50% GPU-mem utilization after 2h — so default to the 12g partition
-    unless the caller overrides. Same sm_75 gres pin as train: only the 12g
-    partition's RTX 2080 Ti nodes can run the CUDA-13 container."""
-    partition = params.get("partition") or "12g"
-    flags = [f"--partition={partition}"]
-    if params.get("walltime"):
-        flags.append(f"--time={params['walltime']}")
-    extra = str(params.get("sbatch_extra") or "")
-    if partition == "12g" and "gres" not in extra:
-        flags.append("--gres=gpu:RTX2080Ti:1")
-    if extra:
-        flags.extend(shlex.split(extra))
-    return flags
+    """Evals fit in <12GB even for dit_mid (measured <50% of a 24g card), and the
+    cluster auto-cancels jobs under 50% GPU-mem utilization after 2h — so default
+    to the 12g partition and leave the 24g cards for training."""
+    return _sbatch_flags(params, "12g")
+
+
+def sbatch_flags_for_viz(params: dict) -> list[str]:
+    """Viz renders a handful of clips/prompts — strictly lighter than an eval
+    sweep, which already fits in 12GB for dit_mid — so it defaults to 12g too
+    (viz.sbatch bakes in 24g, which is overkill and queues behind training)."""
+    return _sbatch_flags(params, "12g")
 
 
 def render_command(
@@ -150,6 +150,7 @@ def build_viz(params: dict) -> tuple[str, dict[str, str], str, str]:
             "NUM_FRAMES": str(params.get("num_frames", 100)),
             "NUM_STEPS": str(params.get("num_steps", 50)),
             "GUIDANCE": str(params.get("guidance", 6.5)),
+            "SEED": str(params.get("seed", 0)),
             "USE_EMA": "true" if params.get("use_ema", True) else "false",
         })
         # Sampling-time constraints: JSON forwarded to visualize.py as env vars
@@ -164,14 +165,22 @@ def build_viz(params: dict) -> tuple[str, dict[str, str], str, str]:
             env["SCENE"] = json.dumps(params["scene"])
             env["ROOM_GUIDANCE"] = str(params.get("room_guidance", 0.0))
     elif mode == "compare":
+        clips_raw = str(params.get("clips", "auto"))
         env.update({
             "CKPT": params["checkpoint"], "MODEL_PRESET": params.get("model_preset", "dit_base"),
-            "PRESET": params.get("train_preset", "rmg_base"), "CLIPS": params.get("clips", "auto"),
+            "PRESET": params.get("train_preset", "rmg_base"), "CLIPS": clips_raw,
             "SUBSET_FRACTION": str(params.get("subset_fraction", 0.01)),
             "SUBSET_SEED": str(params.get("subset_seed", 0)),
             "NUM_STEPS": str(params.get("num_steps", 50)),
             "GUIDANCE": str(params.get("guidance", 6.5)),
         })
+        # GT is identical every time it's rendered, so skip the clips the registry
+        # already holds — the app splices those renders back in on pull. Only
+        # possible for explicit ids ('auto' is picked cluster-side, after submit).
+        if clips_raw.strip().lower() != "auto":
+            cached = gtreg.known([c.strip() for c in clips_raw.split(",") if c.strip()])
+            if cached:
+                env["SKIP_GT"] = ",".join(cached)
     elif mode == "samples":
         run = params["run"]
         steps = params.get("steps")
@@ -191,6 +200,129 @@ def build_viz(params: dict) -> tuple[str, dict[str, str], str, str]:
     if params.get("overrides"):
         env["OVERRIDES"] = str(params["overrides"])
     return SCRIPTS["viz"], env, f"{JOB_PREFIX}-viz-{mode}", run_name
+
+
+# ---------------------------------------------------------------------- viz fusion
+#
+# The cluster runs ONE job at a time, so N queued viz jobs mean N separate waits at
+# the back of the SLURM queue — painful when a tab queues a whole study at once
+# (the constraint analysis submits 24). Compatible jobs are therefore fused into a
+# SINGLE sbatch: one queue wait, one model load, N renders.
+#
+# What must match (the fusion key) is everything that configures the model and
+# sampler, since a job builds those once. Everything that varies per render —
+# prompt text, constraints, scene, frame count, seed — travels per item inside the
+# job instead.
+
+_FUSION_KEYS = {
+    "clip": ("overrides",),
+    "prompt": ("checkpoint", "model_preset", "train_preset", "num_steps", "guidance",
+               "use_ema", "overrides"),
+    "compare": ("checkpoint", "model_preset", "train_preset", "num_steps", "guidance",
+                "subset_fraction", "subset_seed", "overrides"),
+}
+
+# Placement is a property of the sbatch itself, so it has to match as well.
+_FUSION_PLACEMENT = ("partition", "sbatch_extra", "walltime")
+
+
+def viz_fusion_key(params: dict) -> str | None:
+    """Signature for `build_viz_fused`: two viz jobs may fuse iff their keys are
+    equal. None means unfusable — mode=samples renders whole step-dump files, and
+    mode=compare with clips='auto' picks its clips cluster-side (after submit), so
+    there is no list to merge here."""
+    mode = params.get("mode", "clip")
+    keys = _FUSION_KEYS.get(mode)
+    if keys is None:
+        return None
+    if mode == "compare" and str(params.get("clips", "auto")).strip().lower() == "auto":
+        return None
+    return json.dumps(
+        [mode, [params.get(k) for k in (*keys, *_FUSION_PLACEMENT)]],
+        sort_keys=True, default=str,
+    )
+
+
+def _merged_clips(params_list: list[dict]) -> str:
+    """Union of every job's clip ids, order preserved (two jobs may ask for the
+    same clip — it only needs rendering once; the puller hands it to both)."""
+    seen: list[str] = []
+    for p in params_list:
+        for c in str(p.get("clips", "")).split(","):
+            c = c.strip()
+            if c and c not in seen:
+                seen.append(c)
+    return ",".join(seen)
+
+
+def viz_batch_items(job_id: str, params: dict) -> list[dict]:
+    """One `RMG_BATCH` entry per prompt of a mode=prompt job. `job` tags each entry
+    with the app job that asked for it, so the manifest can route the render back."""
+    items = []
+    for prompt in str(params.get("prompts", "")).split("|"):
+        prompt = prompt.strip()
+        if not prompt:
+            continue
+        items.append({
+            "job": job_id,
+            "prompt": prompt,
+            "num_frames": int(params.get("num_frames", 100)),
+            "seed": int(params.get("seed", 0)),
+            "constraints": params.get("constraints") or [],
+            "ranges": params.get("ranges") or [],
+            "scene": params.get("scene") or None,
+            "room_guidance": float(params.get("room_guidance", 0.0)),
+        })
+    return items
+
+
+def fused_walltime(n_items: int) -> str:
+    """viz.sbatch bakes in 30 min, which is right for a couple of renders and far
+    too short once a study's worth is fused into one job. Scale with the item count
+    (model load + a batched ODE per constraint group + a render each), capped at 6h."""
+    mins = min(6 * 60, 20 + 6 * n_items)
+    return f"{mins // 60:02d}:{mins % 60:02d}:00"
+
+
+def build_viz_fused(
+    items: list[tuple[str, dict]],
+) -> tuple[str, dict[str, str], str, str, list[str]]:
+    """Build ONE viz submission covering several app jobs. `items` is
+    [(job_id, params), …], all sharing a `viz_fusion_key`; the first is the lead
+    and donates the shared model/sampler config plus the run_name. Returns the
+    usual builder tuple plus the sbatch flags (the walltime scales with the fused
+    item count, so it can't be derived from the params alone).
+
+    clip/compare fuse by unioning their clip lists — a viz job already renders many
+    clips, and the puller re-derives which clip belongs to which job from each job's
+    own params. prompt fuses into an `RMG_BATCH` spec: one entry per prompt, each
+    carrying its OWN constraints/ranges/scene/frames/seed (the per-batch env vars
+    can't express that), which visualize.py groups by constraint signature.
+    """
+    params_list = [p for _, p in items]
+    lead = dict(params_list[0])
+    mode = lead.get("mode", "clip")
+    script, env, job_name, run_name = build_viz(lead)
+    if mode in ("clip", "compare"):
+        env["CLIPS"] = _merged_clips(params_list)
+        if mode == "compare":
+            cached = gtreg.known([c for c in env["CLIPS"].split(",") if c])
+            env["SKIP_GT"] = ",".join(cached)
+        n_items = len(env["CLIPS"].split(","))
+    elif mode == "prompt":
+        batch = [it for jid, p in items for it in viz_batch_items(jid, p)]
+        env["BATCH"] = json.dumps(batch)
+        # RMG_BATCH supersedes these; drop them so the previewed command shows only
+        # what actually drives the job (the lead's prompts are inside BATCH already).
+        for k in ("PROMPTS", "CONSTRAINTS", "RANGES", "SCENE", "ROOM_GUIDANCE"):
+            env.pop(k, None)
+        n_items = len(batch)
+    else:
+        raise ValueError(f"viz mode {mode!r} is not fusable")
+    flags = sbatch_flags_for_viz(
+        {**lead, "walltime": lead.get("walltime") or fused_walltime(n_items)}
+    )
+    return script, env, f"{job_name}-x{len(items)}", run_name, flags
 
 
 # --------------------------------------------------------------------------- train

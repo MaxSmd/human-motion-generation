@@ -39,10 +39,14 @@ TEXT_ENCODER="${TEXT_ENCODER:-qwen3}"
 NUM_FRAMES="${NUM_FRAMES:-100}"
 NUM_STEPS="${NUM_STEPS:-50}"
 GUIDANCE="${GUIDANCE:-6.5}"
+SEED="${SEED:-0}"
 USE_EMA="${USE_EMA:-true}"
 SUBSET_FRACTION="${SUBSET_FRACTION:-0.01}"
 SUBSET_SEED="${SUBSET_SEED:-0}"
 N_COMPARE="${N_COMPARE:-4}"
+# Clip ids whose GT the app already has rendered (its GT registry) — mode=compare
+# renders only the prediction for these. Comma-separated; empty renders both.
+SKIP_GT="${SKIP_GT:-}"
 RUN_NAME="${RUN_NAME:-rmg-viz-${MODE}-${SLURM_JOB_ID:-$(date +%Y%m%d-%H%M%S)}}"
 OVERRIDES="${OVERRIDES:-}"
 # Optional sampling-time constraints (JSON); mode=prompt only. Read by
@@ -52,6 +56,11 @@ CONSTRAINTS="${CONSTRAINTS:-}"
 RANGES="${RANGES:-}"
 SCENE="${SCENE:-}"
 ROOM_GUIDANCE="${ROOM_GUIDANCE:-0.0}"
+# Fused mode=prompt batch (JSON list). The vars above apply to every prompt in the
+# job; BATCH instead gives each its OWN prompt + constraints/ranges/scene/frames/
+# seed, so the app can render a whole study in ONE job instead of queueing N. When
+# set it supersedes PROMPTS/CONSTRAINTS/RANGES/SCENE.
+BATCH="${BATCH:-}"
 
 if { [ "$MODE" = "prompt" ] || [ "$MODE" = "compare" ]; } && [ -z "$CKPT" ]; then
     echo "ERROR: MODE=${MODE} requires CKPT=/path/to/checkpoint.pt"; exit 1
@@ -71,6 +80,7 @@ enroot start \
     --env "RMG_RANGES=${RANGES}" \
     --env "RMG_SCENE=${SCENE}" \
     --env "RMG_ROOM_GUIDANCE=${ROOM_GUIDANCE}" \
+    --env "RMG_BATCH=${BATCH}" \
     "${IMAGE}" \
     bash -lc "
         set -euo pipefail
@@ -83,7 +93,7 @@ enroot start \
                 +viz.mode=prompt +viz.checkpoint=${CKPT} +viz.use_ema=${USE_EMA} \\
                 \"+viz.prompts='${PROMPTS}'\" \\
                 +viz.num_frames=${NUM_FRAMES} +viz.num_sample_steps=${NUM_STEPS} \\
-                +viz.guidance_scale=${GUIDANCE} ${OVERRIDES}
+                +viz.guidance_scale=${GUIDANCE} +viz.seed=${SEED} ${OVERRIDES}
         elif [ '${MODE}' = 'compare' ]; then
             python -u -m rmg.scripts.visualize \\
                 model=${MODEL_PRESET} train=${PRESET} text_encoder.type=${TEXT_ENCODER} \\
@@ -92,6 +102,7 @@ enroot start \
                 +viz.subset_fraction=${SUBSET_FRACTION} +viz.subset_seed=${SUBSET_SEED} \\
                 +viz.list_subset_n=${N_COMPARE} \\
                 \"+viz.clips='${CLIPS}'\" \\
+                \"+viz.skip_gt='${SKIP_GT}'\" \\
                 +viz.num_sample_steps=${NUM_STEPS} +viz.guidance_scale=${GUIDANCE} ${OVERRIDES}
         elif [ '${MODE}' = 'samples' ]; then
             python -u -m rmg.scripts.visualize \\
