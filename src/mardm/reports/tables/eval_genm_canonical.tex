@@ -1,0 +1,17 @@
+% MARDM paper-M, canonical-features retrain (mardm-gen-m-canon, EMA @300k).
+% Full HumanML3D test split (~2110 samples), upstream feature extractor, VIP
+% caption tokens, tie-fixed Guo evaluator (eval job 13838, 2026-07-14).
+% Base text-to-motion numbers BEFORE any spatial-control machinery.
+\begin{tabular}{l|ccccccc}
+\hline\hline
+ & \multicolumn{7}{c}{\textbf{HumanML3D Format (essential-dim evaluator)}} \\
+\cline{2-8}
+\textbf{Method} & FID$\downarrow$ & R@1$\uparrow$ & R@2$\uparrow$ & R@3$\uparrow$ & MM-Dist$\downarrow$ & Div$\rightarrow$ & MMod$\uparrow$ \\
+\hline
+Real data & -- & 0.497 & 0.668 & 0.764 & 3.258 & 9.610 & -- \\
+\hline
+MARDM paper-M (ours, $w=3.0$) & \underline{0.154} & \textbf{0.509} & \textbf{0.698} & \textbf{0.787} & \textbf{3.144} & \underline{9.186} & \textbf{1.873} \\
+MARDM paper-M (ours, $w=4.0$) & \textbf{0.097} & \underline{0.499} & \underline{0.683} & \underline{0.780} & \underline{3.144} & \textbf{9.336} & 1.689 \\
+MARDM paper-M (ours, $w=5.0$) & 0.208 & 0.471 & 0.668 & 0.769 & 3.219 & 8.978 & \underline{1.732} \\
+\hline\hline
+\end{tabular}
