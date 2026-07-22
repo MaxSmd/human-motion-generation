@@ -60,8 +60,13 @@ _T2M_CHAINS: tuple[tuple[int, ...], ...] = (
 )
 
 
-def _render(joints: np.ndarray, save_path: Path, title: str, fps: int) -> Path:
+def _render(joints: np.ndarray, save_path: Path, title: str, fps: int,
+            markers: np.ndarray | None = None) -> Path:
     """Render (T, 22, 3) joint positions to a GIF (Pillow — no ffmpeg).
+
+    `markers` (K, 3), optional: static world-space control waypoints, drawn as
+    fixed red X's the skeleton should thread — makes a spatial-control result
+    legible (you see the controlled joint pass through its target points).
 
     Also dumps the raw joints next to the GIF as `<stem>.npy` for local
     re-render to MP4 with a system ffmpeg.
@@ -75,8 +80,10 @@ def _render(joints: np.ndarray, save_path: Path, title: str, fps: int) -> Path:
     from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  (registers 3d projection)
 
     T = joints.shape[0]
-    pts = joints.reshape(-1, 3)
-    lo, hi = pts.min(axis=0), pts.max(axis=0)
+    span = joints.reshape(-1, 3)
+    if markers is not None and len(markers):
+        span = np.concatenate([span, markers.reshape(-1, 3)], axis=0)
+    lo, hi = span.min(axis=0), span.max(axis=0)
     center = (lo + hi) / 2
     radius = float(np.max(hi - lo)) / 2 * 1.1 + 1e-3
 
@@ -93,6 +100,10 @@ def _render(joints: np.ndarray, save_path: Path, title: str, fps: int) -> Path:
         ax.set_zlim(center[1] - radius, center[1] + radius)
         ax.set_xlabel("x"); ax.set_ylabel("z"); ax.set_zlabel("y")
         ax.view_init(elev=15, azim=-70)
+        if markers is not None and len(markers):
+            # Y<->Z swap to match the skeleton's axis convention above.
+            ax.scatter(markers[:, 0], markers[:, 2], markers[:, 1],
+                       c="red", marker="x", s=80, linewidths=2, depthshade=False)
 
     def update(t):
         _setup_axes()

@@ -140,9 +140,12 @@ def main_impl(cfg: DictConfig) -> None:
         inner_iters=int(cfg.guid.inner_iters), lr=float(cfg.guid.lr),
         ode_steps_guidance=int(cfg.guid.ode_steps_guidance),
         ode_steps_final=int(cfg.guid.ode_steps_final),
+        tolerance=float(cfg.guid.tolerance), prox_weight=float(cfg.guid.prox_weight),
+        guidance_start_frac=float(cfg.guid.guidance_start_frac),
+        guidance_ramp=bool(cfg.guid.guidance_ramp),
         post_iters=int(cfg.guid.post_iters), post_lr=float(cfg.guid.post_lr),
         repair_rounds=int(cfg.guid.repair_rounds), repair_frac=float(cfg.guid.repair_frac),
-        repair_iters=int(cfg.guid.repair_iters),
+        repair_iters=int(cfg.guid.repair_iters), repair_every=int(cfg.guid.repair_every),
         verbose=bool(cfg.guid.verbose),
     )
     baseline_cfg = GuidanceConfig(
@@ -200,9 +203,10 @@ def main_impl(cfg: DictConfig) -> None:
             np.save(out_dir / f"{name}-{cid}.npy", joints[0].numpy().astype(np.float32))
             if bool(cfg.guid.render):
                 from mardm.scripts.visualize_mardm import _render
+                waypoints = control.targets[0][control.mask[0]].numpy()  # (K, 3) targets
                 _render(joints[0].numpy(), out_dir / f"{name}-{cid}.gif",
                         title=f"{name.upper()} [{cid}] avg={m['avg_err']:.3f}m",
-                        fps=int(cfg.guid.fps))
+                        fps=int(cfg.guid.fps), markers=waypoints)
 
         np.savez(out_dir / f"control-{cid}.npz",
                  targets=control.targets[0].numpy().astype(np.float32),
@@ -244,11 +248,16 @@ def main(cfg: DictConfig) -> None:
         "lr": 0.05,
         "ode_steps_guidance": 8,   # euler steps inside the guidance graph
         "ode_steps_final": 25,     # euler steps for committed samples
+        "tolerance": 0.0,          # early-stop inner loop below this ctrl err (m)
+        "prox_weight": 0.0,        # proximal anchor lambda*||z-z0||^2
+        "guidance_start_frac": 0.0,  # skip z-opt before this fraction of AR steps
+        "guidance_ramp": False,    # ramp inner iters over the AR schedule
         "post_iters": 0,           # direct latent optimization after AR loop
         "post_lr": 0.01,
         "repair_rounds": 0,        # re-prediction repair passes after the AR loop
         "repair_frac": 0.5,        # fraction of tokens remasked per repair round
         "repair_iters": 10,        # light-guidance inner steps during repair
+        "repair_every": 0,         # interleaved repair every N AR steps (0=off)
         "regularizer_checkpoint": "",  # trained ControlMARDM (phase 2); adds reg_only run
         "regularizer_use_ema": True,
         "render": False,           # also write GIFs (needs matplotlib)
