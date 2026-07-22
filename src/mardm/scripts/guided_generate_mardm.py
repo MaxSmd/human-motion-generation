@@ -134,7 +134,19 @@ def main_impl(cfg: DictConfig) -> None:
         canonical_dir=cfg.data.get("canonical_dir"),
     )
     zf = zipfile.ZipFile(Path(cfg.data.root) / cfg.data.zip_name)
-    n_clips = min(len(dataset), int(cfg.guid.num_clips))
+    # Explicit clip selection (guid.clip_ids) overrides the first-N default —
+    # lets us render a specific clip (e.g. the 004822 frozen-gait conflict clip)
+    # plus chosen clean clips instead of whatever leads the split.
+    sel = [str(c) for c in (cfg.guid.get("clip_ids") or [])]
+    if sel:
+        render_indices = []
+        for c in sel:
+            if c in dataset.inner.clip_ids:
+                render_indices.append(dataset.inner.clip_ids.index(c))
+            else:
+                print(f"[guided] clip {c!r} not in {cfg.guid.split} split — skipping", flush=True)
+    else:
+        render_indices = list(range(min(len(dataset), int(cfg.guid.num_clips))))
 
     gcfg = GuidanceConfig(
         inner_iters=int(cfg.guid.inner_iters), lr=float(cfg.guid.lr),
@@ -169,7 +181,7 @@ def main_impl(cfg: DictConfig) -> None:
           f"runs={[n for n, _, _ in runs_spec]}", flush=True)
 
     per_clip: dict[str, dict] = {}
-    for idx in range(n_clips):
+    for idx in render_indices:
         sample = dataset[idx]
         cid = sample.clip_id
         gt_ess = sample.x1                                   # (L, 67) raw essential
@@ -238,6 +250,7 @@ def main(cfg: DictConfig) -> None:
         "checkpoint": "???",       # required: gen-branch checkpoint
         "split": "test",
         "num_clips": 8,
+        "clip_ids": [],            # explicit clip ids to render (overrides num_clips)
         "guidance": 2.0,           # CFG scale (see evaluate_mardm defaults)
         "timesteps": 18,           # masked-AR sampling iterations
         "use_ema": True,
