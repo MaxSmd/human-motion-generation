@@ -225,3 +225,82 @@ def test_generate_guided_with_regularizer() -> None:
     )
     assert latents.shape == (2, 16, 5)
     assert torch.isfinite(latents).all()
+
+
+def test_iters_for_step_schedule() -> None:
+    from mardm.control.guidance import _iters_for_step
+
+    g = GuidanceConfig(inner_iters=30, guidance_start_frac=0.5)
+    assert [_iters_for_step(g, s, 4) for s in range(4)] == [0, 0, 30, 30]
+    g_ramp = GuidanceConfig(inner_iters=30, guidance_ramp=True)
+    ramped = [_iters_for_step(g_ramp, s, 4) for s in range(4)]
+    assert ramped[0] == 1 and ramped[-1] == 30 and ramped == sorted(ramped)
+    assert _iters_for_step(GuidanceConfig(inner_iters=0, guidance_ramp=True), 3, 4) == 0
+
+
+def test_tolerance_early_stop_matches_unguided() -> None:
+    # A tolerance the first sample already satisfies breaks the inner loop
+    # before any optimizer step, so the output must equal the unguided run
+    # under identical seeds (the inner loop consumes no RNG).
+    ae, mardm = _tiny()
+    _unzero_diff_head(mardm)
+    mean, std = _stats()
+    m_lens = torch.tensor([5])
+    T = 5 * ae.downsample_rate
+    torch.manual_seed(3)
+    control = _control(1, T)
+    cond = torch.randn(1, 32)
+
+    torch.manual_seed(7)
+    base = generate_guided(
+        mardm, ae, cond, m_lens, control, mean, std,
+        timesteps=2, cond_scale=1.0,
+        guidance=GuidanceConfig(inner_iters=0, ode_steps_final=4),
+    )
+    torch.manual_seed(7)
+    tol = generate_guided(
+        mardm, ae, cond, m_lens, control, mean, std,
+        timesteps=2, cond_scale=1.0,
+        guidance=GuidanceConfig(inner_iters=8, lr=0.05, ode_steps_guidance=3,
+                                ode_steps_final=4, tolerance=1e9),
+    )
+    assert torch.allclose(base, tol)
+
+
+def test_generate_guided_prox_and_schedule() -> None:
+    torch.manual_seed(0)
+    ae, mardm = _tiny()
+    _unzero_diff_head(mardm)
+    mean, std = _stats()
+    m_lens = torch.tensor([5])
+    T = 5 * ae.downsample_rate
+    control = _control(1, T)
+    latents = generate_guided(
+        mardm, ae, torch.randn(1, 32), m_lens, control, mean, std,
+        timesteps=3, cond_scale=1.0,
+        guidance=GuidanceConfig(inner_iters=2, lr=0.05, ode_steps_guidance=3,
+                                ode_steps_final=4, prox_weight=0.1,
+                                guidance_start_frac=0.4, guidance_ramp=True),
+    )
+    assert latents.shape == (1, 16, 5)
+    assert torch.isfinite(latents).all()
+
+
+def test_generate_guided_interleaved_repair() -> None:
+    torch.manual_seed(0)
+    ae, mardm = _tiny()
+    _unzero_diff_head(mardm)
+    mean, std = _stats()
+    m_lens = torch.tensor([6, 3])
+    T = 6 * ae.downsample_rate
+    control = _control(2, T, k_every=9)
+    latents = generate_guided(
+        mardm, ae, torch.randn(2, 32), m_lens, control, mean, std,
+        timesteps=3, cond_scale=2.0,
+        guidance=GuidanceConfig(inner_iters=1, lr=0.05, ode_steps_guidance=3,
+                                ode_steps_final=4, repair_every=1, repair_frac=0.5,
+                                repair_iters=1),
+    )
+    assert latents.shape == (2, 16, 6)
+    assert torch.isfinite(latents).all()
+    assert (latents[1, :, 3:] == 0).all()        # padding survives inline repair

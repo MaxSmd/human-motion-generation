@@ -31,6 +31,8 @@ Run (cluster):
 from __future__ import annotations
 
 import json
+import time
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import hydra
@@ -152,7 +154,18 @@ def main_impl(cfg: DictConfig) -> None:
         runs_spec.append(("unguided", baseline_cfg, None))
     if regularizer is not None:
         runs_spec.append(("reg_only", baseline_cfg, regularizer))
-    runs_spec.append(("guided", gcfg, regularizer))
+    # Sweep mode: each entry overrides fields of the base GuidanceConfig and
+    # becomes its own arm (runtime levers only — no regularizer). Without a
+    # sweep, the single "guided" arm uses the base config as before.
+    sweep = cfg.ctrl.sweep
+    if not sweep and cfg.ctrl.sweep_file:
+        sweep = OmegaConf.load(cfg.ctrl.sweep_file)
+    if sweep:
+        for i, entry in enumerate(OmegaConf.to_container(sweep, resolve=True)):
+            name = entry.pop("name", f"arm{i}")
+            runs_spec.append((name, replace(gcfg, **entry), None))
+    else:
+        runs_spec.append(("guided", gcfg, regularizer))
     run_names = [n for n, _, _ in runs_spec]
     joint_ids = [int(j) for j in cfg.ctrl.joints]
     thresh = float(cfg.ctrl.threshold)
@@ -166,6 +179,7 @@ def main_impl(cfg: DictConfig) -> None:
     gen_emb: dict[str, list] = {name: [] for name in run_names}
     seq_fail: dict[str, list] = {name: [] for name in run_names}
     cell_dists: dict[str, list] = {name: [] for name in run_names}
+    gen_seconds: dict[str, float] = {name: 0.0 for name in run_names}
     n_real_fallback = 0
     n_text_fallback = 0
 
@@ -224,11 +238,17 @@ def main_impl(cfg: DictConfig) -> None:
         m_lens = latent_lens.to(device)
         for name, run_cfg, run_reg in runs_spec:
             set_seed(int(cfg.ctrl.seed) * 7919 + start)      # identical noise across runs
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            t0 = time.perf_counter()
             latents = generate_guided(
                 mardm, ae, cond, m_lens, control, mean, std,
                 timesteps=int(cfg.ctrl.timesteps), cond_scale=float(cfg.ctrl.guidance),
                 guidance=run_cfg, regularizer=run_reg,
             )
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            gen_seconds[name] += time.perf_counter() - t0
             with torch.no_grad():
                 essential = ae.decode(latents)               # (B, t_max, 67) normalized
                 joints = recover_joints_from_ric(
@@ -266,7 +286,7 @@ def main_impl(cfg: DictConfig) -> None:
         "diversity_real": diversity(real_np, diversity_times=int(cfg.ctrl.diversity_times), rng=rng),
         "mm_dist_real": mm_distance(text_np, real_np),
     }
-    for name in run_names:
+    for name, run_cfg, _ in runs_spec:
         gen_np = np.concatenate(gen_emb[name], 0)
         dists = torch.cat(cell_dists[name])
         results[name] = {
@@ -277,11 +297,14 @@ def main_impl(cfg: DictConfig) -> None:
             "traj_err": float(np.mean(seq_fail[name])),
             "loc_err": float((dists > thresh).float().mean()),
             "avg_err": float(dists.mean()),
+            "gen_seconds": gen_seconds[name],
+            "config": asdict(run_cfg),
         }
         print(f"[ctrl-eval] {name}: fid={results[name]['fid']:.3f} "
               f"r1={results[name]['r_precision'][0]:.3f} "
               f"traj={results[name]['traj_err']:.3f} loc={results[name]['loc_err']:.3f} "
-              f"avg={results[name]['avg_err']:.3f}m", flush=True)
+              f"avg={results[name]['avg_err']:.3f}m "
+              f"gen_s={gen_seconds[name]:.0f}", flush=True)
 
     (out_dir / "results.json").write_text(json.dumps(results, indent=2, default=float))
     print(f"[ctrl-eval] done — results under {out_dir}", flush=True)
@@ -320,6 +343,8 @@ def main(cfg: DictConfig) -> None:
         "regularizer_checkpoint": "",          # trained ControlMARDM (phase 2); adds reg_only run
         "regularizer_use_ema": True,
         "baseline": True,                      # also run unguided with same seeds
+        "sweep": [],                           # list of {name, <GuidanceConfig overrides>} arms
+        "sweep_file": "",                      # YAML file with the same list (sbatch-friendly)
     })
     cfg.ctrl = OmegaConf.merge(ctrl_cfg, cfg.get("ctrl", OmegaConf.create({})))
     main_impl(cfg)

@@ -53,10 +53,20 @@ and is expected to carry most of the realism recovery.
 * **Direct latent post-optimization** (`post_iters`, MaskControl Eq. 8
   *analogue* — they optimize embeddings before decode; we optimize AE latents).
   Off by default; bypasses the diffusion prior.
-* *Considered but not implemented:* proximal anchor `λ‖z−z₀‖²` and an
-  error-tolerance early stop for the inner loop. Standard guided-diffusion
-  trust-region machinery, **not** from MaskControl — if we ever report them,
-  they must be labeled as our own ablation.
+* **Runtime trust-region levers** (implemented 2026-07-22 after the pivot to
+  inference-only control): error-tolerance early stop for the inner loop
+  (`tolerance` — stop at ~5 cm instead of grinding to mm), proximal anchor
+  `λ‖z−z₀‖²` (`prox_weight`), and guidance scheduling over AR steps
+  (`guidance_start_frac` / `guidance_ramp` — early steps have an empty
+  context, so perturbing them does the most structural damage). Standard
+  guided-diffusion trust-region machinery, **not** from MaskControl — must be
+  labeled as our own ablation when reported.
+* **Interleaved repair** (`repair_every`): repair rounds *inside* the AR loop
+  over the committed prefix only, so the prior restores realism while the
+  remaining context is still open — targeting the frozen-gait pathology that
+  post-hoc repair reinforced (it re-predicted against fully frozen context).
+  Also our own; MaskControl gets this effect implicitly from per-iteration
+  confidence remasking.
 
 ## Evaluation differences
 

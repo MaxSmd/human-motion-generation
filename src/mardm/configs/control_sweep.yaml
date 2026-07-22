@@ -1,0 +1,48 @@
+# Runtime-lever sweep for spatial-control guidance (no training, inference
+# knobs only). Each entry overrides fields of the base GuidanceConfig built
+# from ctrl.* and becomes one eval arm in evaluate_mardm_control
+# (+ctrl.sweep_file=src/mardm/configs/control_sweep.yaml). The unguided
+# baseline arm comes from ctrl.baseline=true.
+#
+# Levers (see mardm.control.guidance.GuidanceConfig):
+#   tolerance            early-stop the inner loop at this control error (m)
+#   guidance_start_frac  skip z-optimization for the first fraction of AR steps
+#   guidance_ramp        ramp inner iters linearly from start_frac to the end
+#   prox_weight          trust-region anchor weight on mean ||z - z0||^2
+#   repair_every         interleaved repair round every N AR steps
+#   repair_rounds        post-hoc repair rounds after the AR loop
+
+- name: opt30              # phase-1 accurate mode, unchanged (reference arm)
+- name: tol5               # lever 1 alone: stop grinding below 5 cm
+  tolerance: 0.05
+- name: tol5_late          # + lever 2: no guidance in the first third
+  tolerance: 0.05
+  guidance_start_frac: 0.33
+- name: tol5_ramp          # lever 2 variant: ramp instead of hard switch-on
+  tolerance: 0.05
+  guidance_start_frac: 0.33
+  guidance_ramp: true
+- name: tol5_prox          # + lever 3: proximal anchor
+  tolerance: 0.05
+  prox_weight: 0.05
+- name: tol5_inline        # + lever 4: interleaved repair, light and frequent
+  tolerance: 0.05
+  repair_every: 3
+  repair_frac: 0.25
+  repair_iters: 5
+- name: tol5_late_inline   # levers 1+2+4
+  tolerance: 0.05
+  guidance_start_frac: 0.33
+  guidance_ramp: true
+  repair_every: 3
+  repair_frac: 0.25
+  repair_iters: 5
+- name: combo_all          # all levers + one post-hoc repair round
+  tolerance: 0.05
+  guidance_start_frac: 0.33
+  guidance_ramp: true
+  prox_weight: 0.05
+  repair_every: 3
+  repair_frac: 0.25
+  repair_iters: 5
+  repair_rounds: 1
