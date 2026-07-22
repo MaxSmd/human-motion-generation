@@ -63,10 +63,16 @@ and is expected to carry most of the realism recovery.
 * Traj./Loc./Avg. error (0.5 m threshold, waypoints sampled from GT joints)
   follow the OmniControl protocol and are directly comparable to MaskControl's
   tables.
-* **FID is not comparable to their published numbers**: ours is computed under
-  the repo's Guo evaluator on our canonical-features stack; theirs under the
-  standard redundant-263-D evaluator. Only within-run guided-vs-unguided
-  deltas (same seeds) are meaningful.
+* **FID uses the STANDARD Guo 263-D evaluator** (original Comp_v6_KLD01
+  checkpoint + its shipped normalization) — generated essential features are
+  bridged back to 263-D via `essential_to_h3d` before embedding, and the real
+  side feeds canonical new_joint_vecs. (Upstream MARDM retrains essential-dim
+  evaluators; this repo deliberately does not.) Cross-paper FID comparison is
+  therefore *closer* than first noted, but still not exact: our data is
+  AMASS-reprocessed, gen features go through a positions -> process_file
+  re-extraction, and control evals run on 512 clips (small-sample FID bias:
+  0.268 vs 0.154 full-split for the same model). Within-run same-seed deltas
+  remain the only fully clean comparison.
 
 ## Phase-1 numbers (2026-07-15, MARDM-M @300k canonical, CFG w=3.0)
 
