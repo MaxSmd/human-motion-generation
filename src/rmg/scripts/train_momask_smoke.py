@@ -28,7 +28,7 @@ from momask.models import (
     ResidualTransformer,
     TokenTransformerConfig,
 )
-from rmg.data import HumanML3DDataset, collate
+from rmg.data import CanonicalHumanML3DDataset, HumanML3DDataset, collate
 from rmg.models import CLIPTextEncoder, RandomTextEncoder, TextEncoder
 from rmg.representation import H3D_FEATURE_DIM, recover_joints_from_ric
 
@@ -39,6 +39,14 @@ def parse_args() -> argparse.Namespace:
         "--data-root",
         default=os.environ.get("RMG_DATA_ROOT", "external/data/humanml3d_packed"),
         help="Directory containing humanml3d.zip, splits.json, target_offsets.pt.",
+    )
+    p.add_argument(
+        "--canonical-h3d-dir",
+        default=None,
+        help=(
+            "Optional canonical HumanML3D new_joint_vecs directory. When set, "
+            "MoMask trains on official 263-D features instead of packed-derived features."
+        ),
     )
     p.add_argument("--split", default="train", choices=["train", "val", "test"])
     p.add_argument("--max-clips", type=int, default=8)
@@ -226,6 +234,8 @@ def restore_model_args(args: argparse.Namespace, ckpt: dict) -> None:
     for name in restore_names:
         if name in saved_args:
             setattr(args, name, saved_args[name])
+    if not args.canonical_h3d_dir and saved_args.get("canonical_h3d_dir"):
+        args.canonical_h3d_dir = saved_args["canonical_h3d_dir"]
 
 
 def build_text_encoder(args: argparse.Namespace) -> TextEncoder:
@@ -486,14 +496,25 @@ def main() -> None:
     if args.vq_steps <= 0 and loaded_vq_ckpt is None:
         raise ValueError("--vq-steps must be positive unless --load-vq-checkpoint or --load-token-checkpoint is set")
 
-    ds = HumanML3DDataset(
-        root=Path(args.data_root),
-        split=args.split,
-        max_seq_len=args.max_seq_len,
-        min_seq_len=args.min_seq_len,
-        mirror_augment=False,
-        output_mode="h3d_263",
-    )
+    if args.canonical_h3d_dir:
+        ds = CanonicalHumanML3DDataset(
+            root=Path(args.data_root),
+            canonical_dir=Path(args.canonical_h3d_dir),
+            split=args.split,
+            max_seq_len=args.max_seq_len,
+            min_seq_len=args.min_seq_len,
+        )
+        feature_source = f"canonical:{args.canonical_h3d_dir}"
+    else:
+        ds = HumanML3DDataset(
+            root=Path(args.data_root),
+            split=args.split,
+            max_seq_len=args.max_seq_len,
+            min_seq_len=args.min_seq_len,
+            mirror_augment=False,
+            output_mode="h3d_263",
+        )
+        feature_source = "packed-derived h3d_263"
     n = min(args.max_clips, len(ds))
     if n <= 0:
         raise RuntimeError(f"no clips available in split={args.split!r}")
@@ -510,6 +531,7 @@ def main() -> None:
     batches = cycle(loader)
 
     print(f"[momask-smoke] data_root={args.data_root}")
+    print(f"[momask-smoke] feature_source={feature_source}")
     print(f"[momask-smoke] clips={n} batch_size={args.batch_size} device={device}")
     print(f"[momask-smoke] output_dir={output_dir}")
     print(

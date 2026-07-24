@@ -102,6 +102,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--model-input-source",
+        choices=["auto", "packed", "canonical"],
+        default="auto",
+        help=(
+            "Motion features fed to the VQ/recon path. 'auto' uses canonical when "
+            "the checkpoint was trained with --canonical-h3d-dir and --real-h3d-dir is set."
+        ),
+    )
+    p.add_argument(
         "--humanml3d-texts-zip",
         default=None,
         help="Optional direct path to HumanML3D/HumanML3D/texts.zip for VIP caption tokens.",
@@ -395,6 +404,11 @@ def main() -> None:
     ckpt = torch_load(ckpt_path, map_location=device)
     normalizer = H3DNormalizer.from_state_dict(ckpt["normalizer"])
     saved_args = ckpt_args(ckpt)
+    model_input_source = args.model_input_source
+    if model_input_source == "auto":
+        model_input_source = "canonical" if saved_args.get("canonical_h3d_dir") and real_h3d_dir is not None else "packed"
+    if model_input_source == "canonical" and real_h3d_dir is None:
+        raise ValueError("--model-input-source canonical requires --real-h3d-dir")
     steps = int(args.generation_steps or saved_args.get("generation_steps", 10))
     max_seq_len = int(args.max_seq_len or saved_args.get("max_seq_len", 80))
     text_encoder = build_text_encoder(args, saved_args)
@@ -428,7 +442,8 @@ def main() -> None:
         f"max_clips={args.max_clips} variants={variants} evaluator={args.evaluator} "
         f"text_encoder={saved_args.get('text_encoder', 'random')} "
         f"text_tokens={'vip' if caption_tokens is not None else 'spacy'} "
-        f"real_features={'canonical' if real_h3d_dir is not None else 'packed'} device={device}",
+        f"real_features={'canonical' if real_h3d_dir is not None else 'packed'} "
+        f"model_input={model_input_source} device={device}",
         flush=True,
     )
 
@@ -469,6 +484,9 @@ def main() -> None:
                 )
 
         real_embs.append(encode_motion(evaluator, eval_real_x, eval_lengths))
+        model_real_x = eval_real_x.to(device) if model_input_source == "canonical" else real_x
+        model_lengths = eval_lengths if model_input_source == "canonical" else lengths
+        model_frame_mask = torch.arange(model_real_x.shape[1], device=device).unsqueeze(0) < model_lengths.to(device).unsqueeze(1)
         text_np, n_missing = encode_text_batch(evaluator, texts, clip_ids, caption_tokens)
         text_embs.append(text_np)
         n_text_fallback += n_missing
@@ -481,8 +499,8 @@ def main() -> None:
                 residual=residual,
                 normalizer=normalizer,
                 cond=cond,
-                real_x=real_x,
-                frame_mask=frame_mask,
+                real_x=model_real_x,
+                frame_mask=model_frame_mask,
                 steps=steps,
                 guidance_scale=args.guidance_scale,
                 temperature=args.temperature,
@@ -510,6 +528,7 @@ def main() -> None:
             "evaluator": args.evaluator,
             "real_feature_source": "canonical" if real_h3d_dir is not None else "packed",
             "real_h3d_dir": str(real_h3d_dir) if real_h3d_dir is not None else None,
+            "model_input_source": model_input_source,
             "text_token_source": "vip" if caption_tokens is not None else "spacy",
             "vip_token_fallbacks": int(n_text_fallback),
             "elapsed_sec": time.perf_counter() - t0,

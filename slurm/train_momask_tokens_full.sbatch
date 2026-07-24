@@ -30,6 +30,7 @@ fi
 IMAGE="${IMAGE:-${HOME}/rmg-momask.sqsh}"
 HF_CACHE="${HF_CACHE:-${HOME}/hf-cache}"
 DATA_ROOT="${DATA_ROOT:-/mnt/projects/drl4cvb/human-motion-representation/data/data/humanml3d_packed}"
+CANONICAL_H3D_DIR="${CANONICAL_H3D_DIR:-}"
 VQ_CKPT="${VQ_CKPT:-runs/momask-full-vq-raw-12668/momask_vq_latest.pt}"
 TOKEN_CKPT="${TOKEN_CKPT:-}"
 RUN_NAME="${RUN_NAME:-momask-full-tokens-${SLURM_JOB_ID:-$(date +%Y%m%d-%H%M%S)}}"
@@ -58,11 +59,17 @@ if [ -n "${TOKEN_CKPT}" ]; then
     TOKEN_CKPT_ARG="--load-token-checkpoint '${TOKEN_CKPT}'"
 fi
 
+CANONICAL_ARG=""
+if [ -n "${CANONICAL_H3D_DIR}" ]; then
+    CANONICAL_ARG="--canonical-h3d-dir '${CANONICAL_H3D_DIR}'"
+fi
+
 echo "[momask-tokens] host=$(hostname)"
 echo "[momask-tokens] repo=${REPO}"
 echo "[momask-tokens] image=${IMAGE}"
 echo "[momask-tokens] hf_cache=${HF_CACHE}"
 echo "[momask-tokens] data_root=${DATA_ROOT}"
+echo "[momask-tokens] canonical_h3d_dir=${CANONICAL_H3D_DIR:-<checkpoint-or-packed-derived>}"
 echo "[momask-tokens] vq_ckpt=${VQ_CKPT}"
 echo "[momask-tokens] token_ckpt=${TOKEN_CKPT:-<none>}"
 echo "[momask-tokens] output_dir=${OUTPUT_DIR}"
@@ -86,6 +93,7 @@ enroot start \
         pip install -e . --no-deps --quiet
         python -u -m rmg.scripts.train_momask_smoke \\
             --data-root '${DATA_ROOT}' \\
+            ${CANONICAL_ARG} \\
             --max-clips ${MAX_CLIPS} \\
             --batch-size ${BATCH_SIZE} \\
             --token-batch-size ${TOKEN_BATCH_SIZE} \\
