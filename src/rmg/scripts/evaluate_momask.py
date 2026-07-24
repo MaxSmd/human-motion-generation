@@ -93,6 +93,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--text-to-motion-repo", default="external/text-to-motion")
     p.add_argument("--humanml3d-repo", default="external/HumanML3D")
     p.add_argument(
+        "--real-h3d-dir",
+        default=None,
+        help=(
+            "Optional directory containing canonical HumanML3D new_joint_vecs/*.npy. "
+            "When set, FID/real diagnostics use these official real features instead "
+            "of packed T+R-derived features."
+        ),
+    )
+    p.add_argument(
         "--humanml3d-texts-zip",
         default=None,
         help="Optional direct path to HumanML3D/HumanML3D/texts.zip for VIP caption tokens.",
@@ -274,6 +283,42 @@ def encode_motion(evaluator, motion: Tensor, lengths: Tensor) -> np.ndarray:
     return evaluator.encode_motion(motion.cpu(), lengths.cpu()).cpu().numpy()
 
 
+def load_canonical_motion_batch(
+    h3d_dir: str | Path,
+    clip_ids: list[str],
+    max_len: int,
+) -> tuple[Tensor, Tensor, int]:
+    root = Path(h3d_dir)
+    feats: list[Tensor] = []
+    missing = 0
+    for cid in clip_ids:
+        candidates = [cid]
+        if cid.startswith("M") and len(cid) > 1:
+            candidates.append(cid[1:])
+        path = next((root / f"{name}.npy" for name in candidates if (root / f"{name}.npy").exists()), None)
+        if path is None:
+            missing += 1
+            feats.append(torch.zeros(1, H3D_FEATURE_DIM))
+            continue
+        arr = np.load(path).astype(np.float32)
+        if arr.ndim != 2 or arr.shape[1] != H3D_FEATURE_DIM:
+            raise ValueError(f"canonical HumanML3D feature must be (T, {H3D_FEATURE_DIM}), got {arr.shape}: {path}")
+        arr = arr[:max_len]
+        if len(arr) < 1:
+            missing += 1
+            feats.append(torch.zeros(1, H3D_FEATURE_DIM))
+            continue
+        feats.append(torch.from_numpy(arr))
+
+    tmax = max(f.shape[0] for f in feats)
+    out = torch.zeros(len(feats), tmax, H3D_FEATURE_DIM)
+    lengths = torch.zeros(len(feats), dtype=torch.long)
+    for i, feat in enumerate(feats):
+        out[i, : feat.shape[0]] = feat
+        lengths[i] = feat.shape[0]
+    return out, lengths, missing
+
+
 @torch.no_grad()
 def generate_variant(
     variant: str,
@@ -338,6 +383,9 @@ def main() -> None:
     require_path(Path(args.data_root) / "humanml3d.zip", "packed HumanML3D zip")
     require_path(Path(args.data_root) / "splits.json", "HumanML3D splits")
     require_path(Path(args.data_root) / "target_offsets.pt", "HumanML3D target offsets")
+    real_h3d_dir = Path(args.real_h3d_dir) if args.real_h3d_dir else None
+    if real_h3d_dir is not None:
+        require_path(real_h3d_dir, "canonical HumanML3D new_joint_vecs dir")
 
     variants = [v.strip() for v in args.variants.split(",") if v.strip()]
     unknown = sorted(set(variants) - {"full", "base", "recon"})
@@ -379,11 +427,13 @@ def main() -> None:
         f"[evaluate_momask] checkpoint={ckpt_path} split={args.split} clips={len(ds)} "
         f"max_clips={args.max_clips} variants={variants} evaluator={args.evaluator} "
         f"text_encoder={saved_args.get('text_encoder', 'random')} "
-        f"text_tokens={'vip' if caption_tokens is not None else 'spacy'} device={device}",
+        f"text_tokens={'vip' if caption_tokens is not None else 'spacy'} "
+        f"real_features={'canonical' if real_h3d_dir is not None else 'packed'} device={device}",
         flush=True,
     )
 
     real_embs: list[np.ndarray] = []
+    packed_real_embs: list[np.ndarray] = []
     text_embs: list[np.ndarray] = []
     gen_embs: dict[str, list[np.ndarray]] = {variant: [] for variant in variants}
     n_seen = 0
@@ -404,7 +454,21 @@ def main() -> None:
         clip_ids = batch.clip_ids[:take]
         cond = text_encoder.encode(texts, device=device)
 
-        real_embs.append(encode_motion(evaluator, real_x, lengths))
+        eval_real_x = real_x
+        eval_lengths = lengths
+        if real_h3d_dir is not None:
+            packed_real_embs.append(encode_motion(evaluator, real_x, lengths))
+            eval_real_x, eval_lengths, n_missing_real = load_canonical_motion_batch(
+                real_h3d_dir,
+                clip_ids,
+                max_len=real_x.shape[1],
+            )
+            if n_missing_real:
+                raise FileNotFoundError(
+                    f"{n_missing_real} canonical HumanML3D feature files missing under {real_h3d_dir}"
+                )
+
+        real_embs.append(encode_motion(evaluator, eval_real_x, eval_lengths))
         text_np, n_missing = encode_text_batch(evaluator, texts, clip_ids, caption_tokens)
         text_embs.append(text_np)
         n_text_fallback += n_missing
@@ -423,13 +487,14 @@ def main() -> None:
                 guidance_scale=args.guidance_scale,
                 temperature=args.temperature,
             )
-            gen_embs[variant].append(encode_motion(evaluator, gen, lengths))
+            gen_embs[variant].append(encode_motion(evaluator, gen, eval_lengths))
 
         n_seen += take
         if args.max_clips > 0 and n_seen >= args.max_clips:
             break
 
     real = np.concatenate(real_embs, axis=0)
+    packed_real = np.concatenate(packed_real_embs, axis=0) if packed_real_embs else None
     text = np.concatenate(text_embs, axis=0)
     diag_rng = np.random.default_rng(args.seed)
     results = {
@@ -443,6 +508,8 @@ def main() -> None:
             "guidance_scale": args.guidance_scale,
             "temperature": args.temperature,
             "evaluator": args.evaluator,
+            "real_feature_source": "canonical" if real_h3d_dir is not None else "packed",
+            "real_h3d_dir": str(real_h3d_dir) if real_h3d_dir is not None else None,
             "text_token_source": "vip" if caption_tokens is not None else "spacy",
             "vip_token_fallbacks": int(n_text_fallback),
             "elapsed_sec": time.perf_counter() - t0,
@@ -453,6 +520,14 @@ def main() -> None:
             "diversity_real": float(diversity(real, diversity_times=args.diversity_times, rng=diag_rng)),
         },
     }
+    if packed_real is not None:
+        packed_rng = np.random.default_rng(args.seed)
+        results["_diagnostics"]["packed_real"] = {
+            "fid_vs_canonical": float(fid(real, packed_real)),
+            "r_precision": r_precision(text, packed_real, top_k=3, rng=packed_rng).tolist(),
+            "mm_dist": float(mm_distance(text, packed_real)),
+            "diversity": float(diversity(packed_real, diversity_times=args.diversity_times, rng=packed_rng)),
+        }
     if caption_tokens is not None:
         print(f"[evaluate_momask] VIP token fallbacks={n_text_fallback}", flush=True)
     print(f"\n[diagnostics]\n{json.dumps(results['_diagnostics'], indent=2)}", flush=True)
@@ -460,7 +535,17 @@ def main() -> None:
     for variant in variants:
         gen = np.concatenate(gen_embs[variant], axis=0)
         results[variant] = compute_metrics(real, gen, text, args.diversity_times, args.seed)
+        if variant == "recon" and packed_real is not None:
+            results["recon_vs_packed_real"] = compute_metrics(
+                packed_real,
+                gen,
+                text,
+                args.diversity_times,
+                args.seed,
+            )
         print(f"\n[{variant}]\n{json.dumps(results[variant], indent=2)}", flush=True)
+        if variant == "recon" and "recon_vs_packed_real" in results:
+            print(f"\n[recon_vs_packed_real]\n{json.dumps(results['recon_vs_packed_real'], indent=2)}", flush=True)
 
     output = Path(args.output) if args.output else ckpt_path.parent / "eval_momask" / "results.json"
     output.parent.mkdir(parents=True, exist_ok=True)

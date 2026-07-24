@@ -21,7 +21,8 @@ IMAGE="${IMAGE:-${HOME}/rmg-momask.sqsh}"
 HF_CACHE="${HF_CACHE:-${HOME}/hf-cache}"
 DATA_ROOT="${DATA_ROOT:-/mnt/projects/drl4cvb/human-motion-representation/data/data/humanml3d_packed}"
 HUMANML3D_REPO="${HUMANML3D_REPO:-external/HumanML3D}"
-HUMANML3D_TEXTS_ZIP="${HUMANML3D_TEXTS_ZIP:-}"
+HUMANML3D_TEXTS_ZIP="${HUMANML3D_TEXTS_ZIP:-/mnt/projects/drl4cvb/human-motion-representation/data/HumanML3D/HumanML3D/texts.zip}"
+REAL_H3D_DIR="${REAL_H3D_DIR:-${HOME}/rmg-runs/h3d-canonical/new_joint_vecs}"
 MAX_CLIPS="${MAX_CLIPS:-512}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 MAX_SEQ_LEN="${MAX_SEQ_LEN:-80}"
@@ -44,6 +45,7 @@ echo "[momask-sweep] repo=${REPO}"
 echo "[momask-sweep] image=${IMAGE}"
 echo "[momask-sweep] humanml3d_repo=${HUMANML3D_REPO}"
 echo "[momask-sweep] humanml3d_texts_zip=${HUMANML3D_TEXTS_ZIP:-<auto>}"
+echo "[momask-sweep] real_h3d_dir=${REAL_H3D_DIR:-<packed>}"
 echo "[momask-sweep] output_dir=${OUTPUT_DIR}"
 echo "[momask-sweep] max_clips=${MAX_CLIPS} variants=${VARIANTS} steps=${GENERATION_STEPS}"
 echo "[momask-sweep] guidance=${GUIDANCE_SCALES}"
@@ -70,6 +72,10 @@ enroot start \
         if [ -n '${HUMANML3D_TEXTS_ZIP}' ]; then
             TEXTS_ZIP_ARG=\"--humanml3d-texts-zip '${HUMANML3D_TEXTS_ZIP}'\"
         fi
+        REAL_H3D_ARG=''
+        if [ -n '${REAL_H3D_DIR}' ]; then
+            REAL_H3D_ARG=\"--real-h3d-dir '${REAL_H3D_DIR}'\"
+        fi
 
         for ckpt in ${CKPTS}; do
             if [ ! -f \"\${ckpt}\" ]; then
@@ -92,6 +98,7 @@ enroot start \
                         --data-root '${DATA_ROOT}' \
                         --humanml3d-repo '${HUMANML3D_REPO}' \
                         \${TEXTS_ZIP_ARG} \
+                        \${REAL_H3D_ARG} \
                         --split test \
                         --max-clips ${MAX_CLIPS} \
                         --batch-size ${BATCH_SIZE} \
