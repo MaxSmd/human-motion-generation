@@ -27,6 +27,7 @@ from __future__ import annotations
 import io
 import json
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 
 import hydra
@@ -41,9 +42,11 @@ from mardm.control import (
     control_metrics,
     generate_guided,
     latents_to_joints,
+    root_edit_essential,
 )
 from mardm.data import EssentialDataset
 from mardm.models import AE, MARDM, AEConfig, MARDMConfig
+from mardm.representation import denormalize
 from shared.geometry import recover_joints_from_ric
 from shared.text import Qwen3EmbeddingEncoder, RandomTextEncoder
 from shared.utils import EMA, load_checkpoint, set_seed
@@ -160,6 +163,13 @@ def main_impl(cfg: DictConfig) -> None:
         repair_iters=int(cfg.guid.repair_iters), repair_every=int(cfg.guid.repair_every),
         verbose=bool(cfg.guid.verbose),
     )
+    # Phase-3 levers (dyn_weight, skate_weight, trust_radius, uturn_*, root_edit)
+    # have no dedicated key here — reach them through `guid.extra` so this script
+    # can render any sweep arm without growing a flag per field.
+    extra = OmegaConf.to_container(cfg.guid.extra, resolve=True) or {}
+    if extra:
+        gcfg = replace(gcfg, **extra)
+        print(f"[guided] extra guidance overrides: {extra}", flush=True)
     baseline_cfg = GuidanceConfig(
         inner_iters=0, post_iters=0, ode_steps_final=gcfg.ode_steps_final)
     joint_ids = [int(j) for j in cfg.guid.joints]
@@ -208,8 +218,18 @@ def main_impl(cfg: DictConfig) -> None:
                 guidance=run_cfg, regularizer=run_reg,
             )
             with torch.no_grad():
-                joints = latents_to_joints(latents.permute(0, 2, 1), ae,
-                                           mean.to(device), std.to(device)).cpu()
+                if run_cfg.root_edit:
+                    ess = root_edit_essential(
+                        ae.decode(latents), control, mean.to(device), std.to(device),
+                        skate_iters=run_cfg.root_edit_skate_iters,
+                        skate_lr=run_cfg.root_edit_skate_lr,
+                        skate_weight=run_cfg.root_edit_skate_weight,
+                        skate_height=run_cfg.skate_height, verbose=run_cfg.verbose)
+                    joints = recover_joints_from_ric(
+                        denormalize(ess, mean.to(device), std.to(device))).cpu()
+                else:
+                    joints = latents_to_joints(latents.permute(0, 2, 1), ae,
+                                               mean.to(device), std.to(device)).cpu()
             m = control_metrics(joints, control)
             runs[name] = m
             np.save(out_dir / f"{name}-{cid}.npy", joints[0].numpy().astype(np.float32))
@@ -271,6 +291,7 @@ def main(cfg: DictConfig) -> None:
         "repair_frac": 0.5,        # fraction of tokens remasked per repair round
         "repair_iters": 10,        # light-guidance inner steps during repair
         "repair_every": 0,         # interleaved repair every N AR steps (0=off)
+        "extra": {},               # any other GuidanceConfig field, e.g. +guid.extra.dyn_weight=1.0
         "regularizer_checkpoint": "",  # trained ControlMARDM (phase 2); adds reg_only run
         "regularizer_use_ema": True,
         "render": False,           # also write GIFs (needs matplotlib)

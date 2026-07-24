@@ -19,7 +19,7 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor
 
-from shared.geometry import recover_joints_from_ric
+from shared.geometry import FOOT_CONTACT_IDX, recover_joints_from_ric
 
 from ..representation import denormalize
 
@@ -92,6 +92,95 @@ def control_loss(joints: Tensor, signal: ControlSignal) -> Tensor:
         return joints.sum() * 0.0
     dist = torch.linalg.vector_norm(joints[:, :T] - signal.targets[:, :T], dim=-1)  # (B, T, J)
     return (dist * mask).sum() / mask.sum()
+
+
+def dynamics_loss(joints: Tensor, reference: Tensor, signal: ControlSignal,
+                  *, root_relative: bool = True) -> Tensor:
+    """Anchor the velocity profile to an unguided reference sample.
+
+    ‖Δ_t J_g − Δ_t J_u‖² averaged over frames and over joints that are NEVER
+    constrained (a joint pinned by a waypoint must be free to move). This is
+    the term that stops the optimizer from collapsing onto a static pose: a
+    frozen clip minimizes `control_loss` whenever the prior's habitual motion
+    conflicts with the waypoints, but it maximizes this one.
+
+    With `root_relative` (default) velocities are taken after subtracting the
+    pelvis, so the term constrains ARTICULATION (gait) only and stays agnostic
+    to where the body travels — anchoring world-frame velocities would fight
+    the waypoints directly, since every joint's world position carries the root
+    translation. Set False to reproduce the literal world-frame form.
+    """
+    T = min(joints.shape[1], reference.shape[1])
+    g, u = joints[:, :T], reference[:, :T]
+    if root_relative:
+        g = g - g[:, :, 0:1]
+        u = u - u[:, :, 0:1]
+    if T < 2:
+        return joints.sum() * 0.0
+    dg, du = g[:, 1:] - g[:, :-1], u[:, 1:] - u[:, :-1]
+    free = ~signal.mask.any(dim=1).any(dim=0)                # (J,) never constrained
+    if not free.any():
+        return joints.sum() * 0.0
+    return (dg[:, :, free] - du[:, :, free]).pow(2).sum(-1).mean()
+
+
+def foot_skate_loss(joints: Tensor, *, height: float = 0.05) -> Tensor:
+    """Horizontal foot velocity gated on foot height. Differentiable.
+
+    The 4 binary contact channels live in the 196 dims dropped from the 67-D
+    essential group, so contact has to be inferred geometrically: a linear gate
+    `(1 - h/height)+` that is 1 on the floor and 0 above `height` metres,
+    multiplying the per-frame horizontal displacement of ankles and toes.
+
+    Note this term alone cannot prevent freezing (a static pose has zero foot
+    velocity and so zero skate) — it is the complement of `dynamics_loss`,
+    which supplies the motion the gate then has to keep honest.
+    """
+    if joints.shape[1] < 2:
+        return joints.sum() * 0.0
+    feet = joints[:, :, list(FOOT_CONTACT_IDX)]              # (B, T, 4, 3)
+    horiz = feet[:, 1:, :, [0, 2]] - feet[:, :-1, :, [0, 2]]
+    speed = torch.linalg.vector_norm(horiz, dim=-1)          # (B, T-1, 4)
+    gate = (1.0 - feet[:, :-1, :, 1] / height).clamp(min=0.0, max=1.0)
+    return (speed * gate).mean()
+
+
+@torch.no_grad()
+def motion_metrics(joints: Tensor, lengths: Tensor, *, height: float = 0.05,
+                   skate_speed: float = 0.0025) -> dict[str, float]:
+    """Realism diagnostics FID is blind to: skating, damping, smoothness.
+
+    foot_skate:  fraction of (frame, foot) cells that are grounded (< `height`)
+                 yet slide more than `skate_speed` m/frame
+    motion_mag:  mean root-relative joint speed (m/frame) — freezing detector
+    jerk:        mean magnitude of the third position difference (m/frame³)
+    joints: (B, T, J, 3); `lengths` (B,) gives the valid frame count per clip.
+    """
+    b, t, j, _ = joints.shape
+    idx = torch.arange(t, device=joints.device)
+    valid = idx.unsqueeze(0) < lengths.to(joints.device).unsqueeze(1)   # (B, T)
+
+    feet = joints[:, :, list(FOOT_CONTACT_IDX)]
+    horiz = torch.linalg.vector_norm(
+        feet[:, 1:, :, [0, 2]] - feet[:, :-1, :, [0, 2]], dim=-1)       # (B, T-1, 4)
+    grounded = feet[:, :-1, :, 1] < height
+    v1 = valid[:, 1:].unsqueeze(-1)
+    n_ground = (grounded & v1).sum().clamp(min=1)
+    skate = ((horiz > skate_speed) & grounded & v1).sum() / n_ground
+
+    local = joints - joints[:, :, 0:1]
+    speed = torch.linalg.vector_norm(local[:, 1:] - local[:, :-1], dim=-1)  # (B, T-1, J)
+    mag = (speed * v1).sum() / (v1.sum() * j).clamp(min=1)
+
+    d3 = joints[:, 3:] - 3 * joints[:, 2:-1] + 3 * joints[:, 1:-2] - joints[:, :-3]
+    v3 = valid[:, 3:].unsqueeze(-1)
+    jerk = ((torch.linalg.vector_norm(d3, dim=-1) * v3).sum()
+            / (v3.sum() * j).clamp(min=1)) if t > 3 else torch.zeros((), device=joints.device)
+    return {
+        "foot_skate": float(skate),
+        "motion_mag": float(mag),
+        "jerk": float(jerk),
+    }
 
 
 @torch.no_grad()

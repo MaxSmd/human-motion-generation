@@ -6,8 +6,17 @@ checkpoint — `guidance.generate_guided` + the differentiable control loss in
 """
 
 from .guidance import GuidanceConfig, generate_guided
-from .losses import ControlSignal, control_loss, control_metrics, latents_to_joints
+from .losses import (
+    ControlSignal,
+    control_loss,
+    control_metrics,
+    dynamics_loss,
+    foot_skate_loss,
+    latents_to_joints,
+    motion_metrics,
+)
 from .regularizer import ControlMARDM, control_forward_loss, control_signal_features
+from .root_edit import root_edit_essential
 
 __all__ = [
     "ControlMARDM",
@@ -17,6 +26,10 @@ __all__ = [
     "control_loss",
     "control_metrics",
     "control_signal_features",
+    "dynamics_loss",
+    "foot_skate_loss",
     "generate_guided",
     "latents_to_joints",
+    "motion_metrics",
+    "root_edit_essential",
 ]

@@ -41,7 +41,14 @@ import torch
 from omegaconf import DictConfig, OmegaConf
 from tqdm import tqdm
 
-from mardm.control import ControlMARDM, ControlSignal, GuidanceConfig, generate_guided
+from mardm.control import (
+    ControlMARDM,
+    ControlSignal,
+    GuidanceConfig,
+    generate_guided,
+    motion_metrics,
+    root_edit_essential,
+)
 from mardm.data import EssentialDataset
 from mardm.models import AE, MARDM, AEConfig, MARDMConfig
 from mardm.representation import denormalize, essential_to_h3d
@@ -180,6 +187,10 @@ def main_impl(cfg: DictConfig) -> None:
     seq_fail: dict[str, list] = {name: [] for name in run_names}
     cell_dists: dict[str, list] = {name: [] for name in run_names}
     gen_seconds: dict[str, float] = {name: 0.0 for name in run_names}
+    # Realism diagnostics FID cannot see (skating, damping, smoothness); the
+    # "real" entry is the same statistic on the GT clips, as the reference the
+    # generated numbers should be read against.
+    motion_stats: dict[str, list] = {name: [] for name in [*run_names, "real"]}
     n_real_fallback = 0
     n_text_fallback = 0
 
@@ -206,6 +217,7 @@ def main_impl(cfg: DictConfig) -> None:
             for j in joint_ids:
                 mask[i, frames, j] = True
         control = ControlSignal(targets, mask)
+        motion_stats["real"].append(motion_metrics(targets, dec_lens))
 
         # Real + text side (once per batch).
         real_feats = []
@@ -246,13 +258,25 @@ def main_impl(cfg: DictConfig) -> None:
                 timesteps=int(cfg.ctrl.timesteps), cond_scale=float(cfg.ctrl.guidance),
                 guidance=run_cfg, regularizer=run_reg,
             )
+            with torch.no_grad():
+                essential = ae.decode(latents)               # (B, t_max, 67) normalized
+            # Root-channel reparameterization acts on the decoded features, so
+            # it happens here rather than inside generate_guided — and inside
+            # the timer, since it is part of the arm's cost.
+            if run_cfg.root_edit:
+                essential = root_edit_essential(
+                    essential, control, mean_d, std_d,
+                    skate_iters=run_cfg.root_edit_skate_iters,
+                    skate_lr=run_cfg.root_edit_skate_lr,
+                    skate_weight=run_cfg.root_edit_skate_weight,
+                    skate_height=run_cfg.skate_height)
             if device.type == "cuda":
                 torch.cuda.synchronize()
             gen_seconds[name] += time.perf_counter() - t0
             with torch.no_grad():
-                essential = ae.decode(latents)               # (B, t_max, 67) normalized
                 joints = recover_joints_from_ric(
                     denormalize(essential, mean_d, std_d)).cpu()
+            motion_stats[name].append(motion_metrics(joints, dec_lens))
 
             dist = torch.linalg.vector_norm(joints - targets, dim=-1)
             dist = torch.where(mask, dist, torch.zeros_like(dist))
@@ -275,8 +299,14 @@ def main_impl(cfg: DictConfig) -> None:
     if real_dir is not None and n_real_fallback:
         print(f"[ctrl-eval] {n_real_fallback} real clip(s) fell back to essential->263 bridge",
               flush=True)
+    def _mean_stats(name: str) -> dict[str, float]:
+        keys = motion_stats[name][0].keys()
+        return {k: float(np.mean([s[k] for s in motion_stats[name]])) for k in keys}
+
     rng = np.random.default_rng(int(cfg.ctrl.seed))
+    real_motion = _mean_stats("real")
     results: dict = {
+        "motion_real": real_motion,
         "n_clips": int(real_np.shape[0]),
         "joints": joint_ids,
         "num_keyframes": int(cfg.ctrl.num_keyframes),
@@ -298,13 +328,18 @@ def main_impl(cfg: DictConfig) -> None:
             "loc_err": float((dists > thresh).float().mean()),
             "avg_err": float(dists.mean()),
             "gen_seconds": gen_seconds[name],
+            "motion": _mean_stats(name),
             "config": asdict(run_cfg),
         }
+        m = results[name]["motion"]
         print(f"[ctrl-eval] {name}: fid={results[name]['fid']:.3f} "
               f"r1={results[name]['r_precision'][0]:.3f} "
               f"traj={results[name]['traj_err']:.3f} loc={results[name]['loc_err']:.3f} "
               f"avg={results[name]['avg_err']:.3f}m "
+              f"skate={m['foot_skate']:.3f} mag={m['motion_mag']:.4f} jerk={m['jerk']:.4f} "
               f"gen_s={gen_seconds[name]:.0f}", flush=True)
+    print(f"[ctrl-eval] real reference: skate={real_motion['foot_skate']:.3f} "
+          f"mag={real_motion['motion_mag']:.4f} jerk={real_motion['jerk']:.4f}", flush=True)
 
     (out_dir / "results.json").write_text(json.dumps(results, indent=2, default=float))
     print(f"[ctrl-eval] done — results under {out_dir}", flush=True)
