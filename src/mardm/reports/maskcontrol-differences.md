@@ -149,3 +149,77 @@ information structure.
 phase-1 guidance uses), scattered into true-latent context. Exactly
 differentiable, still no DES — the paper claim is unchanged; only the anchor
 moved from GT to noise.
+
+## Runtime levers (2026-07-23, job 15185): how far zero-training gets
+
+The supervisor pivot to inference-only ruled out phase 2, so the question
+became how much of the FID cost the *runtime* knobs can recover. An 8-arm
+128-clip sweep (job 15149) found a three-point Pareto front, confirmed here at
+the full 512-clip protocol. Same checkpoint, same seeds, same protocol as the
+phase-1 table above, so the columns stack directly — the unguided row
+reproduces (0.268 FID / R@1 0.516 vs 0.504).
+
+| | Avg. err | Loc. err | Traj. err | FID | R@1 | gen s |
+|---|---|---|---|---|---|---|
+| unguided | 0.648 m | 0.363 | 0.541 | 0.268 | 0.516 | 179 |
+| opt30 (phase-1) | 0.015 m | 0.003 | 0.012 | 1.447 | 0.385 | — |
+| tol5_ramp | 0.052 m | 0.012 | 0.049 | 0.826 | 0.439 | 985 |
+| tol5_inline | 0.049 m | 0.005 | 0.023 | 0.673 | 0.434 | 3456 |
+| combo_all | 0.106 m | 0.036 | 0.098 | 0.392 | 0.471 | 1176 |
+
+`tol5_inline` (tolerance stop + interleaved repair every 3 AR steps) closes
+**66% of the FID excess over opt30** (1.179 → 0.405 above the floor) while
+*improving* control over phase-1 post-hoc repair on both axes (0.905 / 0.076 m
+→ 0.673 / 0.049 m). Interleaving is what does it: repairing the committed
+prefix while the rest of the context is still open lets the correction spread,
+instead of re-predicting into an already-frozen sequence — the exact failure
+diagnosed in phase 1. R-precision recovers 0.385 → 0.434–0.471.
+
+The 128-clip sweep ranked the arms in the same order as the 512-clip run, so
+the cheap scale is order-predictive and is used for probing. FID magnitudes are
+NOT comparable across scales (unguided floor 0.755 @128 vs 0.268 @512 vs 0.154
+full split).
+
+**What is still wrong.** All four levers act on the optimizer; none touch the
+objective. `control_loss` is purely positional, so a static pose is a global
+minimum of it whenever the prior's habitual motion conflicts with the
+waypoints — on clip 004822 foot lift stays ≈30% of GT. FID does not see this
+(a damped clip is still a plausible clip), which is why the evaluation now also
+reports `foot_skate`, `motion_mag` and `jerk` against a GT reference row.
+
+## Phase 3 (2026-07-24): change the objective, not the optimizer
+
+Four inference-only attacks, all sweepable as `GuidanceConfig` fields:
+
+1. **Objective augmentation.** `L = L_ctrl + λ_dyn·‖Δ_t J_g − Δ_t J_u‖² +
+   λ_skate·L_skate`. The dynamics anchor takes J_u from an unguided sample of
+   the same clip, generated internally with the RNG stream forked so arms stay
+   noise-matched, and is applied to joints that are never constrained. It is
+   **root-relative** by default: world-frame joint velocities carry the root
+   translation, so anchoring them would fight the waypoints — root-relative
+   anchors articulation (gait) while leaving the trajectory free. The foot term
+   is geometric (horizontal foot velocity gated on foot height) because the 4
+   binary contact channels sit in the 196 dims dropped from the 67-D essential
+   group. The two terms are complements: skate alone cannot prevent freezing (a
+   static pose has zero foot velocity), and the anchor alone does not enforce
+   ground contact. This regularizes in motion space; `prox_weight` regularizes
+   in z space, which is the wrong metric.
+2. **Root-channel reparameterization** (`control/root_edit.py`), for
+   `joints=[0]` only. Dims 0:4 are (yaw velocity, local xz velocity, height)
+   and the pelvis world trajectory is exactly their cumulative integral, while
+   the 63 local-position dims are invariant under edits to them. A waypoint is
+   therefore a prefix-sum constraint, and the minimum-norm correction is
+   piecewise constant between keyframes — closed form, no gradients, no
+   diffusion calls. Exact control at unguided cost with gait preserved by
+   construction; the cost it *does* pay is foot skate proportional to how far
+   the pelvis had to move, which the optional polish over those four channels
+   trades back against waypoint error.
+3. **U-turn resampling.** RePaint's renoise-and-redenoise, applied to the
+   transport path rather than to tokens: perturb the committed latents back to
+   `uturn_t` along the linear interpolant and re-integrate the SiT head to t=1
+   under light guidance. Unlike `_repair_round` it never has to guess which
+   tokens guidance damaged — the whole sequence is re-solved jointly.
+4. **Hard trust region + CFG.** Project z onto ‖z − z₀‖₂ ≤ r·‖z₀‖₂ after every
+   Adam step, instead of a soft penalty whose λ trades off against control
+   error; plus a per-arm CFG override, since every arm so far ran w=3.0 and
+   stronger text conditioning opposes freezing directly.
