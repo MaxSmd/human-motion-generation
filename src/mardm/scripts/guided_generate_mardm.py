@@ -210,6 +210,7 @@ def main_impl(cfg: DictConfig) -> None:
         cond = text_encoder.encode([caption], device=device)
         m_lens = torch.tensor([latent_len], device=device)
         runs: dict[str, dict] = {}
+        joints_by_arm: dict[str, np.ndarray] = {}
         for name, run_cfg, run_reg in runs_spec:
             set_seed(int(cfg.guid.seed) + idx)               # identical noise draws
             latents = generate_guided(
@@ -232,13 +233,24 @@ def main_impl(cfg: DictConfig) -> None:
                                                mean.to(device), std.to(device)).cpu()
             m = control_metrics(joints, control)
             runs[name] = m
-            np.save(out_dir / f"{name}-{cid}.npy", joints[0].numpy().astype(np.float32))
-            if bool(cfg.guid.render):
-                from mardm.scripts.visualize_mardm import _render
-                waypoints = control.targets[0][control.mask[0]].numpy()  # (K, 3) targets
-                _render(joints[0].numpy(), out_dir / f"{name}-{cid}.gif",
-                        title=f"{name.upper()} [{cid}] avg={m['avg_err']:.3f}m",
-                        fps=int(cfg.guid.fps), markers=waypoints)
+            joints_by_arm[name] = joints[0].numpy().astype(np.float32)
+            np.save(out_dir / f"{name}-{cid}.npy", joints_by_arm[name])
+
+        if bool(cfg.guid.render):
+            # One synchronized triptych per clip: Ground truth | Unguided |
+            # best Guided arm, with the text prompt as the figure title and the
+            # control waypoints overlaid on every panel.
+            from mardm.scripts.visualize_mardm import _render_compare
+            waypoints = control.targets[0][control.mask[0]].numpy()   # (K, 3) targets
+            best = next(n for n, _, _ in runs_spec if n not in ("unguided", "reg_only"))
+            panels = [(gt_joints.numpy().astype(np.float32), "Ground truth")]
+            if "unguided" in joints_by_arm:
+                panels.append((joints_by_arm["unguided"], "Unguided"))
+            glabel = str(cfg.guid.get("guided_label") or "Guided")
+            panels.append((joints_by_arm[best],
+                           f"{glabel}  (avg {runs[best]['avg_err']:.3f} m)"))
+            _render_compare(panels, out_dir / f"compare-{cid}.gif",
+                            suptitle=caption, fps=int(cfg.guid.fps), markers=waypoints)
 
         np.savez(out_dir / f"control-{cid}.npz",
                  targets=control.targets[0].numpy().astype(np.float32),
@@ -271,6 +283,7 @@ def main(cfg: DictConfig) -> None:
         "split": "test",
         "num_clips": 8,
         "clip_ids": [],            # explicit clip ids to render (overrides num_clips)
+        "guided_label": "",        # panel label for the guided arm in compare GIFs
         "guidance": 2.0,           # CFG scale (see evaluate_mardm defaults)
         "timesteps": 18,           # masked-AR sampling iterations
         "use_ema": True,
