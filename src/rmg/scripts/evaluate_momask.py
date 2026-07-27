@@ -172,7 +172,7 @@ def build_text_encoder(args: argparse.Namespace, saved_args: dict) -> TextEncode
     raise ValueError(f"unknown text encoder: {kind}")
 
 
-def build_models(ckpt: dict, device: torch.device) -> tuple[MotionRVQVAE, MaskedMotionTransformer, ResidualTransformer]:
+def build_vqvae(ckpt: dict, device: torch.device) -> MotionRVQVAE:
     a = ckpt_args(ckpt)
     vqvae = MotionRVQVAE(
         input_dim=H3D_FEATURE_DIM,
@@ -186,7 +186,15 @@ def build_models(ckpt: dict, device: torch.device) -> tuple[MotionRVQVAE, Masked
         quantize_dropout_prob=float(a.get("quantize_dropout", 0.2)),
         velocity_loss_weight=float(a.get("vq_velocity_weight", 0.0)),
     ).to(device)
+    if "vqvae" not in ckpt:
+        raise KeyError("checkpoint missing 'vqvae'")
+    vqvae.load_state_dict(ckpt["vqvae"])
+    vqvae.eval()
+    return vqvae
 
+
+def build_token_models(ckpt: dict, device: torch.device) -> tuple[MaskedMotionTransformer, ResidualTransformer]:
+    a = ckpt_args(ckpt)
     cfg = TokenTransformerConfig(
         vocab_size=int(a.get("codebook_size", 64)),
         text_dim=int(a.get("text_dim", 64)),
@@ -204,12 +212,12 @@ def build_models(ckpt: dict, device: torch.device) -> tuple[MotionRVQVAE, Masked
         separate_level_heads=not bool(a.get("shared_residual_head", False)),
     ).to(device)
 
-    for key, model in (("vqvae", vqvae), ("masked_transformer", masked), ("residual_transformer", residual)):
+    for key, model in (("masked_transformer", masked), ("residual_transformer", residual)):
         if key not in ckpt:
             raise KeyError(f"checkpoint missing {key!r}")
         model.load_state_dict(ckpt[key])
         model.eval()
-    return vqvae, masked, residual
+    return masked, residual
 
 
 def build_evaluator(args: argparse.Namespace, device: torch.device):
@@ -400,6 +408,7 @@ def main() -> None:
     unknown = sorted(set(variants) - {"full", "base", "recon"})
     if unknown:
         raise ValueError(f"unknown variants: {unknown}")
+    needs_generation = any(v in {"full", "base"} for v in variants)
 
     ckpt = torch_load(ckpt_path, map_location=device)
     normalizer = H3DNormalizer.from_state_dict(ckpt["normalizer"])
@@ -411,13 +420,18 @@ def main() -> None:
         raise ValueError("--model-input-source canonical requires --real-h3d-dir")
     steps = int(args.generation_steps or saved_args.get("generation_steps", 10))
     max_seq_len = int(args.max_seq_len or saved_args.get("max_seq_len", 80))
-    text_encoder = build_text_encoder(args, saved_args)
-    if text_encoder.text_dim != int(saved_args.get("text_dim", text_encoder.text_dim)):
-        raise ValueError(
-            f"text encoder dim {text_encoder.text_dim} does not match checkpoint text_dim "
-            f"{saved_args.get('text_dim')}"
-        )
-    vqvae, masked, residual = build_models(ckpt, device)
+    vqvae = build_vqvae(ckpt, device)
+    text_encoder: TextEncoder | None = None
+    masked: MaskedMotionTransformer | None = None
+    residual: ResidualTransformer | None = None
+    if needs_generation:
+        text_encoder = build_text_encoder(args, saved_args)
+        if text_encoder.text_dim != int(saved_args.get("text_dim", text_encoder.text_dim)):
+            raise ValueError(
+                f"text encoder dim {text_encoder.text_dim} does not match checkpoint text_dim "
+                f"{saved_args.get('text_dim')}"
+            )
+        masked, residual = build_token_models(ckpt, device)
 
     ds = HumanML3DDataset(
         root=args.data_root,
@@ -440,7 +454,7 @@ def main() -> None:
     print(
         f"[evaluate_momask] checkpoint={ckpt_path} split={args.split} clips={len(ds)} "
         f"max_clips={args.max_clips} variants={variants} evaluator={args.evaluator} "
-        f"text_encoder={saved_args.get('text_encoder', 'random')} "
+        f"text_encoder={saved_args.get('text_encoder', 'random') if needs_generation else '<unused>'} "
         f"text_tokens={'vip' if caption_tokens is not None else 'spacy'} "
         f"real_features={'canonical' if real_h3d_dir is not None else 'packed'} "
         f"model_input={model_input_source} device={device}",
@@ -467,7 +481,7 @@ def main() -> None:
         lengths = batch.lengths[:take]
         texts = batch.texts[:take]
         clip_ids = batch.clip_ids[:take]
-        cond = text_encoder.encode(texts, device=device)
+        cond = text_encoder.encode(texts, device=device) if text_encoder is not None else None
 
         eval_real_x = real_x
         eval_lengths = lengths
@@ -492,13 +506,16 @@ def main() -> None:
         n_text_fallback += n_missing
 
         for variant in variants:
+            if variant != "recon":
+                if masked is None or residual is None or cond is None:
+                    raise RuntimeError(f"variant {variant!r} requires token transformers")
             gen = generate_variant(
                 variant,
                 vqvae=vqvae,
-                masked=masked,
-                residual=residual,
+                masked=masked,  # type: ignore[arg-type]
+                residual=residual,  # type: ignore[arg-type]
                 normalizer=normalizer,
-                cond=cond,
+                cond=cond,  # type: ignore[arg-type]
                 real_x=model_real_x,
                 frame_mask=model_frame_mask,
                 steps=steps,

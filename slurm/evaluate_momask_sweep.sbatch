@@ -70,11 +70,11 @@ enroot start \
         python -m spacy download en_core_web_sm --quiet
         TEXTS_ZIP_ARG=''
         if [ -n '${HUMANML3D_TEXTS_ZIP}' ]; then
-            TEXTS_ZIP_ARG=\"--humanml3d-texts-zip '${HUMANML3D_TEXTS_ZIP}'\"
+            TEXTS_ZIP_ARG=\"--humanml3d-texts-zip ${HUMANML3D_TEXTS_ZIP}\"
         fi
         REAL_H3D_ARG=''
         if [ -n '${REAL_H3D_DIR}' ]; then
-            REAL_H3D_ARG=\"--real-h3d-dir '${REAL_H3D_DIR}'\"
+            REAL_H3D_ARG=\"--real-h3d-dir ${REAL_H3D_DIR}\"
         fi
 
         for ckpt in ${CKPTS}; do

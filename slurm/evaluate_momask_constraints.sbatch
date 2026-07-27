@@ -63,7 +63,7 @@ echo "[momask-constraints] output=${OUTPUT}"
 
 TEXTS_ZIP_ARG=""
 if [ -n "${HUMANML3D_TEXTS_ZIP}" ]; then
-    TEXTS_ZIP_ARG="--humanml3d-texts-zip '${HUMANML3D_TEXTS_ZIP}'"
+    TEXTS_ZIP_ARG="--humanml3d-texts-zip ${HUMANML3D_TEXTS_ZIP}"
 fi
 
 enroot start \
