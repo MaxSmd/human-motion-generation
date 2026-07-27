@@ -223,3 +223,69 @@ Four inference-only attacks, all sweepable as `GuidanceConfig` fields:
    Adam step, instead of a soft penalty whose λ trades off against control
    error; plus a per-arm CFG override, since every arm so far ran w=3.0 and
    stronger text conditioning opposes freezing directly.
+
+### Phase-3 probe (128 clips, jobs 15567/15568)
+
+Floor 0.755 at this scale; `opt30` (optimizer-only, tolerance off) is the
+reference cost of control at **FID 2.867 / avg 0.016 m**. Read every arm
+against those two. New realism columns: foot-skate ratio, root-relative motion
+magnitude (freeze detector), mean jerk — with the GT reference in the last row.
+
+| arm | avg err | Loc | FID | R@1 | skate | mag | jerk | gen s |
+|---|---|---|---|---|---|---|---|---|
+| unguided | 0.669 m | 0.411 | 0.755 | 0.461 | 0.753 | 0.0124 | 0.0074 | 44 |
+| opt30 | 0.016 m | 0.002 | 2.867 | 0.383 | 0.829 | 0.0153 | 0.0140 | 1216 |
+| **trust05** | 0.027 m | 0.005 | **0.786** | 0.469 | 0.793 | 0.0128 | 0.0087 | 1220 |
+| **combo3** | 0.032 m | 0.006 | 0.850 | 0.469 | **0.523** | 0.0106 | 0.0078 | 1306 |
+| dyn500 | 0.021 m | 0.003 | 0.963 | 0.453 | 0.871 | 0.0115 | 0.0087 | 1268 |
+| dyn_skate | 0.020 m | 0.002 | 1.109 | 0.461 | 0.497 | 0.0115 | 0.0090 | 1273 |
+| dyn50 | 0.017 m | 0.003 | 1.232 | 0.453 | 0.823 | 0.0107 | 0.0085 | 1268 |
+| **root** | **0.000 m** | 0.000 | 1.241 | 0.469 | 0.860 | 0.0130 | 0.0083 | **45** |
+| uturn_deep | 0.164 m | 0.073 | 1.050 | 0.367 | 0.703 | 0.0113 | 0.0077 | 865 |
+| uturn_mild | 0.147 m | 0.053 | 1.248 | 0.391 | 0.721 | 0.0122 | 0.0089 | 856 |
+| trust15 | 0.016 m | 0.002 | 2.044 | 0.406 | 0.824 | 0.0142 | 0.0115 | 1220 |
+| skate2 | 0.014 m | 0.000 | 6.031 | 0.328 | 0.675 | 0.0152 | 0.0142 | 1225 |
+| skate20 | 0.014 m | 0.002 | 7.923 | 0.414 | 0.446 | 0.0149 | 0.0140 | 1224 |
+| root_pol | 0.141 m | 0.038 | 11.607 | 0.328 | 0.899 | 0.0180 | 0.0108 | 46 |
+| GT reference | — | — | — | — | 0.242 | 0.0131 | 0.0061 | — |
+
+CFG sweep on the tol5_inline base (job 15568): FID 1.022 / **0.735** / 2.134 /
+4.956 / 8.308 at w = 1.5 / 3.0 / 4.5 / 6.0 / 7.5. Higher CFG monotonically
+worsens FID (and triples jerk: 0.0087 → 0.0305) — it injects jitter, it does
+not restore gait. **w=3.0 confirmed optimal for the guided pass**, so the
+hypothesis in (4) that stronger conditioning opposes freezing is wrong.
+
+**Findings.**
+
+- **The hard trust region is the single best lever.** `trust05` (r = 0.05)
+  collapses the FID cost of control from 2.867 to **0.786 — at the unguided
+  floor (0.755)** — while holding avg err at 0.027 m and *recovering*
+  R-precision to the unguided level (0.383 → 0.469). It is also the simplest
+  change: one projection after each Adam step. Radius matters (trust15 at
+  r = 0.15 is 2.044); bounding drift outright beats the soft `prox_weight`.
+- **The dynamics anchor works and is the motion-space term the diagnosis
+  called for.** `dyn500` reaches FID 0.963 at avg 0.021 m and pulls jerk from
+  0.0140 toward the GT 0.0061. λ is large because the squared-velocity term
+  (~1e-4) has to reach a metre-scale control term.
+- **The geometric foot-skate term is toxic alone** (`skate2`/`skate20` at
+  FID 6–8) but productive once the dynamics anchor stabilizes the pose:
+  `dyn_skate` cuts skate 0.829 → 0.497 at FID 1.109, and `combo3` reaches the
+  best skate among floor-level arms (0.523) at FID 0.850 and the best jerk
+  (0.0078) of any controlled arm. Caveat: the base model already skates 3×
+  more than GT (unguided 0.753 vs 0.242), so foot skate is dominated by the
+  checkpoint, not by control — the term claws back part of a base-model deficit.
+- **Root reparameterization delivers exactly what the closed form promises:**
+  `root` hits avg err **0.000 m** (perfect, not thresholded) at **unguided cost
+  — 45 s vs opt30's 1216 s, a 27× speedup** — and FID 1.241, less than half
+  opt30's. The predicted foot skate from displacing the pelvis under a frozen
+  local pose does show (0.860, just above unguided 0.753) but is small. **The
+  skate polish is ill-posed and abandoned:** with the local pose frozen you
+  cannot reduce skate without moving the root, which breaks the waypoints —
+  `root_pol` degrades everything (avg 0.000 → 0.141, FID 1.24 → 11.6).
+- **U-turn resampling underperforms**: it loosens control to 0.15–0.16 m
+  without buying FID over the cheaper arms, so it is dropped.
+
+512-clip confirmation of `trust05 / dyn500 / dyn_skate / combo3 / root`
+(`control_sweep_improve_confirm.yaml`, job 15875) is pending; the 128-clip
+ordering was order-predictive for the phase-1 sweep, so these are expected to
+stack on the runtime-lever table above.
