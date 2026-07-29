@@ -37,6 +37,9 @@ def main() -> None:
             "generation_steps": meta.get("generation_steps", ""),
             "guidance_scale": meta.get("guidance_scale", ""),
             "temperature": meta.get("temperature", ""),
+            "topk_filter_thres": meta.get("topk_filter_thres", ""),
+            "sample": meta.get("sample", ""),
+            "remask_kept_tokens": meta.get("remask_kept_tokens", ""),
             "fid": metrics.get("fid", ""),
             "r1": r[0] if len(r) > 0 else "",
             "r2": r[1] if len(r) > 1 else "",
@@ -60,7 +63,7 @@ def main() -> None:
 
     print(f"[summary] wrote {out_path}")
     print()
-    print("rank,fid,r1,r2,r3,mm_dist,diversity,guidance,temp,checkpoint")
+    print("rank,fid,r1,r2,r3,mm_dist,diversity,guidance,temp,topk,sample,remask,checkpoint")
     for rank, row in enumerate(rows[:20], start=1):
         ckpt = Path(str(row["checkpoint"])).name
         parent = Path(str(row["checkpoint"])).parent.name
@@ -76,6 +79,9 @@ def main() -> None:
             f"{float(row['diversity']):.4f},"
             f"{row['guidance_scale']},"
             f"{row['temperature']},"
+            f"{row['topk_filter_thres']},"
+            f"{row['sample']},"
+            f"{row['remask_kept_tokens']},"
             f"{parent}/{ckpt}"
         )
 

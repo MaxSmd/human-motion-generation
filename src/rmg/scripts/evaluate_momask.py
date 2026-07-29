@@ -85,6 +85,22 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--generation-steps", type=int, default=None, help="Defaults to checkpoint args.generation_steps.")
     p.add_argument("--guidance-scale", type=float, default=1.0)
     p.add_argument("--temperature", type=float, default=1.0)
+    p.add_argument("--topk-filter-thres", type=float, default=1.0)
+    p.add_argument(
+        "--sample",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Sample tokens from the filtered distribution instead of greedy argmax.",
+    )
+    p.add_argument(
+        "--remask-kept-tokens",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Allow previously accepted base tokens to be masked again. "
+            "Use --no-remask-kept-tokens for the official MoMask-style sampler."
+        ),
+    )
     p.add_argument("--text-encoder", choices=["checkpoint", "random", "clip"], default="checkpoint")
     p.add_argument("--clip-model", default=None, help="Defaults to checkpoint args.clip_model or ViT-B/32.")
     p.add_argument("--clip-cache-dir", default=None)
@@ -350,6 +366,9 @@ def generate_variant(
     steps: int,
     guidance_scale: float,
     temperature: float,
+    topk_filter_thres: float,
+    sample: bool,
+    remask_kept_tokens: bool,
 ) -> Tensor:
     x_norm = normalizer.transform(real_x)
 
@@ -364,13 +383,24 @@ def generate_variant(
         steps=steps,
         guidance_scale=guidance_scale,
         temperature=temperature,
+        topk_filter_thres=topk_filter_thres,
+        sample=sample,
+        remask_kept_tokens=remask_kept_tokens,
         mask=token_mask,
     )
 
     if variant == "base":
         tokens = base.unsqueeze(1)
     elif variant == "full":
-        tokens = residual.generate_residuals(base, cond=cond, guidance_scale=guidance_scale, mask=token_mask)
+        tokens = residual.generate_residuals(
+            base,
+            cond=cond,
+            guidance_scale=guidance_scale,
+            temperature=temperature,
+            topk_filter_thres=topk_filter_thres,
+            sample=sample,
+            mask=token_mask,
+        )
     else:
         raise ValueError(f"unknown variant {variant!r}")
 
@@ -521,6 +551,9 @@ def main() -> None:
                 steps=steps,
                 guidance_scale=args.guidance_scale,
                 temperature=args.temperature,
+                topk_filter_thres=args.topk_filter_thres,
+                sample=args.sample,
+                remask_kept_tokens=args.remask_kept_tokens,
             )
             gen_embs[variant].append(encode_motion(evaluator, gen, eval_lengths))
 
@@ -542,6 +575,9 @@ def main() -> None:
             "generation_steps": steps,
             "guidance_scale": args.guidance_scale,
             "temperature": args.temperature,
+            "topk_filter_thres": args.topk_filter_thres,
+            "sample": args.sample,
+            "remask_kept_tokens": args.remask_kept_tokens,
             "evaluator": args.evaluator,
             "real_feature_source": "canonical" if real_h3d_dir is not None else "packed",
             "real_h3d_dir": str(real_h3d_dir) if real_h3d_dir is not None else None,

@@ -18,6 +18,24 @@ def cosine_mask_ratio(step: int, total_steps: int) -> float:
     return math.cos(math.pi * tau / 2.0)
 
 
+def top_k_logits(logits: Tensor, thres: float = 0.9) -> Tensor:
+    """Keep the highest-probability tail used by the official MoMask sampler."""
+    if thres >= 1.0:
+        return logits
+    if thres < 0.0:
+        raise ValueError("top-k filter threshold must be non-negative")
+    k = max(1, math.ceil((1.0 - thres) * logits.shape[-1]))
+    values, indices = logits.topk(k, dim=-1)
+    out = torch.full_like(logits, float("-inf"))
+    return out.scatter(-1, indices, values)
+
+
+def sample_logits(logits: Tensor, *, temperature: float = 1.0, topk_filter_thres: float = 1.0) -> Tensor:
+    filtered = top_k_logits(logits, topk_filter_thres)
+    probs = F.softmax(filtered / max(temperature, 1e-6), dim=-1)
+    return torch.distributions.Categorical(probs=probs).sample()
+
+
 @dataclass
 class TokenTransformerConfig:
     vocab_size: int = 512
@@ -145,6 +163,9 @@ class MaskedMotionTransformer(_TransformerBackbone):
         steps: int = 10,
         guidance_scale: float = 4.0,
         temperature: float = 1.0,
+        topk_filter_thres: float = 1.0,
+        sample: bool = False,
+        remask_kept_tokens: bool = True,
         mask: Tensor | None = None,
     ) -> Tensor:
         if cond is not None:
@@ -157,7 +178,6 @@ class MaskedMotionTransformer(_TransformerBackbone):
         unknown = torch.ones(B, seq_len, dtype=torch.bool, device=device)
         if mask is not None:
             unknown = unknown & mask
-
         for step in range(1, steps + 1):
             logits_c = self(tokens, cond=cond, mask=mask)
             if guidance_scale != 1.0 and cond is not None:
@@ -165,18 +185,24 @@ class MaskedMotionTransformer(_TransformerBackbone):
                 logits = logits_u + guidance_scale * (logits_c - logits_u)
             else:
                 logits = logits_c
-            probs = (logits / max(temperature, 1e-6)).softmax(dim=-1)
-            conf, pred = probs.max(dim=-1)
+            pred = (
+                sample_logits(logits, temperature=temperature, topk_filter_thres=topk_filter_thres)
+                if sample
+                else logits.argmax(dim=-1)
+            )
             tokens = torch.where(unknown, pred, tokens)
+            conf = logits.softmax(dim=-1).gather(2, pred.unsqueeze(-1)).squeeze(-1)
+            if not remask_kept_tokens:
+                conf = conf.masked_fill(~unknown, 1e5)
 
             ratio = cosine_mask_ratio(step, steps)
             next_unknown = torch.zeros_like(unknown)
             for i in range(B):
                 active = mask[i] if mask is not None else torch.ones(seq_len, dtype=torch.bool, device=device)
-                n_remask = int(math.floor(active.sum().item() * ratio))
+                n_remask = int(round(active.sum().item() * ratio))
                 if n_remask > 0:
-                    scores = conf[i].masked_fill(~active, float("inf"))
-                    remask = scores.argsort()[:n_remask]
+                    scores_i = conf[i].masked_fill(~active, float("inf"))
+                    remask = scores_i.argsort()[:n_remask]
                     next_unknown[i, remask] = True
             tokens[next_unknown] = self.mask_token_id
             unknown = next_unknown
@@ -255,6 +281,9 @@ class ResidualTransformer(_TransformerBackbone):
         cond: Tensor | None,
         num_quantizers: int | None = None,
         guidance_scale: float = 4.0,
+        temperature: float = 1.0,
+        topk_filter_thres: float = 1.0,
+        sample: bool = False,
         mask: Tensor | None = None,
     ) -> Tensor:
         tokens = base_tokens.unsqueeze(1)
@@ -266,6 +295,10 @@ class ResidualTransformer(_TransformerBackbone):
                 logits = logits_u + guidance_scale * (logits_c - logits_u)
             else:
                 logits = logits_c
-            next_tokens = logits.argmax(dim=-1)
+            next_tokens = (
+                sample_logits(logits, temperature=temperature, topk_filter_thres=topk_filter_thres)
+                if sample
+                else logits.argmax(dim=-1)
+            )
             tokens = torch.cat([tokens, next_tokens.unsqueeze(1)], dim=1)
         return tokens

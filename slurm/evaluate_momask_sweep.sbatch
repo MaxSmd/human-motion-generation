@@ -31,6 +31,9 @@ VARIANTS="${VARIANTS:-full}"
 GENERATION_STEPS="${GENERATION_STEPS:-10}"
 GUIDANCE_SCALES="${GUIDANCE_SCALES:-1 2 4 6}"
 TEMPERATURES="${TEMPERATURES:-0.7 1.0}"
+TOPK_FILTER_THRES="${TOPK_FILTER_THRES:-1.0}"
+SAMPLE="${SAMPLE:-0}"
+REMASK_KEPT_TOKENS="${REMASK_KEPT_TOKENS:-1}"
 TEXT_ENCODER="${TEXT_ENCODER:-checkpoint}"
 CLIP_MODEL="${CLIP_MODEL:-}"
 CLIP_CACHE_DIR="${CLIP_CACHE_DIR:-${HF_CACHE}}"
@@ -50,6 +53,7 @@ echo "[momask-sweep] output_dir=${OUTPUT_DIR}"
 echo "[momask-sweep] max_clips=${MAX_CLIPS} variants=${VARIANTS} steps=${GENERATION_STEPS}"
 echo "[momask-sweep] guidance=${GUIDANCE_SCALES}"
 echo "[momask-sweep] temperatures=${TEMPERATURES}"
+echo "[momask-sweep] sample=${SAMPLE} topk_filter_thres=${TOPK_FILTER_THRES} remask_kept_tokens=${REMASK_KEPT_TOKENS}"
 echo "[momask-sweep] ckpts=${CKPTS}"
 
 enroot start \
@@ -76,6 +80,17 @@ enroot start \
         if [ -n '${REAL_H3D_DIR}' ]; then
             REAL_H3D_ARG=\"--real-h3d-dir ${REAL_H3D_DIR}\"
         fi
+        SAMPLING_ARGS=''
+        if [ '${SAMPLE}' = '1' ]; then
+            SAMPLING_ARGS=\"\${SAMPLING_ARGS} --sample\"
+        else
+            SAMPLING_ARGS=\"\${SAMPLING_ARGS} --no-sample\"
+        fi
+        if [ '${REMASK_KEPT_TOKENS}' = '1' ]; then
+            SAMPLING_ARGS=\"\${SAMPLING_ARGS} --remask-kept-tokens\"
+        else
+            SAMPLING_ARGS=\"\${SAMPLING_ARGS} --no-remask-kept-tokens\"
+        fi
 
         for ckpt in ${CKPTS}; do
             if [ ! -f \"\${ckpt}\" ]; then
@@ -90,6 +105,7 @@ enroot start \
             for guidance in ${GUIDANCE_SCALES}; do
                 for temp in ${TEMPERATURES}; do
                     tag=\"\${ckpt_dir}_\${ckpt_base}_g\${guidance}_t\${temp}\"
+                    tag=\"\${tag}_topk${TOPK_FILTER_THRES}_sample${SAMPLE}_remask${REMASK_KEPT_TOKENS}\"
                     tag=\"\${tag//./p}\"
                     out=\"${OUTPUT_DIR}/\${tag}.json\"
                     echo \"[momask-sweep] evaluating ckpt=\${ckpt} guidance=\${guidance} temp=\${temp} out=\${out}\"
@@ -112,6 +128,8 @@ enroot start \
                         --clip-backend '${CLIP_BACKEND}' \
                         --guidance-scale \"\${guidance}\" \
                         --temperature \"\${temp}\" \
+                        --topk-filter-thres ${TOPK_FILTER_THRES} \
+                        \${SAMPLING_ARGS} \
                         --evaluator '${EVALUATOR}' \
                         --output \"\${out}\"
                 done

@@ -37,6 +37,9 @@ MIN_SEQ_LEN="${MIN_SEQ_LEN:-40}"
 VARIANTS="${VARIANTS:-full,base}"
 GUIDANCE_SCALE="${GUIDANCE_SCALE:-1.0}"
 TEMPERATURE="${TEMPERATURE:-1.0}"
+TOPK_FILTER_THRES="${TOPK_FILTER_THRES:-1.0}"
+SAMPLE="${SAMPLE:-0}"
+REMASK_KEPT_TOKENS="${REMASK_KEPT_TOKENS:-1}"
 GENERATION_STEPS="${GENERATION_STEPS:-}"
 TEXT_ENCODER="${TEXT_ENCODER:-checkpoint}"
 CLIP_MODEL="${CLIP_MODEL:-}"
@@ -60,6 +63,7 @@ echo "[momask-eval] real_h3d_dir=${REAL_H3D_DIR:-<packed>}"
 echo "[momask-eval] ckpt=${CKPT}"
 echo "[momask-eval] max_clips=${MAX_CLIPS} batch_size=${BATCH_SIZE} variants=${VARIANTS}"
 echo "[momask-eval] generation_steps=${GENERATION_STEPS:-checkpoint-default}"
+echo "[momask-eval] sample=${SAMPLE} topk_filter_thres=${TOPK_FILTER_THRES} remask_kept_tokens=${REMASK_KEPT_TOKENS}"
 echo "[momask-eval] text_encoder=${TEXT_ENCODER} clip_model=${CLIP_MODEL:-checkpoint-default} clip_backend=${CLIP_BACKEND}"
 echo "[momask-eval] output=${OUTPUT}"
 
@@ -82,6 +86,18 @@ fi
 REAL_H3D_ARG=""
 if [ -n "${REAL_H3D_DIR}" ]; then
     REAL_H3D_ARG="--real-h3d-dir ${REAL_H3D_DIR}"
+fi
+
+SAMPLING_ARGS=""
+if [ "${SAMPLE}" = "1" ]; then
+    SAMPLING_ARGS="${SAMPLING_ARGS} --sample"
+else
+    SAMPLING_ARGS="${SAMPLING_ARGS} --no-sample"
+fi
+if [ "${REMASK_KEPT_TOKENS}" = "1" ]; then
+    SAMPLING_ARGS="${SAMPLING_ARGS} --remask-kept-tokens"
+else
+    SAMPLING_ARGS="${SAMPLING_ARGS} --no-remask-kept-tokens"
 fi
 
 enroot start \
@@ -118,6 +134,8 @@ enroot start \
             --clip-backend '${CLIP_BACKEND}' \
             --guidance-scale ${GUIDANCE_SCALE} \
             --temperature ${TEMPERATURE} \
+            --topk-filter-thres ${TOPK_FILTER_THRES} \
+            ${SAMPLING_ARGS} \
             --evaluator '${EVALUATOR}' \
             --output '${OUTPUT}'
     "
