@@ -3,9 +3,9 @@
 #
 # Requires a trained stage-1 AE checkpoint whose `ae:` block matches the one
 # below (architecture must agree to load the weights):
-#   python scripts/train_mardm.py ae_checkpoint=runs/mardm-ae-XXXX/checkpoints/latest.pt
+#   python -m mardm.scripts.train_mardm ae_checkpoint=runs/mardm-ae-XXXX/checkpoints/latest.pt
 #
-# Local smoke (random text encoder, CPU): see scripts/train_mardm.py docstring.
+# Local smoke (random text encoder, CPU): see mardm/scripts/train_mardm.py docstring.
 
 defaults:
   - /data: local_submodule
@@ -18,7 +18,11 @@ deterministic: false
 
 stats_path: ${oc.env:MARDM_STATS,${hydra:runtime.cwd}/external/data/mardm_essential_stats.pt}
 ae_checkpoint: ???              # stage-1 AE checkpoint (required)
-ae_use_ema: true                # load the AE's EMA weights for the frozen encoder
+# Use the AE's LIVE weights, not EMA: on short runs (e.g. the overfit smoke,
+# ~3k AE steps) EMA decay 0.9999 (~7k-step half-life) leaves the EMA ~70%
+# random init, which decodes to garbage. Live weights are the well-trained ones.
+# (For long full-data AE training EMA is fine; flip to true there if desired.)
+ae_use_ema: false
 
 # Deterministic dataset subset (overfit smoke / debugging). subset_frac takes
 # precedence over limit_clips. Both apply to train AND val splits.

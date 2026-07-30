@@ -16,7 +16,6 @@
 #
 # Hyperparameters (vs. a normal run):
 #   * subset_frac=0.005 (overridable via SUBSET_FRAC)
-#   * data.mirror_augment=false (don't perturb the small set)
 #   * data.preload=true         (encodes the ~56 clips into RAM once at init;
 #                                the train script auto-forces num_workers=0
 #                                because workers + preload is pickle-overhead
@@ -26,8 +25,8 @@
 #   * model.cond_drop_prob=0 (no CFG dropout — let it memorize text→motion)
 #   * model.dropout=0           (transformer dropout off)
 #
-# Submit:  sbatch slurm/overfit_mardm.sbatch
-# Override the subset: SUBSET_FRAC=0.01 sbatch slurm/overfit_mardm.sbatch
+# Submit:  sbatch slurm/mardm/overfit_mardm.sbatch
+# Override the subset: SUBSET_FRAC=0.01 sbatch slurm/mardm/overfit_mardm.sbatch
 # Override step counts: AE_STEPS=5000 GEN_STEPS=10000 sbatch ...
 
 set -euo pipefail
@@ -48,6 +47,13 @@ MARDM_STATS="${MARDM_STATS:-${RUNS_ROOT}/mardm_essential_stats.pt}"
 SUBSET_FRAC="${SUBSET_FRAC:-0.005}"
 AE_STEPS="${AE_STEPS:-3000}"
 GEN_STEPS="${GEN_STEPS:-5000}"
+# CFG dropout: must be >0 so the model learns a conditional-vs-unconditional
+# contrast and generation can be driven by the caption with guidance>1. (0 only
+# memorizes the context shortcut -> generation ignores text / collapses.)
+COND_DROP="${COND_DROP:-0.1}"
+# Min LR as a fraction of peak; raise (e.g. 0.3) for longer runs so the schedule
+# doesn't floor out early and stall the loss.
+MIN_LR_RATIO="${MIN_LR_RATIO:-0.1}"
 
 STAMP="${SLURM_JOB_ID:-$(date +%Y%m%d-%H%M%S)}"
 AE_RUN="mardm-overfit-ae-${STAMP}"
@@ -84,7 +90,6 @@ enroot start \
         python -u -m mardm.scripts.train_mardm_ae \\
             run_name='${AE_RUN}' \\
             subset_frac=${SUBSET_FRAC} \\
-            data.mirror_augment=false \\
             data.preload=true \\
             train.micro_batch_size=16 \\
             train.grad_accum=1 \\
@@ -99,12 +104,12 @@ enroot start \
             ae_checkpoint='${AE_OUT}/checkpoints/latest.pt' \\
             text_encoder.type=qwen3 \\
             subset_frac=${SUBSET_FRAC} \\
-            data.mirror_augment=false \\
             data.preload=true \\
             train.micro_batch_size=16 \\
             train.grad_accum=1 \\
-            model.cond_drop_prob=0 \\
+            model.cond_drop_prob=${COND_DROP} \\
             model.dropout=0 \\
+            train.scheduler.min_lr_ratio=${MIN_LR_RATIO} \\
             train.max_steps=${GEN_STEPS} \\
             train.val_every=$((GEN_STEPS / 4)) \\
             train.ckpt_every=${GEN_STEPS} \\

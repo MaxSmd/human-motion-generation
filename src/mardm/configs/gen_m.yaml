@@ -3,14 +3,14 @@
 # configs in Table A5 of Meng et al. 2025: 12-head 768-dim transformer with a
 # single layer, paired with an 8-layer 1280-dim DiffMLPs head).
 #
-# Pairs with the mini AE checkpoint from configs/mardm/ae.yaml (the AE is
+# Pairs with the mini AE checkpoint from src/mardm/configs/ae.yaml (the AE is
 # paper-faithful and unchanged across model sizes).
 #
 # Launch:
 #   sbatch --export=ALL,AE_CKPT=/path/to/mardm-ae-XXXX/checkpoints/latest.pt \
-#       slurm/train_mardm.sbatch +experiment=gen_m
+#       slurm/mardm/train_mardm.sbatch +experiment=gen_m
 # or directly:
-#   python scripts/train_mardm.py --config-name=gen_m \
+#   python -m mardm.scripts.train_mardm --config-name=gen_m \
 #       ae_checkpoint=runs/mardm-ae-10104/checkpoints/latest.pt
 
 defaults:
@@ -24,7 +24,7 @@ deterministic: false
 
 stats_path: ${oc.env:MARDM_STATS,${hydra:runtime.cwd}/external/data/mardm_essential_stats.pt}
 ae_checkpoint: ???              # stage-1 AE checkpoint (required)
-ae_use_ema: true                # load the AE's EMA weights for the frozen encoder
+ae_use_ema: true                # paper-M AE trains long (~2h) → EMA is fully baked; keep it
 
 # Deterministic dataset subset (overfit smoke / debugging). subset_frac takes
 # precedence over limit_clips. Both apply to train AND val splits.
@@ -63,7 +63,7 @@ text_encoder:
 
 train:
   # max_steps is a placeholder for the 1-day-per-model budget. Run a 500-step
-  # throughput probe first (see header comment in slurm/train_mardm.sbatch),
+  # throughput probe first (see header comment in slurm/mardm/train_mardm.sbatch),
   # then set max_steps ≈ steps_per_s * 84_000 (23h25m, leaves headroom under
   # the 23h55m wall-clock limit).
   max_steps: 200_000

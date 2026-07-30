@@ -2,11 +2,11 @@
 # MARDM AutoEncoder (stage 1) — scaled-down "mini" config.
 #
 # Compose with a data layout (defaults to the in-repo submodule):
-#   python scripts/train_mardm_ae.py
-#   python scripts/train_mardm_ae.py +data=cluster_mounted
+#   python -m mardm.scripts.train_mardm_ae
+#   python -m mardm.scripts.train_mardm_ae +data=cluster_mounted
 #
 # Local smoke (CPU, tiny):
-#   python scripts/train_mardm_ae.py data.root=/tmp/synth \
+#   python -m mardm.scripts.train_mardm_ae data.root=/tmp/synth \
 #       train.max_steps=20 train.micro_batch_size=4 train.grad_accum=1 \
 #       train.precision=fp32 logging.use_wandb=false logging.use_tensorboard=false
 

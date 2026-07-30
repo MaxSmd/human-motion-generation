@@ -5,7 +5,7 @@ the gen model was trained with one normalization and the eval uses another,
 which scrambles latents and tanks the metrics silently.
 
 Usage (inside the container, on the cluster):
-    python scripts/diagnose_stats.py \
+    python -m mardm.scripts.diagnose_stats \
         --data-root external/data/humanml3d_packed \
         --stats ~/rmg-runs/mardm_essential_stats.pt
 """
@@ -36,7 +36,7 @@ def main() -> None:
         old_mean, old_std = blob
 
     print(f"[diag] recomputing stats over {args.max_clips} train clips ...")
-    raw_ds = EssentialDataset(args.data_root, "train", mirror_augment=False, min_seq_len=10)
+    raw_ds = EssentialDataset(args.data_root, "train", min_seq_len=10)
     new_mean, new_std = compute_essential_stats(raw_ds, max_clips=args.max_clips)
 
     dm = (old_mean - new_mean).abs().max().item()

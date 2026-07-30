@@ -12,7 +12,7 @@ This is the "is the bridge broken at all" test, separate from "is the model
 good." If this comes back bad, paper-S retraining will not help.
 
 Usage (inside the container, on the cluster):
-    python scripts/diagnose_ik_roundtrip.py \
+    python -m mardm.scripts.diagnose_ik_roundtrip \
         --data-root external/data/humanml3d_packed \
         --max-clips 500
 """

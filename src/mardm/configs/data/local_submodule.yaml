@@ -16,15 +16,23 @@ offsets_name: target_offsets.pt
 fps: 20
 max_seq_len: 196            # HumanML3D upper bound (~10 s @ 20 fps)
 min_seq_len: 40
-mirror_augment: true        # left/right swap augmentation (paper-standard)
+# Mirror augmentation comes from the packed data itself: every clip ships as
+# `<id>` + `M<id>` (left/right-swapped captions), both listed in the splits.
+# No runtime flipping.
 
 # Dataloader
 num_workers: 4
 pin_memory: true
 persistent_workers: true
 prefetch_factor: 4
-# Preload encoded features into RAM at dataset init (~600 MB unmirrored / 1.2 GB
-# mirrored). Eliminates the per-step encode pipeline (zip read + FK + quat math)
+# Preload encoded features into RAM at dataset init (~600 MB). Eliminates the
+# per-step encode pipeline (zip read + FK + quat math)
 # which otherwise pins GPU util at ~5%. Default off to keep tests and tiny smoke
 # runs fast; flip on for full-dataset training.
 preload: false
+
+# Canonical-features mode: dir with new_joint_vecs/<clip_id>.npy files (from
+# `prepare_humanml3d features`). When set, x1 = file[:, :67] — no pack-time IK
+# in the training distribution. Implies preload. Compute stats with the same
+# flag (compute_mardm_stats --canonical-dir) or they won't match.
+canonical_dir: null

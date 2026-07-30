@@ -6,7 +6,7 @@ the *frozen* AE's latents, conditioned on text features. Per step: encode text
 m_lens // downsample)`.
 
 Usage (local smoke, CPU, random text encoder + the tiny AE smoke checkpoint):
-    python scripts/train_mardm.py data.root=/tmp/synth stats_path=/tmp/synth/stats.pt \\
+    python -m mardm.scripts.train_mardm data.root=/tmp/synth stats_path=/tmp/synth/stats.pt \\
         ae_checkpoint=/tmp/mardm_ae_smoke/checkpoints/latest.pt \\
         ae.width=32 ae.output_emb_width=16 ae.depth=2 \\
         text_encoder.type=random text_encoder.text_dim=64 \\
@@ -16,7 +16,7 @@ Usage (local smoke, CPU, random text encoder + the tiny AE smoke checkpoint):
         data.num_workers=0 logging.use_wandb=false logging.use_tensorboard=false
 
 Usage (cluster):
-    python scripts/train_mardm.py ae_checkpoint=runs/mardm-ae-XXXX/checkpoints/latest.pt \\
+    python -m mardm.scripts.train_mardm ae_checkpoint=runs/mardm-ae-XXXX/checkpoints/latest.pt \\
         +data=cluster_mounted text_encoder.type=qwen3
 """
 
@@ -55,7 +55,7 @@ def _load_stats(stats_path: str | Path) -> tuple[torch.Tensor, torch.Tensor]:
     p = Path(stats_path)
     if not p.exists():
         raise FileNotFoundError(
-            f"essential mean/std not found at {p}. Run scripts/compute_mardm_stats.py first."
+            f"essential mean/std not found at {p}. Run `python -m mardm.scripts.compute_mardm_stats` first."
         )
     blob = torch.load(p, weights_only=True)
     return blob["mean"], blob["std"]
@@ -77,7 +77,7 @@ def _build_text_encoder(cfg: DictConfig) -> TextEncoder:
 def _load_frozen_ae(cfg: DictConfig, device: torch.device) -> AE:
     ae = AE(AEConfig(**OmegaConf.to_container(cfg.ae, resolve=True))).to(device)
     state = load_checkpoint(Path(cfg.ae_checkpoint), map_location=device)
-    ae.load_state_dict(state.model)
+    ae.load_state_dict(state.model, strict=False)  # tolerate pre-latent_scale checkpoints
     if cfg.ae_use_ema and state.ema is not None:
         ema = EMA(ae, decay=0.0)
         ema.load_state_dict(state.ema)
@@ -91,23 +91,25 @@ def _load_frozen_ae(cfg: DictConfig, device: torch.device) -> AE:
     return ae
 
 
-def _build_dataset(cfg: DictConfig, split: str, mean, std, mirror: bool) -> EssentialDataset:
+def _build_dataset(cfg: DictConfig, split: str, mean, std) -> EssentialDataset:
     return EssentialDataset(
         root=cfg.data.root, split=split, mean=mean, std=std, window_size=None,
-        mirror_augment=mirror, max_seq_len=cfg.data.max_seq_len, min_seq_len=cfg.data.min_seq_len,
+        max_seq_len=cfg.data.max_seq_len, min_seq_len=cfg.data.min_seq_len,
         subset_frac=cfg.get("subset_frac"), limit_clips=cfg.get("limit_clips"),
         zip_name=cfg.data.zip_name, splits_name=cfg.data.splits_name, offsets_name=cfg.data.offsets_name,
         preload=cfg.data.get("preload", False),
+        canonical_dir=cfg.data.get("canonical_dir"),
     )
 
 
-def _build_loader(ds: EssentialDataset, cfg: DictConfig, shuffle: bool) -> DataLoader:
+def _build_loader(ds: EssentialDataset, cfg: DictConfig, shuffle: bool,
+                  drop_last: bool = True) -> DataLoader:
     return DataLoader(
         ds, batch_size=cfg.train.micro_batch_size, shuffle=shuffle, collate_fn=collate,
         num_workers=cfg.data.num_workers, pin_memory=cfg.data.pin_memory,
         persistent_workers=cfg.data.persistent_workers and cfg.data.num_workers > 0,
         prefetch_factor=cfg.data.prefetch_factor if cfg.data.num_workers > 0 else None,
-        worker_init_fn=worker_init_fn, drop_last=True,
+        worker_init_fn=worker_init_fn, drop_last=drop_last,
     )
 
 
@@ -146,7 +148,11 @@ def _validate(ae, mardm, text_encoder, loader, device, max_batches: int) -> floa
         total += float(_step_loss(ae, mardm, text_encoder, batch, device))
         n += 1
     mardm.train()
-    return total / max(n, 1)
+    if n == 0:
+        print("[gen] WARNING: validation loader yielded 0 batches — val split "
+              "too small for the batch size (check subset_frac). Reporting nan.", flush=True)
+        return float("nan")
+    return total / n
 
 
 @hydra.main(config_path="../configs", config_name="gen", version_base=None)
@@ -178,8 +184,10 @@ def main(cfg: DictConfig) -> None:
         **OmegaConf.to_container(cfg.model, resolve=True),
     )).to(device)
 
-    train_iter = _infinite(_build_loader(_build_dataset(cfg, "train", mean, std, cfg.data.mirror_augment), cfg, True))
-    val_loader = _build_loader(_build_dataset(cfg, "val", mean, std, False), cfg, False)
+    train_iter = _infinite(_build_loader(_build_dataset(cfg, "train", mean, std), cfg, True))
+    # drop_last=False: a small (e.g. overfit-subset) val split must still yield a
+    # batch — otherwise _validate iterates 0 batches and silently reports loss 0.
+    val_loader = _build_loader(_build_dataset(cfg, "val", mean, std), cfg, False, drop_last=False)
 
     o = cfg.train.optimizer
     opt = torch.optim.AdamW(mardm.parameters(), lr=o.lr, betas=tuple(o.betas),
@@ -253,6 +261,8 @@ def main(cfg: DictConfig) -> None:
                 "grad_norm": float(grad_norm),
                 "steps_per_s": cfg.train.log_every / max(now - t_last, 1e-9),
             }, step=step)
+            print(f"[gen] step {step}: loss={accum_loss * cfg.train.grad_accum:.4f} "
+                  f"lr={sched.get_last_lr()[0]:.2e}", flush=True)
             t_last = now
 
         if step % cfg.train.val_every == 0 or step == cfg.train.max_steps:

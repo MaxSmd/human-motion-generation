@@ -1,6 +1,6 @@
 """Evaluate a MARDM checkpoint on HumanML3D (HumanML3D format) via the Guo evaluator.
 
-Pipeline (mirrors scripts/evaluate.py, swapping RMG's manifold sampler for the
+Pipeline (mirrors rmg.scripts.evaluate, swapping RMG's manifold sampler for the
 MARDM generation task):
   1. Load the generation-branch checkpoint (EMA) + the frozen AE + text encoder.
   2. Iterate the test split. Real motions are featurized to true 263-D from the
@@ -10,7 +10,7 @@ MARDM generation task):
      Diversity, MultiModality. Optionally sweep classifier-free guidance.
 
 Run (cluster):
-    python scripts/evaluate_mardm.py +data=cluster_mounted \\
+    python -m mardm.scripts.evaluate_mardm +data=cluster_mounted \\
         ae_checkpoint=runs/mardm-ae-XXXX/checkpoints/latest.pt \\
         eval.checkpoint=runs/mardm-gen-YYYY/checkpoints/latest.pt \\
         eval.evaluator=real text_encoder.type=qwen3
@@ -43,7 +43,11 @@ from shared.eval import (
     multimodality,
     r_precision,
 )
-from shared.geometry import Skeleton, tplusr_to_h3d_features_with_quats
+from shared.geometry import (
+    Skeleton,
+    tplusr_to_h3d_features_with_quats,
+    tplusr_to_h3d_features_upstream,
+)
 from shared.text import Qwen3EmbeddingEncoder, RandomTextEncoder
 from shared.utils import EMA, load_checkpoint, set_seed
 
@@ -73,7 +77,7 @@ def _build_text_encoder(cfg: DictConfig):
 def _load_frozen_ae(cfg: DictConfig, device: torch.device) -> AE:
     ae = AE(AEConfig(**OmegaConf.to_container(cfg.ae, resolve=True))).to(device)
     state = load_checkpoint(Path(cfg.ae_checkpoint), map_location=device)
-    ae.load_state_dict(state.model)
+    ae.load_state_dict(state.model, strict=False)  # tolerate pre-latent_scale checkpoints
     if cfg.ae_use_ema and state.ema is not None:
         ema = EMA(ae, decay=0.0)
         ema.load_state_dict(state.ema)
@@ -100,9 +104,12 @@ def _load_mardm(cfg: DictConfig, ae: AE, device: torch.device) -> MARDM:
     return mardm
 
 
-def _real_h3d(x1: torch.Tensor, length: int, skeleton: Skeleton) -> torch.Tensor:
+def _real_h3d(x1: torch.Tensor, length: int, skeleton: Skeleton,
+              use_upstream: bool = False) -> torch.Tensor:
     """T+R sample -> true (length-1, 263) HumanML3D feature."""
     tpr = decode(x1[:length])
+    if use_upstream:
+        return tplusr_to_h3d_features_upstream(tpr.translation, tpr.quaternions, skeleton)
     return tplusr_to_h3d_features_with_quats(tpr.translation, tpr.quaternions, skeleton)
 
 
@@ -111,6 +118,81 @@ def _pad_stack(feats: list[torch.Tensor], dim: int = 263) -> torch.Tensor:
     out = torch.zeros(len(feats), tmax, dim)
     for i, f in enumerate(feats):
         out[i, : f.shape[0]] = f
+    return out
+
+
+def _build_calibration(loader, skeleton, evaluator, device, max_clips: int = 512,
+                       use_upstream: bool = False):
+    """Per-channel affine mapping OUR real 263-D feature moments onto the
+    evaluator's expected (canonical) moments.
+
+    Our AMASS-reprocessed pipeline produces root/foot channels at a different
+    scale than HumanML3D's official `new_joint_vecs` (the Guo evaluator's
+    training distribution) — e.g. root linear-vel/height ~27x, root ang-vel and
+    foot contacts off too. After the evaluator's own (x-mean)/std these channels
+    blow up and swamp the embedding (diversity_real ~6.4 vs ~9.5, R@1 at chance).
+
+    We compute per-channel (mean, std) of our REAL features and remap them to the
+    evaluator's (mean, std): x' = (x - mu_our)/sd_our * sd_ev + mu_ev. Derived
+    from real data only, applied identically to real and gen, so it advantages
+    neither — a domain calibration, not a fit to the metric.
+    """
+    feats, n = [], 0
+    for batch in loader:
+        x1 = batch.x1.to(device)
+        for i in range(x1.shape[0]):
+            feats.append(_real_h3d(x1[i], int(batch.lengths[i]), skeleton,
+                                   use_upstream=use_upstream).detach().cpu())
+            n += 1
+            if n >= max_clips:
+                break
+        if n >= max_clips:
+            break
+    allf = torch.cat(feats, 0)
+    mu_our = allf.mean(0)
+    sd_our = allf.std(0).clamp_min(1e-6)
+    mu_ev = evaluator._mean.detach().cpu()
+    sd_ev = evaluator._std.detach().cpu()
+    print(f"[eval] calibration built from {n} real clips "
+          f"(max std_ratio our/ev = {float((sd_our / sd_ev.clamp_min(1e-6)).max()):.1f})",
+          flush=True)
+    return mu_our, sd_our, mu_ev, sd_ev
+
+
+def _calibrate(feat: torch.Tensor, calib) -> torch.Tensor:
+    if calib is None:
+        return feat
+    dev = feat.device
+    mu_our, sd_our, mu_ev, sd_ev = (t.to(dev) for t in calib)
+    return (feat - mu_our) / sd_our * sd_ev + mu_ev
+
+
+def _load_caption_tokens(humanml3d_repo: str | Path) -> dict[str, dict[str, list[str]]]:
+    """clip_id -> {caption_text: [word/POS tokens]} from HumanML3D's texts.zip.
+
+    Each line is `<caption>#<word/POS word/POS ...>#<start>#<end>`. The Guo text
+    encoder was trained on those custom *_VIP POS tags; fresh spaCy tagging
+    produces vanilla tags and silently tanks R-precision.
+    """
+    import zipfile
+    zp = Path(humanml3d_repo) / "HumanML3D" / "texts.zip"
+    out: dict[str, dict[str, list[str]]] = {}
+    with zipfile.ZipFile(zp) as zf:
+        for name in zf.namelist():
+            if not name.endswith(".txt"):
+                continue
+            cid = Path(name).stem
+            d: dict[str, list[str]] = {}
+            for line in zf.read(name).decode("utf-8").splitlines():
+                parts = line.strip().split("#")
+                if len(parts) < 2:
+                    continue
+                cap, toks = parts[0].strip(), parts[1].strip().split()
+                if cap and toks:
+                    d[cap] = toks
+            if d:
+                out[cid] = d
+    print(f"[eval] loaded VIP caption tokens for {len(out)} clips from texts.zip", flush=True)
     return out
 
 
@@ -123,14 +205,32 @@ def main(cfg: DictConfig) -> None:
         "evaluator": "random",                 # real | random
         "text_to_motion_repo": "external/text-to-motion",
         "humanml3d_repo": "external/HumanML3D",
-        "guidance_scales": [4.5],              # paper's HumanML3D CFG scale
-        "timesteps": 10,                       # masked-AR iterations
+        "guidance_scales": [2.0],              # CFG scale (Qwen3 cond is weaker than CLIP; sweep lower)
+        "timesteps": 18,                       # masked-AR iterations (upstream evaluation_MARDM default)
         "batch_size": 32,
         "max_clips": -1,
         "mm_num_texts": 30,
         "mm_repeats": 10,
         "diversity_times": 300,
         "seed": 0,
+        "use_upstream_features": True,         # featurize via HumanML3D's process_file (canonical)
+        "calibrate": False,                    # per-channel moment match (hurt; off by default)
+        "calib_clips": 512,                    # real clips used to estimate the calibration
+        "skip_gen": False,                     # real-only diagnosis: harness R@1 ceiling, no sampling
+        "vip_tokens": True,                     # encode captions via HumanML3D VIP word/POS tokens
+        # Dir with canonical new_joint_vecs/<clip_id>.npy (prepare_humanml3d
+        # `features` stage). When set, REAL motions use these files — the Guo
+        # evaluator's actual training distribution — instead of features
+        # reconstructed from the packed IK representation. Clips without a file
+        # fall back to reconstruction (counted + reported).
+        "real_h3d_dir": "",
+        # With real_h3d_dir set: ALSO embed the packed-reconstruction features
+        # for every real clip and report fid_recon_floor = FID(canonical,
+        # reconstructed). This is the feature-fidelity floor: a generator that
+        # perfectly reproduced its (packed-derived) training distribution
+        # cannot score a better FID than this against canonical features.
+        # Combine with skip_gen=true for a sampling-free diagnostic run.
+        "diag_recon_fid": False,
     })
     cfg.eval = OmegaConf.merge(eval_cfg, cfg.get("eval", OmegaConf.create({})))
     set_seed(int(cfg.eval.seed))
@@ -158,67 +258,142 @@ def main(cfg: DictConfig) -> None:
     loader = DataLoader(ds, batch_size=cfg.eval.batch_size, shuffle=False,
                         collate_fn=collate, num_workers=0, drop_last=False)
 
+    use_upstream = bool(cfg.eval.use_upstream_features)
+    skip_gen = bool(cfg.eval.skip_gen)
+    real_dir = Path(cfg.eval.real_h3d_dir) if cfg.eval.real_h3d_dir else None
+    if real_dir is not None:
+        n_files = sum(1 for _ in real_dir.glob("*.npy"))
+        print(f"[eval] real features: canonical new_joint_vecs from {real_dir} "
+              f"({n_files} files)", flush=True)
+    n_real_fallback = 0
+    caption_tokens = None
+    if cfg.eval.vip_tokens and cfg.eval.evaluator == "real":
+        caption_tokens = _load_caption_tokens(cfg.eval.humanml3d_repo)
+    n_text_fallback = 0
+    print(f"[eval] feature extractor: {'upstream process_file' if use_upstream else 'custom'}",
+          flush=True)
+    calib = None
+    if cfg.eval.calibrate and cfg.eval.evaluator == "real":
+        calib = _build_calibration(loader, skeleton, evaluator, device,
+                                   max_clips=int(cfg.eval.calib_clips), use_upstream=use_upstream)
+
     all_results: dict[float, dict] = {}
+    diag_recon = bool(cfg.eval.diag_recon_fid) and real_dir is not None
     for omega in cfg.eval.guidance_scales:
         print(f"\n=== guidance w = {omega} ===")
-        real_emb, gen_emb, text_emb = [], [], []
+        real_emb, gen_emb, text_emb, recon_emb = [], [], [], []
         n_seen = 0
         for batch in tqdm(loader, desc=f"sample w={omega}"):
             x1 = batch.x1.to(device)
             lengths = batch.lengths
 
-            real_feats = [_real_h3d(x1[i], int(lengths[i]), skeleton) for i in range(x1.shape[0])]
-            gen_feats, gen_lens = generate_h3d_features(
-                mardm, ae, text_encoder, batch.texts, lengths - 1,
-                guidance=float(omega), timesteps=int(cfg.eval.timesteps),
-                mean=mean, std=std, skeleton=skeleton, device=device,
-                humanml3d_repo=cfg.eval.humanml3d_repo,
-            )
-            real_emb.append(evaluator.encode_motion(_pad_stack(real_feats), lengths - 1).cpu().numpy())
-            gen_emb.append(evaluator.encode_motion(_pad_stack(gen_feats), gen_lens).cpu().numpy())
-            text_emb.append(evaluator.encode_text_from_strings(batch.texts).cpu().numpy())
+            real_feats, real_lens = [], []
+            for i in range(x1.shape[0]):
+                f = None
+                if real_dir is not None:
+                    p = real_dir / f"{batch.clip_ids[i]}.npy"
+                    if p.exists():
+                        arr = np.load(p)[: int(cfg.data.max_seq_len) - 1]
+                        f = torch.from_numpy(arr.astype(np.float32))
+                if f is None:
+                    if real_dir is not None:
+                        n_real_fallback += 1
+                    f = _real_h3d(x1[i], int(lengths[i]), skeleton, use_upstream=use_upstream)
+                real_feats.append(f)
+                real_lens.append(f.shape[0])
+            real_feats = [_calibrate(f, calib) for f in real_feats]
+            real_emb.append(evaluator.encode_motion(
+                _pad_stack(real_feats), torch.tensor(real_lens, dtype=torch.long)).cpu().numpy())
+            if diag_recon:
+                recon_feats = [_real_h3d(x1[i], int(lengths[i]), skeleton, use_upstream=use_upstream)
+                               for i in range(x1.shape[0])]
+                recon_emb.append(evaluator.encode_motion(_pad_stack(recon_feats), lengths - 1).cpu().numpy())
+            if caption_tokens is not None:
+                toks = [caption_tokens.get(cid, {}).get(cap)
+                        for cid, cap in zip(batch.clip_ids, batch.texts)]
+                if all(t is not None for t in toks):
+                    te = evaluator.encode_text_from_tokens(toks)
+                else:
+                    n_text_fallback += sum(t is None for t in toks)
+                    te = evaluator.encode_text_from_strings(batch.texts)
+            else:
+                te = evaluator.encode_text_from_strings(batch.texts)
+            text_emb.append(te.cpu().numpy())
+            if not skip_gen:
+                gen_feats, gen_lens = generate_h3d_features(
+                    mardm, ae, text_encoder, batch.texts, lengths - 1,
+                    guidance=float(omega), timesteps=int(cfg.eval.timesteps),
+                    mean=mean, std=std, skeleton=skeleton, device=device,
+                    humanml3d_repo=cfg.eval.humanml3d_repo, use_upstream=use_upstream,
+                )
+                gen_feats = [_calibrate(f, calib) for f in gen_feats]
+                gen_emb.append(evaluator.encode_motion(_pad_stack(gen_feats), gen_lens).cpu().numpy())
 
             n_seen += x1.shape[0]
             if cfg.eval.max_clips > 0 and n_seen >= cfg.eval.max_clips:
                 break
 
         real_emb = np.concatenate(real_emb, 0)
-        gen_emb = np.concatenate(gen_emb, 0)
         text_emb = np.concatenate(text_emb, 0)
+        if caption_tokens is not None:
+            print(f"[eval] VIP tokens: {n_text_fallback} caption(s) fell back to spaCy", flush=True)
+        if real_dir is not None and n_real_fallback:
+            print(f"[eval] canonical real features: {n_real_fallback} clip(s) missing a "
+                  f"new_joint_vecs file, fell back to packed reconstruction", flush=True)
         rng = np.random.default_rng(int(cfg.eval.seed))
 
+        # Harness ceiling: R@1 of REAL motions vs their own captions (no model).
+        # If this is ~0.5, the text/retrieval path is healthy and any low gen R@1
+        # is the model's true caption-following limit, not a harness bug.
         results = {
-            "fid": fid(real_emb, gen_emb),
-            "r_precision": r_precision(text_emb, gen_emb, top_k=3, rng=rng).tolist(),
-            "mm_dist": mm_distance(text_emb, gen_emb),
-            "diversity": diversity(gen_emb, diversity_times=int(cfg.eval.diversity_times), rng=rng),
+            "r_precision_real": r_precision(text_emb, real_emb, top_k=3, rng=rng).tolist(),
             "diversity_real": diversity(real_emb, diversity_times=int(cfg.eval.diversity_times), rng=rng),
+            # GT-pair matching distance: text vs its OWN real motion. Upstream
+            # real-data MM-Dist is ~2.9; if this is ~diversity_real instead, the
+            # text/motion co-embedding is flat (matched pairs no closer than
+            # random) — i.e. the motion features are the bottleneck, not the code.
+            "mm_dist_real": mm_distance(text_emb, real_emb),
         }
+        if diag_recon:
+            recon_emb_np = np.concatenate(recon_emb, 0)
+            results["fid_recon_floor"] = fid(real_emb, recon_emb_np)
+            results["mm_dist_recon"] = mm_distance(text_emb, recon_emb_np)
+            results["r_precision_recon"] = r_precision(text_emb, recon_emb_np, top_k=3, rng=rng).tolist()
+        if not skip_gen:
+            gen_emb = np.concatenate(gen_emb, 0)
+            results.update({
+                "fid": fid(real_emb, gen_emb),
+                "r_precision": r_precision(text_emb, gen_emb, top_k=3, rng=rng).tolist(),
+                "mm_dist": mm_distance(text_emb, gen_emb),
+                "diversity": diversity(gen_emb, diversity_times=int(cfg.eval.diversity_times), rng=rng),
+            })
 
         # MultiModality: K re-samples per text.
-        mm_texts, mm_lengths, seen = [], [], set()
-        for batch in loader:
-            for i, cid in enumerate(batch.clip_ids):
-                if cid in seen:
-                    continue
-                mm_texts.append(batch.texts[i])
-                mm_lengths.append(int(batch.lengths[i]))
-                seen.add(cid)
+        if not skip_gen:
+            mm_texts, mm_lengths, seen = [], [], set()
+            for batch in loader:
+                for i, cid in enumerate(batch.clip_ids):
+                    if cid in seen:
+                        continue
+                    mm_texts.append(batch.texts[i])
+                    mm_lengths.append(int(batch.lengths[i]))
+                    seen.add(cid)
+                    if len(mm_texts) >= int(cfg.eval.mm_num_texts):
+                        break
                 if len(mm_texts) >= int(cfg.eval.mm_num_texts):
                     break
-            if len(mm_texts) >= int(cfg.eval.mm_num_texts):
-                break
-        K = int(cfg.eval.mm_repeats)
-        mm_per_text = []
-        for text, L in zip(mm_texts, mm_lengths):
-            feats, lens = generate_h3d_features(
-                mardm, ae, text_encoder, [text] * K, torch.full((K,), L - 1, dtype=torch.long),
-                guidance=float(omega), timesteps=int(cfg.eval.timesteps),
-                mean=mean, std=std, skeleton=skeleton, device=device,
-                humanml3d_repo=cfg.eval.humanml3d_repo,
-            )
-            mm_per_text.append(evaluator.encode_motion(_pad_stack(feats), lens).cpu().numpy())
-        results["multimodality"] = multimodality(np.stack(mm_per_text, axis=0))
+            K = int(cfg.eval.mm_repeats)
+            mm_per_text = []
+            for text, L in zip(mm_texts, mm_lengths):
+                feats, lens = generate_h3d_features(
+                    mardm, ae, text_encoder, [text] * K, torch.full((K,), L - 1, dtype=torch.long),
+                    guidance=float(omega), timesteps=int(cfg.eval.timesteps),
+                    mean=mean, std=std, skeleton=skeleton, device=device,
+                    humanml3d_repo=cfg.eval.humanml3d_repo, use_upstream=use_upstream,
+                )
+                feats = [_calibrate(f, calib) for f in feats]
+                mm_per_text.append(evaluator.encode_motion(_pad_stack(feats), lens).cpu().numpy())
+            results["multimodality"] = multimodality(np.stack(mm_per_text, axis=0))
 
         all_results[float(omega)] = results
         print(json.dumps(results, indent=2), flush=True)

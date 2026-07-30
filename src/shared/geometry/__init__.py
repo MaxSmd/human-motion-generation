@@ -15,7 +15,10 @@ from .humanml3d_io import (
     tplusr_to_h3d_features_with_quats,
     tplusr_to_joints,
 )
-from .humanml3d_upstream import tplusr_to_h3d_features_upstream
+from .humanml3d_upstream import (
+    positions_to_h3d_features_upstream,
+    tplusr_to_h3d_features_upstream,
+)
 from .quaternions import (
     make_continuous,
     normalize_quaternions,
@@ -46,6 +49,6 @@ __all__ = [
     "H3D_FEATURE_DIM", "FACE_JOINT_INDX", "DEFAULT_FOOT_THRESHOLD",
     "quat_inv", "quat_between", "quat_to_cont6d",
     "tplusr_to_joints", "tplusr_to_h3d_features_with_quats", "recover_joints_from_ric",
-    "tplusr_to_h3d_features_upstream",
+    "tplusr_to_h3d_features_upstream", "positions_to_h3d_features_upstream",
     "quat_continuity", "quat_to_upper_hemisphere", "make_continuous", "normalize_quaternions",
 ]

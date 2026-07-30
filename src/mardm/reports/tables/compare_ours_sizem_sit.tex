@@ -1,0 +1,18 @@
+% Comparison: our MARDM-M reproduction vs paper size-M vs MARDM-SiT headline.
+% Blank cells (--) mark metrics not reported for that model.
+% Vanilla LaTeX (BasicTeX-compatible) — \input this or compile the standalone
+% wrapper compare_ours_sizem_sit_doc.tex. Spacing is set in a local group so it
+% does not leak into the surrounding document.
+{\renewcommand{\arraystretch}{1.7}%
+\setlength{\tabcolsep}{12pt}%
+\begin{tabular}{l|ccc|c|c|c|c}
+\hline\hline
+Method & \multicolumn{3}{c|}{R-Precision$\uparrow$} & FID$\downarrow$ & Matching$\downarrow$ & MModality$\uparrow$ & CLIP-score$\uparrow$ \\
+\cline{2-4}
+ & Top 1 & Top 2 & Top 3 & & & & \\
+\hline
+Ours (MARDM-M, $w{=}4.0$)      & 0.145 & 0.219 & 0.287 & 0.329 & 7.215 & 1.935 & -- \\
+MARDM paper size-M (12-head)    & 0.477 & 0.679 & 0.780 & 0.173 & --    & --    & -- \\
+MARDM-SiT (paper headline)      & \textbf{0.500} & \textbf{0.695} & \textbf{0.795} & \textbf{0.114} & \textbf{3.270} & \textbf{2.231} & \textbf{0.642} \\
+\hline\hline
+\end{tabular}}

@@ -10,7 +10,7 @@ Produces, under `--output-dir`:
     target_offsets.pt   # (22, 3) reference T-pose offsets, derived from a fixed clip
     meta.json           # bookkeeping (fps, num_clips, version)
 
-Two stages, each runnable independently. Run `--help` for usage:
+Three stages, each runnable independently. Run `--help` for usage:
 
     raw-pose  : AMASS .npz → joint positions .npy (per AMASS file)
                 Mirrors `external/HumanML3D/raw_pose_processing.ipynb`.
@@ -19,6 +19,10 @@ Two stages, each runnable independently. Run `--help` for usage:
                 `external/HumanML3D/motion_representation.ipynb` but stops before
                 263-D feature extraction, keeping the lossless quaternion form
                 so any model can derive its own features on load.
+    features  : .npy joints → canonical 263-D `new_joint_vecs` .npy per clip
+                (+ M-mirrors), via upstream `process_file` — the features the
+                Guo evaluator was trained on. The eval harness loads these for
+                the real side instead of reconstructing through pack's IK.
 
 This script imports `external/HumanML3D/common/skeleton.py::Skeleton` for IK
 and FK so the produced quaternions are bit-comparable with the upstream
@@ -260,6 +264,63 @@ def _read_split_ids(humanml3d_repo: Path, split: str) -> list[str]:
     return [line.strip() for line in p.read_text().splitlines() if line.strip()]
 
 
+def _slice_source_joints(joints_root: Path, src: str, start: int, end: int) -> np.ndarray | None:
+    """One index.csv row → the clip's (T, 22, 3) joints, exactly as upstream
+    `raw_pose_processing.ipynb` cell 11 derives them: subset-specific pre-trim,
+    [start:end] slice, then the X-flip applied to every non-humanact12 clip.
+    Returns None if the source .npy is missing from `joints_root`.
+    """
+    joints_path = joints_root / src.replace("./pose_data/", "")
+    if not joints_path.exists():
+        return None
+    joints = np.load(joints_path).reshape(-1, 22, 3)
+
+    # Subset-specific pre-trim that upstream applies *before* slicing with
+    # index.csv. `index.csv`'s start/end frames are post-trim indices, so
+    # without this our slices are off for these 5 subsets. `fps_for_trim=20`
+    # matches upstream (cell 11 uses whatever `fps` is left in scope from the
+    # previous loop — usually 20, what `amass_to_pose` returns last).
+    fps_for_trim = 20
+    if "Eyes_Japan_Dataset" in src:
+        joints = joints[3 * fps_for_trim:]
+    elif "MPI_HDM05" in src:
+        joints = joints[3 * fps_for_trim:]
+    elif "TotalCapture" in src:
+        joints = joints[1 * fps_for_trim:]
+    elif "MPI_Limits" in src:
+        joints = joints[1 * fps_for_trim:]
+    elif "Transitions_mocap" in src:
+        joints = joints[int(0.5 * fps_for_trim):]
+
+    joints = joints[start:end] if end > 0 else joints[start:]
+
+    # X-flip — applied by upstream to EVERY non-humanact12 clip
+    # (raw_pose_processing.ipynb cell 11: `data[..., 0] *= -1`). The Guo
+    # evaluator was trained on these X-flipped joints; without the flip L/R is
+    # opposite of the caption's and R-precision collapses.
+    if "humanact12" not in src:
+        joints = joints.copy()
+        joints[..., 0] *= -1
+    return joints
+
+
+# Upstream `swap_left_right` chains for the 22-joint body (hand chains only
+# apply to 52-joint data).
+_RIGHT_CHAIN = [2, 5, 8, 11, 14, 17, 19, 21]
+_LEFT_CHAIN = [1, 4, 7, 10, 13, 16, 18, 20]
+
+
+def _swap_left_right_joints(joints: np.ndarray) -> np.ndarray:
+    """Upstream `swap_left_right`: X-flip (cancelling the clip's existing flip)
+    + swap left/right joint indices. Input/output (T, 22, 3)."""
+    m = joints.copy()
+    m[..., 0] *= -1
+    tmp = m[:, _RIGHT_CHAIN].copy()
+    m[:, _RIGHT_CHAIN] = m[:, _LEFT_CHAIN]
+    m[:, _LEFT_CHAIN] = tmp
+    return m
+
+
 def stage_pack(
     joints_root: Path,
     humanml3d_repo: Path,
@@ -342,46 +403,13 @@ def stage_pack(
                 continue
             if clip_id not in all_split_ids:
                 continue  # not part of any split
-            src_rel = src.replace("./pose_data/", "")
-            joints_path = joints_root / src_rel
-            if not joints_path.exists():
+            joints_np = _slice_source_joints(joints_root, src, start, end)
+            if joints_np is None:
                 # silently skip missing files; user gets a count summary
                 continue
-            joints = np.load(joints_path).reshape(-1, 22, 3)
-
-            # Subset-specific pre-trim that upstream applies *before* slicing
-            # with index.csv (raw_pose_processing.ipynb cell 11). `index.csv`'s
-            # start/end frames are post-trim indices, so without this our
-            # slices are off for these 5 subsets. `fps_for_trim=20` matches
-            # upstream's behavior (cell 11 uses whatever `fps` happened to be
-            # left in scope from the previous loop — usually 20 since that's
-            # what `amass_to_pose` returns last; we hard-code it explicitly).
-            fps_for_trim = 20
-            if "Eyes_Japan_Dataset" in src:
-                joints = joints[3 * fps_for_trim:]
-            elif "MPI_HDM05" in src:
-                joints = joints[3 * fps_for_trim:]
-            elif "TotalCapture" in src:
-                joints = joints[1 * fps_for_trim:]
-            elif "MPI_Limits" in src:
-                joints = joints[1 * fps_for_trim:]
-            elif "Transitions_mocap" in src:
-                joints = joints[int(0.5 * fps_for_trim):]
-
-            joints = joints[start:end] if end > 0 else joints[start:]
-
-            # X-flip — applied by upstream to EVERY non-humanact12 clip
-            # (raw_pose_processing.ipynb cell 11: `data[..., 0] *= -1`). The
-            # Guo evaluator was trained on these X-flipped joints; without the
-            # flip our IK assigns L/R joint rotations to the wrong side and
-            # R-precision collapses (motion's L/R is opposite of caption's).
-            if "humanact12" not in src:
-                joints = joints.copy()
-                joints[..., 0] *= -1
-
-            if joints.shape[0] < 40:
+            if joints_np.shape[0] < 40:
                 continue
-            joints = torch.from_numpy(joints).float()
+            joints = torch.from_numpy(joints_np).float()
 
             # IK on the (already H3D-coord) joint positions → per-joint quats.
             # `inverse_kinematics_np` returns quats in HumanML3D's [w, x, y, z]
@@ -418,13 +446,7 @@ def stage_pack(
             # body with left and right indices switched). The Guo evaluator's
             # 4384-clip test split is half regular, half M-prefixed.
             if "humanact12" not in src:
-                right_chain = [2, 5, 8, 11, 14, 17, 19, 21]
-                left_chain  = [1, 4, 7, 10, 13, 16, 18, 20]
-                joints_m = joints.numpy().copy()
-                joints_m[..., 0] *= -1                                # cancel our X-flip
-                tmp = joints_m[:, right_chain].copy()
-                joints_m[:, right_chain] = joints_m[:, left_chain]
-                joints_m[:, left_chain] = tmp
+                joints_m = _swap_left_right_joints(joints_np)
                 joints_m_t = torch.from_numpy(joints_m).float()
 
                 quat_params_m = skel.inverse_kinematics_np(
@@ -468,6 +490,119 @@ def stage_pack(
 
 
 # ---------------------------------------------------------------------------
+# Stage 3: joints → canonical 263-D features (HumanML3D `new_joint_vecs`)
+# ---------------------------------------------------------------------------
+#
+# Regenerates exactly what upstream `motion_representation.ipynb` saves to
+# `HumanML3D/new_joint_vecs/`: per clip (and its M-mirror), the sliced joints
+# run through upstream `process_file`. These canonical features are what the
+# Guo evaluator was trained on; the eval harness loads them for the real side
+# instead of reconstructing features through the packed IK representation.
+#
+# CPU-only and embarrassingly parallel → multiprocessing pool. Each worker
+# loads `process_file` once (exec of the vendored notebook cells) via the pool
+# initializer; tasks are single index.csv rows.
+
+_FEAT_CTX: dict = {}
+
+
+def _features_worker_init(tgt_offsets_np: np.ndarray, feet_thre: float,
+                          joints_root_s: str, out_dir_s: str,
+                          humanml3d_repo_s: str) -> None:
+    torch.set_num_threads(1)  # N workers × N BLAS threads oversubscribes the node
+    from shared.geometry.humanml3d_upstream import _load_upstream_process_file
+    ns = _load_upstream_process_file(humanml3d_repo_s)
+    ns["tgt_offsets"] = torch.from_numpy(tgt_offsets_np).float()
+    _FEAT_CTX["process_file"] = ns["process_file"]
+    _FEAT_CTX["feet_thre"] = feet_thre
+    _FEAT_CTX["joints_root"] = Path(joints_root_s)
+    _FEAT_CTX["out_dir"] = Path(out_dir_s)
+
+
+def _features_worker(row: tuple[str, int, int, str]) -> tuple[int, int, list[str]]:
+    """Process one index.csv row → <id>.npy (+ M<id>.npy for non-humanact12).
+    Returns (n_written, n_skipped_existing, [failed_clip_ids])."""
+    src, start, end, new_name = row
+    clip_id = Path(new_name).stem
+    written, skipped, failed = 0, 0, []
+
+    variants: list[tuple[str, np.ndarray]] = []
+    joints = _slice_source_joints(_FEAT_CTX["joints_root"], src, start, end)
+    if joints is None:
+        return 0, 0, [f"{clip_id}(missing-src)"]
+    variants.append((clip_id, joints))
+    if "humanact12" not in src:
+        variants.append((f"M{clip_id}", _swap_left_right_joints(joints)))
+
+    for cid, arr in variants:
+        out = _FEAT_CTX["out_dir"] / f"{cid}.npy"
+        if out.exists():
+            skipped += 1
+            continue
+        try:
+            data, _, _, _ = _FEAT_CTX["process_file"](
+                arr.astype(np.float32), _FEAT_CTX["feet_thre"]
+            )
+            np.save(out, np.asarray(data, dtype=np.float32))
+            written += 1
+        except Exception as e:  # upstream also try/excepts per clip
+            failed.append(f"{cid}({e})")
+    return written, skipped, failed
+
+
+def stage_features(
+    joints_root: Path,
+    humanml3d_repo: Path,
+    output_dir: Path,
+    example_id: str = "000021",
+    feet_thre: float = 0.002,
+    workers: int = 1,
+    limit: int = 0,
+) -> None:
+    """Regenerate canonical `new_joint_vecs` 263-D features for every index.csv
+    clip (+ mirrors). Resume-safe: existing output files are skipped."""
+    from multiprocessing import Pool
+
+    index = _read_index_csv(humanml3d_repo / "index.csv")
+    if limit > 0:
+        index = index[:limit]
+
+    # Target T-pose offsets, derived exactly as stage_pack derives them.
+    Skeleton, raw_offsets, kinematic_chain = _import_upstream_skeleton(humanml3d_repo)
+    skel = Skeleton(torch.from_numpy(raw_offsets), kinematic_chain, "cpu")
+    example_path = joints_root / f"{example_id}.npy"
+    if not example_path.exists():
+        match = [src for (src, _s, _e, name) in index if Path(name).stem == example_id]
+        if not match:
+            match = [src for (src, _s, _e, name) in
+                     _read_index_csv(humanml3d_repo / "index.csv")
+                     if Path(name).stem == example_id]
+        example_path = joints_root / match[0].replace("./pose_data/", "")
+    example_data = np.load(example_path).reshape(-1, 22, 3)
+    tgt_offsets = skel.get_offsets_joints(torch.from_numpy(example_data[0]))  # (22, 3)
+
+    out_vecs = output_dir / "new_joint_vecs"
+    out_vecs.mkdir(parents=True, exist_ok=True)
+    print(f"[stage_features] {len(index)} index rows → {out_vecs}  (workers={workers})")
+
+    n_written = n_skipped = 0
+    failures: list[str] = []
+    init_args = (tgt_offsets.numpy(), feet_thre, str(joints_root), str(out_vecs), str(humanml3d_repo))
+    with Pool(processes=workers, initializer=_features_worker_init, initargs=init_args) as pool:
+        for w, s, f in tqdm(pool.imap_unordered(_features_worker, index, chunksize=8),
+                            total=len(index), desc="features"):
+            n_written += w
+            n_skipped += s
+            failures.extend(f)
+
+    print(f"[stage_features] wrote {n_written} feature files "
+          f"({n_skipped} already existed, {len(failures)} failed)")
+    if failures:
+        print("[stage_features] failures: " + ", ".join(failures[:50])
+              + (" ..." if len(failures) > 50 else ""))
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -488,6 +623,14 @@ def main() -> None:
     pk.add_argument("--output-dir", type=Path, default=Path("external/data/humanml3d_packed"))
     pk.add_argument("--example-id", default="000021")
 
+    ft = sub.add_parser("features", help="Stage 3: joints → canonical 263-D new_joint_vecs")
+    ft.add_argument("--joints-root", type=Path, required=True, help="output dir from raw-pose stage")
+    ft.add_argument("--humanml3d-repo", type=Path, default=Path("external/HumanML3D"))
+    ft.add_argument("--output-dir", type=Path, required=True, help="dir that will contain new_joint_vecs/")
+    ft.add_argument("--example-id", default="000021")
+    ft.add_argument("--workers", type=int, default=1)
+    ft.add_argument("--limit", type=int, default=0, help="only the first N index rows (smoke test)")
+
     args = p.parse_args()
 
     if args.cmd == "raw-pose":
@@ -502,6 +645,15 @@ def main() -> None:
             joints_root=args.joints_root,
             humanml3d_repo=args.humanml3d_repo,
             output_dir=args.output_dir,
+        )
+    elif args.cmd == "features":
+        stage_features(
+            joints_root=args.joints_root,
+            humanml3d_repo=args.humanml3d_repo,
+            output_dir=args.output_dir,
+            example_id=args.example_id,
+            workers=args.workers,
+            limit=args.limit,
         )
 
 

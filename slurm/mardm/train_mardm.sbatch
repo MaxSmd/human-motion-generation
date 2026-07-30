@@ -19,9 +19,9 @@
 # To use 12g: `sbatch --partition=12g --nodelist=frankfurt,hamburg,kassel,leipzig ...`
 #
 # Submit:
-#     AE_CKPT=/path/to/mardm-ae-XXXX/checkpoints/latest.pt sbatch slurm/train_mardm.sbatch
+#     AE_CKPT=/path/to/mardm-ae-XXXX/checkpoints/latest.pt sbatch slurm/mardm/train_mardm.sbatch
 #     # or pass as the first positional arg
-#     sbatch slurm/train_mardm.sbatch ${HOME}/rmg-runs/mardm-ae-XXXX/checkpoints/latest.pt
+#     sbatch slurm/mardm/train_mardm.sbatch ${HOME}/rmg-runs/mardm-ae-XXXX/checkpoints/latest.pt
 # Resume: just resubmit (auto-detects latest checkpoint under the run dir).
 #
 # Throughput probe: run with train.max_steps=500, read `steps_per_s`, then set
@@ -54,6 +54,15 @@ RUNS_ROOT="${RUNS_ROOT:-${HOME}/rmg-runs}"
 HF_CACHE="${HF_CACHE:-${HOME}/hf-cache}"
 DATA_ROOT="${RMG_DATA_ROOT:-${REPO}/external/data/humanml3d_packed}"
 MARDM_STATS="${MARDM_STATS:-${RUNS_ROOT}/mardm_essential_stats.pt}"
+# Canonical-features training (see train_mardm_ae.sbatch): must match the AE's
+# data source and stats file.
+CANONICAL_DIR="${CANONICAL_DIR:-}"
+CANON_STATS_FLAG=""
+CANON_DATA_FLAG=""
+if [ -n "${CANONICAL_DIR}" ]; then
+    CANON_STATS_FLAG="--canonical-dir '${CANONICAL_DIR}'"
+    CANON_DATA_FLAG="data.canonical_dir='${CANONICAL_DIR}'"
+fi
 if [ -n "${WANDB_API_KEY:-}" ]; then
     : "${WANDB_MODE:=online}"
 else
@@ -78,12 +87,12 @@ enroot start \
         cd ${REPO}
         pip install -e . --no-deps --quiet
         [ -f '${MARDM_STATS}' ] || python -m mardm.scripts.compute_mardm_stats \\
-            --data-root '${DATA_ROOT}' --out '${MARDM_STATS}'
+            --data-root '${DATA_ROOT}' --out '${MARDM_STATS}' ${CANON_STATS_FLAG}
         python -m mardm.scripts.train_mardm \\
             --config-name=${CONFIG_NAME} \\
             ae_checkpoint='${AE_CKPT}' \\
             text_encoder.type=qwen3 \\
             data.preload=true \\
             run_name='${RUN_NAME}' \\
-            ${EXTRA_HYDRA_ARGS} ${OVERRIDES}
+            ${CANON_DATA_FLAG} ${EXTRA_HYDRA_ARGS} ${OVERRIDES}
     "

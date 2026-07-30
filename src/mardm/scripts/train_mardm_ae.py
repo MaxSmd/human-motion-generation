@@ -5,13 +5,13 @@ Trains the 1D-ResNet AE to reconstruct the z-normalized 67-D essential feature
 branch (stage 2) then diffuses over this AE's frozen latents.
 
 Usage (local smoke, CPU):
-    python scripts/compute_mardm_stats.py --data-root /tmp/synth --out /tmp/synth/stats.pt
-    python scripts/train_mardm_ae.py data.root=/tmp/synth stats_path=/tmp/synth/stats.pt \\
+    python -m mardm.scripts.compute_mardm_stats --data-root /tmp/synth --out /tmp/synth/stats.pt
+    python -m mardm.scripts.train_mardm_ae data.root=/tmp/synth stats_path=/tmp/synth/stats.pt \\
         train.max_steps=20 train.micro_batch_size=4 train.grad_accum=1 \\
         train.precision=fp32 logging.use_wandb=false logging.use_tensorboard=false
 
 Usage (cluster):
-    python scripts/train_mardm_ae.py +data=cluster_mounted
+    python -m mardm.scripts.train_mardm_ae +data=cluster_mounted
 """
 
 from __future__ import annotations
@@ -50,20 +50,19 @@ def _load_stats(stats_path: str | Path) -> tuple[torch.Tensor, torch.Tensor]:
     if not p.exists():
         raise FileNotFoundError(
             f"essential mean/std not found at {p}. Run "
-            "`scripts/compute_mardm_stats.py --data-root <packed> --out <stats_path>` first."
+            "`python -m mardm.scripts.compute_mardm_stats --data-root <packed> --out <stats_path>` first."
         )
     blob = torch.load(p, weights_only=True)
     return blob["mean"], blob["std"]
 
 
-def _build_dataset(cfg: DictConfig, split: str, mean, std, mirror: bool) -> EssentialDataset:
+def _build_dataset(cfg: DictConfig, split: str, mean, std) -> EssentialDataset:
     return EssentialDataset(
         root=cfg.data.root,
         split=split,
         mean=mean,
         std=std,
         window_size=cfg.train.window_size,
-        mirror_augment=mirror,
         max_seq_len=cfg.data.max_seq_len,
         min_seq_len=cfg.data.min_seq_len,
         subset_frac=cfg.get("subset_frac"),
@@ -72,10 +71,12 @@ def _build_dataset(cfg: DictConfig, split: str, mean, std, mirror: bool) -> Esse
         splits_name=cfg.data.splits_name,
         offsets_name=cfg.data.offsets_name,
         preload=cfg.data.get("preload", False),
+        canonical_dir=cfg.data.get("canonical_dir"),
     )
 
 
-def _build_loader(ds: EssentialDataset, cfg: DictConfig, batch_size: int, shuffle: bool) -> DataLoader:
+def _build_loader(ds: EssentialDataset, cfg: DictConfig, batch_size: int, shuffle: bool,
+                  drop_last: bool = True) -> DataLoader:
     return DataLoader(
         ds,
         batch_size=batch_size,
@@ -86,7 +87,7 @@ def _build_loader(ds: EssentialDataset, cfg: DictConfig, batch_size: int, shuffl
         persistent_workers=cfg.data.persistent_workers and cfg.data.num_workers > 0,
         prefetch_factor=cfg.data.prefetch_factor if cfg.data.num_workers > 0 else None,
         worker_init_fn=worker_init_fn,
-        drop_last=True,
+        drop_last=drop_last,
     )
 
 
@@ -149,8 +150,11 @@ def _validate(
         tot_joint += float(joint)
         n += 1
     ae.train()
-    denom = max(n, 1)
-    return tot_total / denom, tot_feat / denom, tot_joint / denom
+    if n == 0:
+        print("[ae] WARNING: validation loader yielded 0 batches — val split too "
+              "small for the batch size (check subset_frac). Reporting nan.", flush=True)
+        return float("nan"), float("nan"), float("nan")
+    return tot_total / n, tot_feat / n, tot_joint / n
 
 
 @hydra.main(config_path="../configs", config_name="ae", version_base=None)
@@ -174,10 +178,12 @@ def main(cfg: DictConfig) -> None:
 
     mean, std = _load_stats(cfg.stats_path)
 
-    train_ds = _build_dataset(cfg, "train", mean, std, mirror=cfg.data.mirror_augment)
-    val_ds = _build_dataset(cfg, "val", mean, std, mirror=False)
+    train_ds = _build_dataset(cfg, "train", mean, std)
+    val_ds = _build_dataset(cfg, "val", mean, std)
     train_iter = _infinite(_build_loader(train_ds, cfg, cfg.train.micro_batch_size, shuffle=True))
-    val_loader = _build_loader(val_ds, cfg, cfg.train.micro_batch_size, shuffle=False)
+    # drop_last=False so a small (overfit-subset) val split still yields a batch;
+    # otherwise _validate iterates 0 batches and silently reports val_l1 0.
+    val_loader = _build_loader(val_ds, cfg, cfg.train.micro_batch_size, shuffle=False, drop_last=False)
 
     ae = AE(AEConfig(**OmegaConf.to_container(cfg.ae, resolve=True))).to(device)
 
@@ -198,7 +204,7 @@ def main(cfg: DictConfig) -> None:
     if latest is not None:
         print(f"[ae] resuming from {latest}")
         state = load_checkpoint(latest, map_location=device)
-        ae.load_state_dict(state.model)
+        ae.load_state_dict(state.model, strict=False)  # tolerate pre-latent_scale checkpoints
         if state.ema:
             ema.load_state_dict(state.ema)
         opt.load_state_dict(state.optimizer)
@@ -263,6 +269,8 @@ def main(cfg: DictConfig) -> None:
                 "grad_norm": float(grad_norm),
                 "steps_per_s": cfg.train.log_every / max(now - t_last, 1e-9),
             }, step=step)
+            print(f"[ae] step {step}: l1={accum_loss * cfg.train.grad_accum:.4f} "
+                  f"(feature={accum_feat:.4f} joint={accum_joint:.4f})", flush=True)
             t_last = now
 
         if step % cfg.train.val_every == 0 or step == cfg.train.max_steps:
@@ -292,6 +300,31 @@ def main(cfg: DictConfig) -> None:
             if step % cfg.train.ckpt_every == 0 or step == cfg.train.max_steps:
                 save_checkpoint(output_dir / "checkpoints" / f"ckpt-{step:09d}.pt", payload)
             save_checkpoint(output_dir / "checkpoints" / "latest.pt", payload)
+
+    # --- per-channel latent scale for the diffusion head ---------------------
+    # Compute on the EMA weights (what inference uses). The scale is computed
+    # INSIDE the swap but applied OUTSIDE it, because the EMA swap would revert
+    # the buffer on exit; we also write it into the EMA shadow so `copy_to` at
+    # load time preserves it (this repo's EMA tracks buffers).
+    scale_loader = _build_loader(train_ds, cfg, cfg.train.micro_batch_size,
+                                 shuffle=False, drop_last=False)
+    # Compute on LIVE weights — gen/eval load the frozen AE with ae_use_ema=false
+    # (the AE EMA is init-dominated on short runs), so the scale must match the
+    # live encoder it will actually be applied to.
+    scale = ae.compute_latent_scale(
+        scale_loader, device, max_batches=int(cfg.train.get("scale_batches", 50)))
+    ae.latent_scale.copy_(scale)
+    ema.shadow["latent_scale"] = scale.detach().clone()
+    raw_std = float((1.0 / ae.latent_scale).mean())
+    print(f"[ae] latent_scale set: raw latent std ~{raw_std:.3f} -> ~unit after scaling "
+          f"(per-channel, mean factor {float(ae.latent_scale.mean()):.2f})", flush=True)
+    payload = TrainState(
+        step=step, model=ae.state_dict(), ema=ema.state_dict(),
+        optimizer=opt.state_dict(), scheduler=sched.state_dict(),
+        scaler=scaler.state_dict() if scaler is not None else None,
+        rng=collect_rng_state(), extras={"wandb_run_id": logger.wandb_run_id},
+    )
+    save_checkpoint(output_dir / "checkpoints" / "latest.pt", payload)
 
     logger.close()
     print(f"[ae] done at step {step}")

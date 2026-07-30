@@ -6,10 +6,11 @@ tensor. Lives in `shared` so every model package (rmg, mardm, …) reuses the
 same encoders without importing another model.
 """
 
-from .text_encoder import Qwen3EmbeddingEncoder, RandomTextEncoder, TextEncoder
+from .text_encoder import CLIPTextEncoder, Qwen3EmbeddingEncoder, RandomTextEncoder, TextEncoder
 
 __all__ = [
     "TextEncoder",
+    "CLIPTextEncoder",
     "Qwen3EmbeddingEncoder",
     "RandomTextEncoder",
 ]

@@ -3,11 +3,12 @@
 Bold = best per column. Underline = second-best. Diversity uses
 "closer to GT (9.503) is better"; the others use min/max as the arrows indicate.
 
-Output goes to reports/tables/<stem>.tex and .pdf, where <stem> is derived from
-the eval run directory (e.g. ~/rmg-runs/mardm-eval-10132/eval/results.json -> mardm_10132).
+Output goes to src/mardm/reports/tables/<stem>.tex and .pdf (resolved relative
+to this file), where <stem> is derived from the eval run directory
+(e.g. ~/rmg-runs/mardm-eval-10132/eval/results.json -> mardm_10132).
 
 Usage:
-    python notebooks/eval_table.py ~/rmg-runs/mardm-eval-10132/eval/results.json
+    python -m mardm.notebooks.eval_table ~/rmg-runs/mardm-eval-10132/eval/results.json
 """
 
 from __future__ import annotations

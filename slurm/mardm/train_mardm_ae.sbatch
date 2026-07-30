@@ -12,14 +12,14 @@
 # MARDM stage 1: train the motion AutoEncoder (mardm_mini, latent 512, ×4
 # downsample). Computes the essential mean/std once (if missing) then trains.
 # The AE is the cheap stage (a few hours); leave the bulk of the 1-day,
-# per-model budget for the generation branch (slurm/train_mardm.sbatch).
+# per-model budget for the generation branch (slurm/mardm/train_mardm.sbatch).
 #
 # Defaults to the 24g partition (matches the documented 1-day-per-model GPU
 # budget). 12g works equivalently — the train script auto-picks fp16 on
 # Turing and bf16 on Ampere+, so precision doesn't need a manual override.
 # To use 12g: `sbatch --partition=12g --nodelist=frankfurt,hamburg,kassel,leipzig ...`
 #
-# Submit:  sbatch slurm/train_mardm_ae.sbatch
+# Submit:  sbatch slurm/mardm/train_mardm_ae.sbatch
 # Resume:  just resubmit (auto-detects latest checkpoint under the run dir).
 #
 # Throughput probe (set train.max_steps for the budget): run once with
@@ -42,6 +42,16 @@ HF_CACHE="${HF_CACHE:-${HOME}/hf-cache}"
 DATA_ROOT="${RMG_DATA_ROOT:-${REPO}/external/data/humanml3d_packed}"
 # Shared across AE / gen / eval — must be a writable path (the dataset mount is RO).
 MARDM_STATS="${MARDM_STATS:-${RUNS_ROOT}/mardm_essential_stats.pt}"
+# Canonical-features training: set to a new_joint_vecs dir (prepare_humanml3d
+# `features` output). Applies to BOTH the stats computation and the dataset.
+# Pair with a distinct MARDM_STATS path so packed/canonical stats never mix.
+CANONICAL_DIR="${CANONICAL_DIR:-}"
+CANON_STATS_FLAG=""
+CANON_DATA_FLAG=""
+if [ -n "${CANONICAL_DIR}" ]; then
+    CANON_STATS_FLAG="--canonical-dir '${CANONICAL_DIR}'"
+    CANON_DATA_FLAG="data.canonical_dir='${CANONICAL_DIR}'"
+fi
 # Extra Hydra overrides (space-separated key=value), e.g. from the interactive app.
 OVERRIDES="${OVERRIDES:-}"
 if [ -n "${WANDB_API_KEY:-}" ]; then
@@ -68,6 +78,6 @@ enroot start \
         cd ${REPO}
         pip install -e . --no-deps --quiet
         [ -f '${MARDM_STATS}' ] || python -m mardm.scripts.compute_mardm_stats \\
-            --data-root '${DATA_ROOT}' --out '${MARDM_STATS}'
-        python -m mardm.scripts.train_mardm_ae run_name='${RUN_NAME}' data.preload=true ${OVERRIDES}
+            --data-root '${DATA_ROOT}' --out '${MARDM_STATS}' ${CANON_STATS_FLAG}
+        python -m mardm.scripts.train_mardm_ae run_name='${RUN_NAME}' data.preload=true ${CANON_DATA_FLAG} ${OVERRIDES}
     "

@@ -17,7 +17,7 @@
 # Usage:
 #     AE_CKPT=.../mardm-ae-XXXX/checkpoints/latest.pt \
 #     GEN_CKPT=.../mardm-gen-YYYY/checkpoints/latest.pt \
-#     sbatch slurm/evaluate_mardm.sbatch
+#     sbatch slurm/mardm/evaluate_mardm.sbatch
 
 set -euo pipefail
 mkdir -p slurm/logs
@@ -36,7 +36,8 @@ RUNS_ROOT="${RUNS_ROOT:-${HOME}/rmg-runs}"
 HF_CACHE="${HF_CACHE:-${HOME}/hf-cache}"
 DATA_ROOT="${RMG_DATA_ROOT:-${REPO}/external/data/humanml3d_packed}"
 MARDM_STATS="${MARDM_STATS:-${RUNS_ROOT}/mardm_essential_stats.pt}"
-GUIDANCE="${GUIDANCE:-[2.5,3.5,4.5,5.5,6.5]}"
+GUIDANCE="${GUIDANCE:-[1.0,1.5,2.0,2.5,3.0]}"
+TIMESTEPS="${TIMESTEPS:-18}"
 # Run name (results land under RUNS_ROOT/RUN_NAME) — honoured so the app can
 # locate + pull this eval's metrics. Defaults to the gen-checkpoint basename.
 RUN_NAME="${RUN_NAME:-mardm-eval-$(basename "${GEN_CKPT}" .pt)}"
@@ -65,6 +66,7 @@ enroot start \
             +eval.checkpoint='${GEN_CKPT}' \\
             +eval.evaluator=real \\
             +eval.guidance_scales='${GUIDANCE}' \\
+            +eval.timesteps='${TIMESTEPS}' \\
             run_name='${RUN_NAME}' \\
             ${OVERRIDES}
     "
