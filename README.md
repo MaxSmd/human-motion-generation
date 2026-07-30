@@ -122,4 +122,3 @@ OVERRIDES='data.subset_n=16 train.max_steps=15000' sbatch slurm/rmg/train.sbatch
 
 Build the image once with `sbatch slurm/build_image.sbatch`; change
 `containers/requirements.txt` and rebuild rather than installing inside a job.
-Engineering notes and the non-obvious traps live in `CLAUDE.md`.
