@@ -36,7 +36,7 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor
 
-from shared.geometry.quaternions import normalize_quaternions
+
 from shared.geometry.skeleton import (
     JOINT_NAMES,
     NUM_JOINTS,
@@ -50,6 +50,17 @@ from shared.geometry.skeleton import (
 # translation occupies the first 3 dims; each joint quaternion is 4 contiguous
 # dims thereafter. Representations without this prefix layout aren't supported.
 CONSTRAINABLE_REPRESENTATIONS = ("tr", "trp")
+
+
+def _unit(q: Tensor, eps: float = 1e-8) -> Tensor:
+    """Unit-normalise quaternions without touching their sign.
+
+    Distinct from `normalize_quaternions`, which additionally canonicalises onto
+    the q_w >= 0 hemisphere. That canonicalisation is right for a stored pose and
+    wrong inside the sampler, where q and -q are antipodal points of the ambient
+    sphere the ODE is integrating on.
+    """
+    return q / q.norm(dim=-1, keepdim=True).clamp_min(eps)
 
 
 def _resolve_joint(joint: int | str) -> int:
@@ -169,8 +180,16 @@ def bend_clamp(
     `strength` (scalar or (...,1) tensor in [0, 1]) is the fraction of the
     correction applied: 1.0 = exact hard clamp, <1.0 = soft bias toward the
     band. Preserves bend direction and twist about v. Unit out.
+
+    The ambient SIGN of `q` is preserved. `normalize_quaternions` would also map
+    q to the q_w >= 0 hemisphere; q and -q are the same rotation, but they are
+    antipodal points of S^3, and this projector runs inside the ODE loop on the
+    ambient state. Canonicalising the sign there teleports the state across the
+    sphere between integration steps, which changes the trajectory even when the
+    angular correction is zero. With a plain unit normalisation a constraint that
+    is already satisfied leaves the state untouched.
     """
-    q = normalize_quaternions(q)
+    q = _unit(q)
     u = u.to(device=q.device, dtype=q.dtype)
     v = v.to(device=q.device, dtype=q.dtype)
     u = u / torch.linalg.vector_norm(u).clamp_min(eps)
@@ -188,9 +207,35 @@ def bend_clamp(
     axis = n / n_norm.clamp_min(eps)
     half = 0.5 * s * (beta - alpha)                          # partial correction
     delta = torch.cat([torch.cos(half), torch.sin(half) * axis], dim=-1)
-    q_new = normalize_quaternions(quat_mul(delta, q))
+    q_new = _unit(quat_mul(delta, q))
+    # Keep the representative on the same side as the input: delta is a rotation
+    # by (beta - alpha), so the product is already the near representative, but
+    # a large correction must not be allowed to hand back the antipode.
+    q_new = torch.where((q_new * q).sum(-1, keepdim=True) < 0, -q_new, q_new)
     # bone (anti)parallel to u ⇒ bend direction undefined: leave q untouched.
     return torch.where(n_norm < eps, q, q_new)
+
+
+def bend_angles_deg(x: Tensor, joint: int | str, skeleton: "Skeleton") -> Tensor:
+    """Per-frame bend angle in degrees at `joint`, read off a flat state.
+
+    The inverse of what `bend_clamp` writes: takes `x` (..., D) in the tr/trp
+    layout and returns (...,) the angle between the incoming rest bone and the
+    rotated outgoing bone. Used to verify a constraint held, from the same
+    quantity the projector acted on rather than from decoded joint positions.
+    """
+    j = _resolve_joint(joint)
+    ctrl = bend_controller_index(j)
+    lo, hi = 3 + 4 * ctrl, 3 + 4 * (ctrl + 1)
+    q = _unit(x[..., lo:hi])
+    offsets = skeleton.offsets.to(device=x.device, dtype=x.dtype)
+    u = offsets[j]
+    v = offsets[ctrl]
+    u = u / torch.linalg.vector_norm(u).clamp_min(1e-6)
+    v = v / torch.linalg.vector_norm(v).clamp_min(1e-6)
+    d = quat_rotate(q, v.expand(*q.shape[:-1], 3))
+    cos = (d * u.expand_as(d)).sum(-1).clamp(-1.0, 1.0)
+    return torch.rad2deg(torch.acos(cos))
 
 
 @dataclass

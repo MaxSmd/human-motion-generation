@@ -164,6 +164,9 @@ def build_viz(params: dict) -> tuple[str, dict[str, str], str, str]:
         if params.get("scene"):
             env["SCENE"] = json.dumps(params["scene"])
             env["ROOM_GUIDANCE"] = str(params.get("room_guidance", 0.0))
+        # Spatial (mask-control) targets → RMG_TRAJECTORY in visualize.py.
+        if params.get("trajectory"):
+            env["TRAJECTORY"] = json.dumps(params["trajectory"])
     elif mode == "compare":
         clips_raw = str(params.get("clips", "auto"))
         env.update({
@@ -272,6 +275,7 @@ def viz_batch_items(job_id: str, params: dict) -> list[dict]:
             "ranges": params.get("ranges") or [],
             "scene": params.get("scene") or None,
             "room_guidance": float(params.get("room_guidance", 0.0)),
+            "trajectory": params.get("trajectory") or None,
         })
     return items
 
@@ -314,7 +318,7 @@ def build_viz_fused(
         env["BATCH"] = json.dumps(batch)
         # RMG_BATCH supersedes these; drop them so the previewed command shows only
         # what actually drives the job (the lead's prompts are inside BATCH already).
-        for k in ("PROMPTS", "CONSTRAINTS", "RANGES", "SCENE", "ROOM_GUIDANCE"):
+        for k in ("PROMPTS", "CONSTRAINTS", "RANGES", "SCENE", "ROOM_GUIDANCE", "TRAJECTORY"):
             env.pop(k, None)
         n_items = len(batch)
     else:

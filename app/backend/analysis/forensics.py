@@ -5,7 +5,7 @@ clips along a handful of physically-meaningful axes: quaternion norm (are the
 rotations valid?), per-frame angular velocity `2·acos(|<q_t, q_{t+1}>|)`,
 translation velocity, and |translation|. They are the "smoking gun that isn't" —
 the generations are valid, conditioned, and diverse, just slightly jittery and
-conservative. See `docs/rmg_mid_validation.md` §4 + appendix.
+conservative. See the validation write-up §4 + appendix.
 
 Computing them fresh means loading `runs/.../samples/step-*.pt` + a sample of real
 packed clips on the cluster, which is heavy and out of scope for the request path.

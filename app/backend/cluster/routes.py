@@ -7,7 +7,10 @@ import shlex
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from .. import config as cfgmod, gtreg
+from .. import cache, config as cfgmod, gtreg
+from ..analysis import contacts as contactsmod
+from ..analysis import course_study as coursemod
+from ..analysis import courses as coursesmod
 from ..analysis import curves as curvesmod
 from ..analysis import eval_tables
 from ..analysis import forensics as forensicsmod
@@ -164,6 +167,10 @@ class VizRequest(BaseModel):
     ranges: list[dict] | None = None         # hinge limits (projection)
     scene: dict | None = None                # euclidean room/obstacles/spawn
     room_guidance: float = 0.0               # room/obstacle guidance weight
+    # Spatial (mask-control) trajectory targets: joints driven to world positions
+    # at chosen frames — {mode, blend, blend_frames, guidance_weight, constraints}.
+    # See flow.trajectory for the wire format.
+    trajectory: dict | None = None
     # Constraint→text ablation tag. Not consumed by the sbatch builder — it just
     # rides along in job.params so the Lab's Constraint Analysis tab can regroup
     # the arms of a study ({study, arm, base_prompt, seed}) after the fact.
@@ -440,6 +447,16 @@ def eval_results(run: str) -> dict:
     return {"run": run, "results": {str(k): v for k, v in per.items()}}
 
 
+@router.get("/eval-results")
+def eval_results_bulk(match: str = "") -> dict:
+    """Every eval run's metrics in ONE ssh round trip, optionally filtered by a
+    substring of the run name (`?match=traj`). Panels that table several runs
+    must use this rather than looping `/eval/{run}` — that loop costs two SSH
+    calls per run and leaves the UI spinning whenever the login node is slow."""
+    _require_online()
+    return {"match": match, "runs": eval_tables.fetch_all_results(match)}
+
+
 @router.get("/analysis/table")
 def analysis_table(runs: str) -> dict:
     """Run-comparison rows + a copy-ready LaTeX tabular. `runs` = comma-separated."""
@@ -475,7 +492,7 @@ def analysis_forensics(run: str) -> dict:
     """Cached gen-vs-real motion-dynamics stats for a run (Validation panel).
 
     404s when no `eval/forensics.json` exists yet — the frontend then falls back
-    to the documented static values from `docs/rmg_mid_validation.md`."""
+    to the documented static values from the validation write-up."""
     _require_online()
     try:
         return forensicsmod.fetch_forensics(run)
@@ -491,6 +508,91 @@ def analysis_npy(job: str, name: str) -> dict:
         return jointsmod.analyze(jointsmod.resolve_npy(job, name))
     except (FileNotFoundError, ValueError) as e:
         raise HTTPException(404, str(e)) from e
+
+
+class AutoContactsReq(BaseModel):
+    job: str
+    name: str
+    scene: dict | None = None
+    fps: float = 20.0
+
+
+@router.post("/analysis/auto-contacts")
+def analysis_auto_contacts(req: AutoContactsReq) -> dict:
+    """Extract contact constraints from a draft clip's foot plants (local).
+
+    Reads the placed (T,22,3) draft npy, detects foot-plant segments, and assigns
+    each to the floor or an obstacle top by its xz footprint — the contacts drop
+    straight into `scene.contacts` for a constrained resample (Pass B)."""
+    _require_mode()
+    try:
+        return contactsmod.auto_contacts(
+            jointsmod.resolve_npy(req.job, req.name), req.scene, req.fps
+        )
+    except (FileNotFoundError, ValueError) as e:
+        raise HTTPException(404, str(e)) from e
+
+
+# ------------------------------------------------------------------ course study
+
+
+@router.get("/analysis/courses")
+def analysis_courses() -> dict:
+    """The obstacle-course catalogue: geometry, authored path, prompts, arms.
+
+    The frontend renders and submits from THIS, rather than declaring its own
+    copy of the geometry, so the staircase a clip is scored against is provably
+    the staircase it was sampled in."""
+    return {"courses": coursesmod.catalogue(),
+            "arms": [{"key": k, **v} for k, v in coursesmod.ARMS.items()],
+            "room": dict(coursesmod.ROOM),
+            "pelvis_base": coursesmod.PELVIS_BASE}
+
+
+class CourseStudyReq(BaseModel):
+    courses: list[str] | None = None      # None ⇒ all three
+    seeds: list[int] = [0, 1]
+    arms: list[str] | None = None         # None ⇒ free, room, room+traj
+    checkpoint: str
+    model_preset: str = "dit_mid"
+    train_preset: str = "rmg_mid"
+    num_steps: int = 800
+    guidance: float = 6.5
+    room_guidance: float = 0.75
+
+
+@router.post("/jobs/course-study")
+def submit_course_study(req: CourseStudyReq) -> dict:
+    """Queue a whole (course × arm × seed) matrix as viz jobs.
+
+    Every cell carries the same model/sampler config, so the fusion key matches
+    and the lot lands in ONE sbatch: one queue wait, one model load. That is
+    also what keeps the arms a matched pair — see `courses.job_params`."""
+    _require_online()
+    bodies = coursemod.build_jobs(
+        req.courses, req.seeds, req.checkpoint, req.model_preset, req.train_preset,
+        num_steps=req.num_steps, guidance=req.guidance,
+        room_guidance=req.room_guidance, arms=req.arms)
+    mgr = jobsmod.get_manager()
+    out = []
+    for body in bodies:
+        try:
+            job = mgr.enqueue("viz", body)
+        except (KeyError, ValueError) as e:
+            raise HTTPException(400, str(e)) from e
+        ab = body["ablation"]
+        out.append({"id": job.id, "state": job.state, "course": ab["course"],
+                    "arm": ab["arm"], "seed": ab["seed"]})
+    return {"submitted": out, "n": len(out)}
+
+
+@router.get("/analysis/course-study")
+def analysis_course_study() -> dict:
+    """Score every finished course cell: per-clip rows, the (course, arm) table,
+    and the room-vs-free / traj-vs-room deltas."""
+    _require_mode()
+    jobs = [j.to_dict() for j in jobsmod.get_manager().list()]
+    return coursemod.collect(jobs, cache.media_dir())
 
 
 @router.get("/analysis/compare-npy")

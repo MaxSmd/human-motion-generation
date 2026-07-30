@@ -17,6 +17,36 @@ import RemoteCheckpointPicker from "./RemoteCheckpointPicker";
 import VizJobResult from "./VizJobResult";
 import { useVizJob } from "@/lib/useVizJob";
 
+const FPS = 20; // HumanML3D
+
+// A frame window authored as a range on a [0, numFrames] track, with a live
+// seconds readout — so you author "1.0s–2.5s" instead of guessing frame integers.
+// `end === ""` means "to the last frame"; the readout resolves it to numFrames.
+export function FrameRange({ start, end, numFrames = 100, onStart, onEnd }) {
+  const s = Math.min(Number(start) || 0, numFrames);
+  const eResolved = end === "" || end == null ? numFrames : Math.min(Number(end), numFrames);
+  const secs = (f) => (f / FPS).toFixed(1);
+  return (
+    <div>
+      <div className="mb-1.5 flex items-center justify-between">
+        <span className="label">active frames</span>
+        <span className="font-mono text-[11px] text-[var(--signal)]">
+          {s}–{end === "" || end == null ? "end" : eResolved} <span className="text-[var(--muted)]">({secs(s)}s–{secs(eResolved)}s)</span>
+        </span>
+      </div>
+      <div className="space-y-1.5">
+        <input type="range" min="0" max={numFrames} step="1" value={s}
+          onChange={(e) => { const v = Number(e.target.value); onStart(v); if (v > eResolved) onEnd(v); }}
+          className="w-full accent-[var(--signal)]" aria-label="frame start" />
+        <input type="range" min="0" max={numFrames} step="1"
+          value={end === "" || end == null ? numFrames : eResolved}
+          onChange={(e) => { const v = Number(e.target.value); onEnd(v >= numFrames ? "" : Math.max(v, s)); }}
+          className="w-full accent-[var(--amber)]" aria-label="frame end" />
+      </div>
+    </div>
+  );
+}
+
 // Fallback joint list (SMPL 22) if /meta/joints can't be reached.
 export const FALLBACK_JOINTS = [
   "pelvis", "L_Hip", "R_Hip", "Spine1", "L_Knee", "R_Knee", "Spine2",
@@ -33,8 +63,12 @@ const newPin = () => ({
   frame_start: 0,
   frame_end: "", // "" ⇒ to last frame
 });
+// Exported so other authoring surfaces (the Lab's ablation setup) seed their
+// defaults through the SAME id counter. A hand-written `id: 1` would collide
+// with the first "+ add limit" here, and RangeEditor matches rows by id — the
+// edit would hit both rows and the remove would delete both.
 let _rid = 0;
-const newRange = () => ({
+export const newRange = () => ({
   id: ++_rid,
   joint: "L_Knee",
   bend_min: 0,
@@ -87,7 +121,7 @@ export default function ConstraintsTab({ checkpoints = [], clusterMode }) {
 
 // ───────────────────────────────────────────── the shared pin editor
 
-export function ConstraintEditor({ joints, pins, setPins }) {
+export function ConstraintEditor({ joints, pins, setPins, numFrames = 100 }) {
   const set = (id, k, v) => setPins((ps) => ps.map((p) => (p.id === id ? { ...p, [k]: v } : p)));
   const remove = (id) => setPins((ps) => ps.filter((p) => p.id !== id));
 
@@ -149,17 +183,9 @@ export function ConstraintEditor({ joints, pins, setPins }) {
               />
             </div>
 
-            <div className="mt-3 grid grid-cols-2 gap-3">
-              <label className="block">
-                <span className="label mb-1 block">frame start</span>
-                <input type="number" min="0" className="field-input" value={p.frame_start}
-                  onChange={(e) => set(p.id, "frame_start", e.target.value)} />
-              </label>
-              <label className="block">
-                <span className="label mb-1 block">frame end <span className="text-[var(--muted)]">(blank = all)</span></span>
-                <input type="number" min="0" className="field-input" placeholder="all" value={p.frame_end}
-                  onChange={(e) => set(p.id, "frame_end", e.target.value)} />
-              </label>
+            <div className="mt-3">
+              <FrameRange start={p.frame_start} end={p.frame_end} numFrames={numFrames}
+                onStart={(v) => set(p.id, "frame_start", v)} onEnd={(v) => set(p.id, "frame_end", v)} />
             </div>
           </div>
         ))}
@@ -170,7 +196,7 @@ export function ConstraintEditor({ joints, pins, setPins }) {
 
 // ───────────────────────────────────────────── the hinge-limit editor
 
-export function RangeEditor({ joints, ranges, setRanges }) {
+export function RangeEditor({ joints, ranges, setRanges, numFrames = 100 }) {
   const set = (id, k, v) => setRanges((rs) => rs.map((r) => (r.id === id ? { ...r, [k]: v } : r)));
   const remove = (id) => setRanges((rs) => rs.filter((r) => r.id !== id));
 
@@ -227,17 +253,9 @@ export function RangeEditor({ joints, ranges, setRanges }) {
               </label>
             </div>
 
-            <div className="mt-3 grid grid-cols-2 gap-3">
-              <label className="block">
-                <span className="label mb-1 block">frame start</span>
-                <input type="number" min="0" className="field-input" value={r.frame_start}
-                  onChange={(e) => set(r.id, "frame_start", e.target.value)} />
-              </label>
-              <label className="block">
-                <span className="label mb-1 block">frame end <span className="text-[var(--muted)]">(blank = all)</span></span>
-                <input type="number" min="0" className="field-input" placeholder="all" value={r.frame_end}
-                  onChange={(e) => set(r.id, "frame_end", e.target.value)} />
-              </label>
+            <div className="mt-3">
+              <FrameRange start={r.frame_start} end={r.frame_end} numFrames={numFrames}
+                onStart={(v) => set(r.id, "frame_start", v)} onEnd={(v) => set(r.id, "frame_end", v)} />
             </div>
           </div>
         ))}

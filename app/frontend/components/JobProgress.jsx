@@ -8,8 +8,9 @@
 //   • eval  — TWO bars: the ω guidance sweep (level i/N) + the batch within the
 //             current level; cancel only (eval isn't resumable).
 //   • viz   — one coarse bar over rendered clips / prompts; cancel only.
-// Renders nothing when no job is live. Shared by every workspace + the System
-// drawer; only one workspace mounts at a time, so it polls a single job.
+// Renders nothing when no job is live. Mounted ONLY in the System drawer
+// (ClusterTab) — the workspaces stay result-oriented; the header's "system"
+// button pulses while a job is live to point here.
 
 import { useCallback, useEffect, useState } from "react";
 import { api } from "@/lib/api";
@@ -136,6 +137,7 @@ export default function JobProgress({ jobs, onChange }) {
   const [prog, setProg] = useState(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
+  const [confirmingCancel, setConfirmingCancel] = useState(false);
 
   const jobId = job?.id;
   const fetchProg = useCallback(async () => {
@@ -153,21 +155,18 @@ export default function JobProgress({ jobs, onChange }) {
 
   if (!job) return null;
 
-  const act = (fn, confirmMsg) => async () => {
-    if (confirmMsg && !confirm(confirmMsg)) return;
+  const act = (fn) => async () => {
     setBusy(true); setErr(null);
     try { await fn(job.id); await fetchProg(); onChange?.(); }
     catch (e) { setErr(e.message); }
-    finally { setBusy(false); }
+    finally { setBusy(false); setConfirmingCancel(false); }
   };
 
   const color = STATE_COLOR[job.state] || "var(--muted)";
   const paused = job.state === "paused";
   const isTrain = job.kind === "train";
   const canPause = isTrain && (job.state === "pending" || job.state === "running");
-  const cancelMsg = isTrain
-    ? "Cancel this training run for good?"
-    : `Cancel this ${job.kind} job?`;
+  const cancelMsg = isTrain ? "cancel run for good?" : "cancel job?";
 
   return (
     <div className="surface p-5" style={{ borderColor: paused ? "var(--accent2)" : "var(--hairline)" }}>
@@ -197,10 +196,24 @@ export default function JobProgress({ jobs, onChange }) {
             </button>
           )}
           {LIVE.has(job.state) && (
-            <button onClick={act(api.cancelJob, cancelMsg)} disabled={busy}
-              className="rounded border border-rose-500/40 px-3 py-1 text-[11px] text-rose-300 hover:bg-rose-500/10 disabled:opacity-40">
-              cancel
-            </button>
+            confirmingCancel ? (
+              <span className="flex items-center gap-1.5">
+                <span className="text-[10px] text-rose-300">{cancelMsg}</span>
+                <button onClick={act(api.cancelJob)} disabled={busy}
+                  className="rounded border border-rose-500/60 bg-rose-500/10 px-2.5 py-1 text-[11px] font-semibold text-rose-300 hover:bg-rose-500/20 disabled:opacity-40">
+                  yes
+                </button>
+                <button onClick={() => setConfirmingCancel(false)} disabled={busy}
+                  className="rounded border border-[var(--hairline-strong)] px-2.5 py-1 text-[11px] text-slate-300 hover:text-slate-100">
+                  keep
+                </button>
+              </span>
+            ) : (
+              <button onClick={() => setConfirmingCancel(true)} disabled={busy}
+                className="rounded border border-rose-500/40 px-3 py-1 text-[11px] text-rose-300 hover:bg-rose-500/10 disabled:opacity-40">
+                cancel
+              </button>
+            )
           )}
         </span>
       </div>

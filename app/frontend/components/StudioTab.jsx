@@ -23,9 +23,12 @@ import { api, mediaUrl } from "@/lib/api";
 import { ACTIVE } from "@/lib/useVizJob";
 import { loadNpy } from "@/lib/npy";
 import { analyzeMotion, jointHoldStability, childrenFromParents } from "@/lib/motionMetrics";
+import { classifyJob, categoryMeta } from "@/lib/classifyJob";
 import ConstraintStage from "./ConstraintStage";
 import ConstraintAnalysis from "./ConstraintAnalysis";
+import CourseLab from "./CourseLab";
 import RemoteCheckpointPicker from "./RemoteCheckpointPicker";
+import PhraseAttestation from "./PhraseAttestation";
 
 const FALLBACK = [
   "pelvis", "L_Hip", "R_Hip", "Spine1", "L_Knee", "R_Knee", "Spine2",
@@ -72,6 +75,37 @@ function toRanges(ranges) {
   }));
 }
 
+// Inverse of toConstraints/toRanges — a loaded job's payload back into editor
+// rows, so the constraints a clip was sampled WITH land in the editor with it
+// (null frame_end is the "" blank = runs to the end).
+function fromConstraints(arr = []) {
+  return arr.map((c) => ({
+    id: ++_pid, joint: c.joint, bend_deg: c.bend_deg ?? 90,
+    strength: c.strength == null ? 1 : c.strength,
+    ease_frames: c.ease_frames ?? 0,
+    frame_start: c.frame_start ?? 0,
+    frame_end: c.frame_end == null ? "" : c.frame_end,
+  }));
+}
+function fromRanges(arr = []) {
+  return arr.map((r) => ({
+    id: ++_rid, joint: r.joint, bend_min: r.bend_min ?? 0, bend_max: r.bend_max ?? 90,
+    strength: r.strength == null ? 1 : r.strength,
+    ease_frames: r.ease_frames ?? 0,
+    frame_start: r.frame_start ?? 0,
+    frame_end: r.frame_end == null ? "" : r.frame_end,
+  }));
+}
+
+function agoLabel(ts) {
+  if (!ts) return "";
+  const s = Math.max(0, Date.now() / 1000 - ts);
+  if (s < 90) return "just now";
+  if (s < 3600) return `${Math.round(s / 60)}m ago`;
+  if (s < 86400) return `${Math.round(s / 3600)}h ago`;
+  return `${Math.round(s / 86400)}d ago`;
+}
+
 export default function StudioTab({ checkpoints = [], clusterMode }) {
   const [meta, setMeta] = useState(FALLBACK);
   const [form, setForm] = useState({
@@ -87,6 +121,11 @@ export default function StudioTab({ checkpoints = [], clusterMode }) {
   const [metrics, setMetrics] = useState(null);
   const [baseline, setBaseline] = useState(null); // metrics of last unconstrained sample
   const [baselineJoints, setBaselineJoints] = useState(null); // joints of last ◇ baseline
+  const [vizJobs, setVizJobs] = useState([]);   // finished viz jobs with a joints .npy — loadable into the stage
+  const [query, setQuery] = useState("");
+  const [catFilter, setCatFilter] = useState("all");
+  const [loadBusy, setLoadBusy] = useState(null); // key of the clip being loaded
+  const [loaded, setLoaded] = useState(null);     // key of the clip in the stage
   const [, setFrame] = useState(0);
   const [busy, setBusy] = useState(false);
   const [busyState, setBusyState] = useState(null); // cluster job state while sampling
@@ -98,10 +137,101 @@ export default function StudioTab({ checkpoints = [], clusterMode }) {
 
   useEffect(() => {
     api.metaJoints().then((m) => m?.joints?.length && setMeta(m.joints)).catch(() => {});
+    refreshVizJobs();
   }, []);
 
   const set = (k) => (e) =>
     setForm((f) => ({ ...f, [k]: e.target.type === "number" ? Number(e.target.value) : e.target.value }));
+
+  // ── load a finished viz render into the stage ─────────────────────────────
+  // Any done viz job that pulled a joints .npy is loadable; compare renders
+  // pair real-<cid>/gen-<cid> so gen goes into the viewport and GT becomes the
+  // ◇ baseline overlay (same slots the local sampling loop uses).
+  function refreshVizJobs() {
+    api.jobs()
+      .then((js) => setVizJobs(js.filter((j) => j.kind === "viz" && j.state === "done" && (j.outputs || []).some((o) => o.npy_url))))
+      .catch(() => {});
+  }
+
+  const loadables = useMemo(() => vizJobs.flatMap((j) => {
+    const p = j.params || {};
+    const cons = p.constraints || [];
+    const rngs = p.ranges || [];
+    const byId = {};
+    (j.outputs || []).filter((o) => o.npy_url).forEach((o) => {
+      const name = o.npy_url.split("/").pop();
+      const m = name.match(/^(real|gen)-(.+)\.npy$/);
+      const role = m ? m[1] : "gen";
+      const cid = m ? m[2] : name.replace(/\.npy$/, "");
+      const g = (byId[cid] = byId[cid] || { key: `${j.id}::${cid}`, cid, caption: "", outs: {} });
+      g.outs[role] = o;
+      if (o.caption) g.caption = o.caption;
+    });
+    return Object.values(byId).map((g) => ({
+      ...g,
+      job: j,
+      params: p,
+      cat: classifyJob(j),
+      at: j.submitted_at,
+      constraints: cons,
+      ranges: rngs,
+      jointsTouched: [...new Set([...cons, ...rngs].map((c) => c.joint))],
+      // everything the search box matches on, lowercased once
+      haystack: [g.caption, p.prompts, p.text, j.mode, j.id, p.checkpoint,
+        ...cons.map((c) => c.joint), ...rngs.map((r) => r.joint)]
+        .filter(Boolean).join(" ").toLowerCase(),
+    }));
+  }), [vizJobs]);
+
+  // filters: free-text over prompt/joints/checkpoint + a category chip row
+  const cats = useMemo(() => [...new Set(loadables.map((g) => g.cat))], [loadables]);
+  const shown = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return loadables
+      .filter((g) => (catFilter === "all" || g.cat === catFilter) && (!q || g.haystack.includes(q)))
+      .sort((a, b) => (b.at || 0) - (a.at || 0));
+  }, [loadables, query, catFilter]);
+
+  // Loading a clip restores the whole authoring context, not just the motion:
+  // the prompt + sampling settings it was made with, and — the point of the
+  // studio — the constraints it was sampled UNDER, so you can tweak one pin and
+  // resample instead of re-authoring from scratch.
+  async function loadFromJob(g) {
+    if (!g) return;
+    setLoadBusy(g.key);
+    setError(null);
+    try {
+      const main = g.outs.gen || Object.values(g.outs)[0];
+      const npy = await loadNpy(mediaUrl(main.npy_url));
+      setJoints(npy);
+      setMetrics(analyzeMotion(npy, 20));
+      if (g.outs.real && g.outs.gen) {
+        const rnpy = await loadNpy(mediaUrl(g.outs.real.npy_url));
+        setBaselineJoints(rnpy);
+        setBaseline(analyzeMotion(rnpy, 20));
+      } else {
+        setBaselineJoints(null);
+        setBaseline(null);
+      }
+      const p = g.params;
+      setForm((f) => ({
+        ...f,
+        text: g.caption || (p.prompts ?? p.text ?? f.text).split("|")[0],
+        guidance: p.guidance ?? f.guidance,
+        num_steps: p.num_steps ?? f.num_steps,
+        num_frames: p.num_frames ?? npy.shape?.[0] ?? f.num_frames,
+        seed: p.seed ?? f.seed,
+      }));
+      if (p.checkpoint) setCheckpoint(p.checkpoint);
+      setPins(fromConstraints(g.constraints));
+      setRanges(fromRanges(g.ranges));
+      setLoaded(g.key);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoadBusy(null);
+    }
+  }
 
   // Cluster mode has no local model/checkpoints, so the studio samples through
   // a cluster viz job (mode=prompt): submit → poll to completion → load the
@@ -214,6 +344,7 @@ export default function StudioTab({ checkpoints = [], clusterMode }) {
           <label className="block">
             <span className="label mb-1.5 block">prompt</span>
             <textarea rows={2} className="field-input resize-none" value={form.text} onChange={set("text")} />
+            <PhraseAttestation phrase={form.text} />
           </label>
           <div className="grid grid-cols-2 gap-3">
             <Field label="guidance ω"><input type="number" step="0.5" className="field-input" value={form.guidance} onChange={set("guidance")} /></Field>
@@ -249,6 +380,21 @@ export default function StudioTab({ checkpoints = [], clusterMode }) {
           )}
         </section>
 
+        {/* load an existing clip (any finished viz job with joints) into the stage */}
+        <ClipLibrary
+          clips={shown}
+          total={loadables.length}
+          cats={cats}
+          query={query}
+          setQuery={setQuery}
+          catFilter={catFilter}
+          setCatFilter={setCatFilter}
+          onLoad={loadFromJob}
+          loadBusy={loadBusy}
+          loaded={loaded}
+          onRefresh={refreshVizJobs}
+        />
+
         {/* contextual joint editor */}
         <JointEditor
           selName={selName}
@@ -280,6 +426,9 @@ export default function StudioTab({ checkpoints = [], clusterMode }) {
       jointNames={jointNames}
       fps={20}
     />
+
+    {/* ── euclidean obstacle courses: room + objects + trajectory, scored ── */}
+    <CourseLab clusterMode={clusterMode} />
     </div>
   );
 }
@@ -339,6 +488,104 @@ function LocalCheckpointPicker({ checkpoints = [], value, onChange }) {
         </select>
       </Field>
     </div>
+  );
+}
+
+// ───────────────────────────────────────── clip library (load into stage)
+// Every finished viz output with joints is a clip you can pull into the studio.
+// Each row states what the motion IS — prompt, category, ω/steps/frames/seed,
+// and the constraints it was sampled under — so you pick by motion, not by an
+// opaque job id. Search matches prompt text, joint names and checkpoint.
+function ClipLibrary({ clips, total, cats, query, setQuery, catFilter, setCatFilter, onLoad, loadBusy, loaded, onRefresh }) {
+  return (
+    <section className="surface space-y-3 p-5">
+      <div className="flex items-center justify-between">
+        <span className="label">clip library · {clips.length}{clips.length !== total ? ` / ${total}` : ""}</span>
+        <button onClick={onRefresh} className="btn-ghost text-[11px]">↻ REFRESH</button>
+      </div>
+
+      <input
+        className="field-input"
+        placeholder="search prompt, joint, checkpoint…"
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+      />
+      {cats.length > 1 && (
+        <div className="flex flex-wrap gap-1.5">
+          {["all", ...cats].map((c) => {
+            const meta = c === "all" ? { label: "all", color: "var(--muted)" } : categoryMeta(c);
+            const on = catFilter === c;
+            return (
+              <button key={c} onClick={() => setCatFilter(c)}
+                className={`rounded-full border px-2.5 py-0.5 text-[11px] transition ${on ? "text-slate-100" : "border-[var(--hairline)] text-[var(--muted)] hover:text-slate-300"}`}
+                style={on ? { borderColor: meta.color, background: "rgba(255,255,255,0.04)" } : undefined}>
+                {meta.label}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {clips.length === 0 ? (
+        <p className="text-[12px] text-[var(--muted)]">
+          {total === 0
+            ? "No finished renders with joints yet — generate a clip (here or in Prompt/Scene) and it shows up."
+            : "No clips match this filter."}
+        </p>
+      ) : (
+        <ul className="max-h-[22rem] space-y-1.5 overflow-y-auto pr-1">
+          {clips.map((g) => <ClipRow key={g.key} g={g} onLoad={onLoad} busy={loadBusy === g.key} active={loaded === g.key} />)}
+        </ul>
+      )}
+      <p className="label normal-case tracking-normal">
+        loading restores the prompt, sampling settings and the clip's constraints; compare renders put GT on the ◇ baseline overlay
+      </p>
+    </section>
+  );
+}
+
+function ClipRow({ g, onLoad, busy, active }) {
+  const p = g.params;
+  const meta = categoryMeta(g.cat);
+  const nCon = g.constraints.length + g.ranges.length;
+  const facts = [
+    p.guidance != null && `ω ${p.guidance}`,
+    p.num_steps != null && `${p.num_steps} steps`,
+    p.num_frames != null && `${p.num_frames}f`,
+    p.seed != null && `seed ${p.seed}`,
+    g.outs.real && "GT + gen",
+  ].filter(Boolean);
+
+  return (
+    <li>
+      <button onClick={() => onLoad(g)} disabled={busy}
+        className={`w-full space-y-1.5 rounded-md border px-3 py-2 text-left transition ${
+          active ? "border-[var(--signal)] bg-[var(--signal-dim)]" : "border-[var(--hairline)] hover:border-[var(--hairline-strong)]"
+        }`}>
+        <div className="flex items-start justify-between gap-2">
+          <span className="text-[12px] leading-snug text-slate-200">
+            {g.caption || <span className="font-mono text-[var(--muted)]">{g.cid}</span>}
+          </span>
+          <span className="shrink-0 rounded border px-1.5 text-[9px] uppercase tracking-wider"
+            style={{ borderColor: meta.color, color: meta.color }}>
+            {meta.label}
+          </span>
+        </div>
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 font-mono text-[10px] text-[var(--muted)]">
+          {facts.map((f) => <span key={f}>{f}</span>)}
+          <span className="ml-auto">{busy ? "loading…" : agoLabel(g.at)}</span>
+        </div>
+        {nCon > 0 && (
+          <div className="flex flex-wrap gap-1">
+            <span className="text-[10px] text-[var(--amber)]">{nCon} constraint{nCon > 1 ? "s" : ""}</span>
+            {g.jointsTouched.slice(0, 4).map((j) => (
+              <span key={j} className="rounded border border-[var(--hairline)] px-1 font-mono text-[9px] text-[var(--muted)]">{j}</span>
+            ))}
+            {g.jointsTouched.length > 4 && <span className="text-[9px] text-[var(--muted)]">+{g.jointsTouched.length - 4}</span>}
+          </div>
+        )}
+      </button>
+    </li>
   );
 }
 

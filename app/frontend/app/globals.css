@@ -18,7 +18,10 @@
   --signal-dim: rgba(34, 211, 238, 0.16);
   --amber: #fbbf24;
   --text: #dbe4f0;
-  --muted: #5f6b80;
+  /* muted nudged lighter (#5f6b80 → #737f96) so the many 10–11px mono labels
+     clear a comfortable contrast on the near-black surface without losing the
+     recessed "instrument readout" feel. */
+  --muted: #737f96;
   --font-display: "Bricolage Grotesque", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", monospace;
 }

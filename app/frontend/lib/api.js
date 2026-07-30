@@ -38,6 +38,15 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
+  // Caption-corpus support for a candidate phrase — "has the text encoder ever
+  // seen this language?". Drives the constraint→text ablation's go/no-go badge.
+  corpusPhrase: (q, examples = 4) =>
+    req(`/corpus/phrase?q=${encodeURIComponent(q)}&examples=${examples}`),
+  // Rank candidate phrasings of one motion by caption support — lets the
+  // archetype map propose variants and the corpus pick the winner.
+  corpusRank: (candidates, examples = 1) => post("/corpus/rank", { candidates, examples }),
+  corpusStatus: () => req("/corpus/status"),
+
   gtList: ({ subset_n = 0, subset_fraction = 0.01, subset_seed = 0, limit = 60 }) =>
     req(
       `/gt?subset_n=${subset_n}&subset_fraction=${subset_fraction}` +
@@ -63,6 +72,8 @@ export const api = {
         `&subset_seed=${subset_seed}&subset_n=${subset_n}&limit=${limit}&tag_seen=${tag_seen}` +
         `&q=${encodeURIComponent(q)}`
     ),
+  // Clip ids whose GT render is already stored → those pair up without GPU work.
+  clusterGtRegistry: () => req("/cluster/gt-registry"),
   runSampleSteps: (run) => req(`/cluster/run-sample-steps?run=${encodeURIComponent(run)}`),
 
   jobs: () => req("/cluster/jobs"),
@@ -83,13 +94,33 @@ export const api = {
 
   evalRuns: () => req("/cluster/eval-runs"),
   evalResults: (run) => req(`/cluster/eval/${encodeURIComponent(run)}`),
+  // Every matching run's metrics in ONE ssh round trip. Use this instead of
+  // looping evalResults() over a run list: that costs two SSH calls per run and
+  // spins forever whenever the login node is slow.
+  evalResultsBulk: (match = "", opts) =>
+    req(`/cluster/eval-results?match=${encodeURIComponent(match)}`, opts),
   analysisTable: (runs) =>
     req(`/cluster/analysis/table?runs=${encodeURIComponent(runs.join(","))}`),
   runMetrics: (run) => req(`/cluster/metrics?run=${encodeURIComponent(run)}`),
   runInfo: (run) => req(`/cluster/run-info?run=${encodeURIComponent(run)}`),
   analysisNpy: (job, name) =>
     req(`/cluster/analysis/npy?job=${encodeURIComponent(job)}&name=${encodeURIComponent(name)}`),
+  compareNpy: (job, real, gen) =>
+    req(`/cluster/analysis/compare-npy?job=${encodeURIComponent(job)}` +
+      `&real=${encodeURIComponent(real)}&gen=${encodeURIComponent(gen)}`),
+  // Extract contact constraints from a draft clip's foot plants → drop into
+  // scene.contacts for a constrained resample (Pass B).
+  autoContacts: (job, name, scene, fps = 20) =>
+    post("/cluster/analysis/auto-contacts", { job, name, scene, fps }),
   forensics: (run) => req(`/cluster/analysis/forensics?run=${encodeURIComponent(run)}`),
+
+  // ── obstacle-course study ────────────────────────────────────────────────
+  // The catalogue is the SINGLE source of the course geometry: the viewport
+  // draws it, the backend samples it, and the metrics score against it. The
+  // frontend deliberately declares no geometry of its own.
+  courses: () => req("/cluster/analysis/courses"),
+  submitCourseStudy: (body) => post("/cluster/jobs/course-study", body),
+  courseStudy: () => req("/cluster/analysis/course-study"),
 };
 
 function post(path, body) {

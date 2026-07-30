@@ -13,7 +13,7 @@
 // Primitives cover the requested set: sphere, round column (cylinder),
 // rectangular column / wall / rectangle (box).
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Canvas } from "@react-three/fiber";
 import {
   Edges,
@@ -29,6 +29,7 @@ import MediaViewer from "./MediaViewer";
 import MotionPlayer from "./MotionPlayer";
 import RemoteCheckpointPicker from "./RemoteCheckpointPicker";
 import VizJobResult from "./VizJobResult";
+import PhraseAttestation from "./PhraseAttestation";
 import { useVizJob } from "@/lib/useVizJob";
 
 const DEG = Math.PI / 180;
@@ -63,6 +64,37 @@ const DEFAULT_SCENE = {
   contacts: [], // [{ id, joint, target, object_id, x,y,z, tol, weight, frame_start, frame_end }]
   foot_skate_weight: 0, // >0 ⇒ penalise sliding planted feet during sampling
 };
+
+// Rebuild an editable scene from a job's persisted `params.scene`. Jobs carry
+// whatever the editor sent at submit time, which may predate later fields, so
+// every default is re-applied underneath. Ids come back too — the uid counters
+// are pushed past them so a later "+ Sphere" can't collide with a restored id
+// and silently drive the wrong object's gizmo.
+function absorbIds(raw) {
+  for (const o of raw?.objects || []) {
+    const m = /^obj-(\d+)$/.exec(o?.id || "");
+    if (m) _oid = Math.max(_oid, Number(m[1]));
+  }
+  for (const c of raw?.contacts || []) {
+    const m = /^c-(\d+)$/.exec(c?.id || "");
+    if (m) _cid = Math.max(_cid, Number(m[1]));
+  }
+}
+
+function hydrateScene(raw) {
+  if (!raw) return DEFAULT_SCENE;
+  absorbIds(raw);
+  return {
+    ...DEFAULT_SCENE,
+    ...raw,
+    room: { ...DEFAULT_SCENE.room, ...(raw.room || {}) },
+    spawn: { ...DEFAULT_SCENE.spawn, ...(raw.spawn || {}) },
+    objects: (raw.objects || []).map((o) => ({ ...o, id: o.id || uid(), label: o.label ?? "" })),
+    contacts: (raw.contacts || []).map((c) => ({
+      ...c, id: c.id || cuid(), frame_end: c.frame_end == null ? "" : c.frame_end,
+    })),
+  };
+}
 
 function makeContact(scene) {
   const firstObj = scene.objects[0];
@@ -149,7 +181,7 @@ const PRESETS = [
   { key: "pathstairs", label: "Path + stairs", build: presetPathStairs },
 ];
 
-export default function RoomEditor({ clusterMode = false, checkpoints = [] }) {
+export default function RoomEditor({ clusterMode = false, checkpoints = [], restore = null }) {
   const [scene, setScene] = useState(DEFAULT_SCENE);
   const [selectedId, setSelectedId] = useState(null); // object id | 'spawn' | null
   const [gizmo, setGizmo] = useState("translate"); // 'translate' | 'rotate'
@@ -174,6 +206,18 @@ export default function RoomEditor({ clusterMode = false, checkpoints = [] }) {
   };
 
   const addContact = () => setScene((s) => ({ ...s, contacts: [...(s.contacts || []), makeContact(s)] }));
+  // Replace the contact list with auto-extracted ones (from a draft's foot
+  // plants). Each server spec is wrapped with a local id + point/height defaults
+  // so it slots into the same editor rows as a hand-authored contact.
+  const setAutoContacts = (specs) =>
+    setScene((s) => ({
+      ...s,
+      contacts: (specs || []).map((c) => ({
+        id: cuid(), x: 0, y: 0.9, z: 0, object_id: null,
+        ...c,
+        frame_end: c.frame_end == null ? "" : c.frame_end,
+      })),
+    }));
   const updateContact = (id, patch) =>
     setScene((s) => ({ ...s, contacts: (s.contacts || []).map((c) => (c.id === id ? { ...c, ...patch } : c)) }));
   const removeContact = (id) =>
@@ -191,6 +235,16 @@ export default function RoomEditor({ clusterMode = false, checkpoints = [] }) {
     setSelectedId(null);
     setPreset(p.key);
   };
+
+  // Pull a past scene generation back onto the editing surface. The room stops
+  // matching any preset chip once it's someone's authored geometry, so clear the
+  // highlight rather than lie about which preset is active.
+  useEffect(() => {
+    if (!restore?.params?.scene) return;
+    setScene(hydrateScene(restore.params.scene));
+    setSelectedId(null);
+    setPreset(null);
+  }, [restore?.at]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div className="space-y-5">
@@ -398,14 +452,14 @@ export default function RoomEditor({ clusterMode = false, checkpoints = [] }) {
       </div>
     </div>
 
-      <RoomDispatch scene={scene} clusterMode={clusterMode} checkpoints={checkpoints} />
+      <RoomDispatch scene={scene} clusterMode={clusterMode} checkpoints={checkpoints} restore={restore} onAutoContacts={setAutoContacts} />
     </div>
   );
 }
 
 // ───────────────────────────────────────────── sample-in-room dispatch
 
-function RoomDispatch({ scene, clusterMode, checkpoints }) {
+function RoomDispatch({ scene, clusterMode, checkpoints, restore, onAutoContacts }) {
   const [form, setForm] = useState({
     text: "a person walks forward", guidance: 6.5, num_steps: 50, num_frames: 120, seed: 0, room_guidance: 0.75,
   });
@@ -415,14 +469,38 @@ function RoomDispatch({ scene, clusterMode, checkpoints }) {
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  // a clip pulled back out of history — takes over the preview until you sample
+  const [loaded, setLoaded] = useState(null);
   // cluster-mode job
   const { job, error: jobError, submitting, run } = useVizJob();
 
   const set = (k) => (e) =>
     setForm((f) => ({ ...f, [k]: e.target.type === "number" || e.target.type === "range" ? Number(e.target.value) : e.target.value }));
 
+  // Restore the sampling settings alongside the room (RoomEditor handles the
+  // geometry), and show the clip that job actually produced.
+  useEffect(() => {
+    const p = restore?.params;
+    if (!p?.scene) return;
+    setForm((f) => ({
+      ...f,
+      text: p.prompts ?? p.text ?? f.text,
+      guidance: p.guidance ?? f.guidance,
+      num_steps: p.num_steps ?? f.num_steps,
+      num_frames: p.num_frames ?? f.num_frames,
+      seed: p.seed ?? f.seed,
+      room_guidance: p.room_guidance ?? f.room_guidance,
+    }));
+    if (p.checkpoint) setCheckpoint(p.checkpoint);
+    const outs = restore.job?.outputs || [];
+    const out = outs.find((o) => o.npy_url) || outs[0] || null;
+    setLoaded(out ? { ...out, caption: out.caption || p.prompts || p.text || "" } : null);
+    setError(null);
+  }, [restore?.at]); // eslint-disable-line react-hooks/exhaustive-deps
+
   async function go(e) {
     e.preventDefault();
+    setLoaded(null); // sampling replaces the history clip in the preview
     if (clusterMode) {
       run({
         mode: "prompt", checkpoint, prompts: form.text, guidance: form.guidance,
@@ -446,12 +524,36 @@ function RoomDispatch({ scene, clusterMode, checkpoints }) {
   }
 
   // Joints .npy for the in-browser 3D player (placement already applied server
-  // side, so it's in the room's world frame). Local → joints_npy_url; cluster →
-  // first finished output's npy_url.
+  // side, so it's in the room's world frame). A clip loaded from history wins
+  // until the next sample; otherwise local → joints_npy_url, cluster → first
+  // finished output's npy_url.
   const clusterOut = clusterMode && job?.state === "done" ? (job.outputs || []).find((o) => o.npy_url) : null;
-  const jointsUrl = clusterMode
-    ? (clusterOut?.npy_url ? mediaUrl(clusterOut.npy_url) : null)
-    : (result?.joints_npy_url ? mediaUrl(result.joints_npy_url) : null);
+
+  // Pass A → Pass B bootstrap: read the just-sampled draft's foot plants and turn
+  // them into contacts (floor, or onto an obstacle top by xz). Cluster-only —
+  // the endpoint reads the pulled .npy locally.
+  const [extracting, setExtracting] = useState(false);
+  const [extractMsg, setExtractMsg] = useState(null);
+  const canAutoContact = !!(clusterMode && clusterOut && job?.id);
+  async function autoContact() {
+    if (!canAutoContact) return;
+    setExtracting(true); setExtractMsg(null);
+    try {
+      const name = clusterOut.npy_url.split("/").pop();
+      const res = await api.autoContacts(job.id, name, scene, scene.fps || 20);
+      onAutoContacts?.(res.contacts);
+      setExtractMsg(
+        `${res.count} contact${res.count === 1 ? "" : "s"} — ${res.on_obstacle} on obstacles, ${res.on_floor} on floor. ` +
+        (form.room_guidance > 0 ? "Re-sample to apply." : "Raise strength > 0, then re-sample."),
+      );
+    } catch (err) { setExtractMsg(`extraction failed: ${err.message}`); }
+    finally { setExtracting(false); }
+  }
+
+  const freshNpy = clusterMode ? clusterOut?.npy_url : result?.joints_npy_url;
+  const npyUrl = loaded ? loaded.npy_url : freshNpy;
+  const jointsUrl = npyUrl ? mediaUrl(npyUrl) : null;
+  const gifUrl = loaded ? loaded.media_url : (clusterOut?.media_url || result?.media_url);
 
   return (
     <div className="grid gap-5 lg:grid-cols-[340px_1fr]">
@@ -462,7 +564,8 @@ function RoomDispatch({ scene, clusterMode, checkpoints }) {
         </div>
 
         <label className="block"><span className="label mb-1.5 block">prompt</span>
-          <textarea rows={2} className="field-input resize-none" value={form.text} onChange={set("text")} /></label>
+          <textarea rows={2} className="field-input resize-none" value={form.text} onChange={set("text")} />
+          <PhraseAttestation phrase={form.text} /></label>
 
         {clusterMode ? (
           <RemoteCheckpointPicker value={checkpoint} onChange={setCheckpoint} onConfig={setPresets} />
@@ -506,22 +609,54 @@ function RoomDispatch({ scene, clusterMode, checkpoints }) {
       </form>
 
       <div className="surface p-5">
+        {loaded && (
+          <div className="mb-3 flex items-center justify-between gap-2 rounded-md border border-[var(--accent2)]/50 bg-[var(--accent2)]/10 px-2.5 py-1.5">
+            <span className="min-w-0 truncate text-[11px] text-slate-300">
+              <span className="font-semibold text-[var(--accent2)]">from history</span>
+              {loaded.caption ? <span className="text-[var(--muted)]"> · {loaded.caption}</span> : null}
+            </span>
+            <button onClick={() => setLoaded(null)} className="shrink-0 text-[11px] text-[var(--muted)] hover:text-slate-200">
+              ✕ clear
+            </button>
+          </div>
+        )}
         {jointsUrl ? (
           <>
             <div className="mb-3 flex items-center justify-between">
               <span className="label">3d preview · orbit to view from any angle</span>
-              {(clusterOut?.media_url || result?.media_url) && (
-                <a
-                  href={mediaUrl(clusterOut?.media_url || result?.media_url)}
-                  target="_blank" rel="noreferrer"
-                  className="text-[11px] text-[var(--muted)] hover:text-[var(--signal)]"
-                >
-                  open gif ↗
-                </a>
-              )}
+              <div className="flex items-center gap-3">
+                {canAutoContact && (
+                  <button
+                    onClick={autoContact}
+                    disabled={extracting}
+                    title="Read this draft's foot plants and turn them into contacts (floor / obstacle top)"
+                    className="text-[11px] text-[var(--signal)] hover:underline disabled:opacity-50"
+                  >
+                    {extracting ? "extracting…" : "⇊ auto-contacts from draft"}
+                  </button>
+                )}
+                {gifUrl && (
+                  <a
+                    href={mediaUrl(gifUrl)}
+                    target="_blank" rel="noreferrer"
+                    className="text-[11px] text-[var(--muted)] hover:text-[var(--signal)]"
+                  >
+                    open gif ↗
+                  </a>
+                )}
+              </div>
             </div>
+            {extractMsg && (
+              <p className="mb-2 rounded-md border border-[var(--hairline)] bg-[var(--signal-dim)] px-2 py-1 text-[11px] text-slate-300">
+                {extractMsg}
+              </p>
+            )}
             <MotionPlayer jointsUrl={jointsUrl} scene={scene} />
           </>
+        ) : loaded ? (
+          // pre-dates the npy dump (or the job only pulled a gif) — the flat
+          // render is all there is to show, but the room is still restored
+          <MediaViewer url={loaded.media_url} caption={loaded.caption} />
         ) : clusterMode ? (
           <VizJobResult job={job} error={jobError} submitting={submitting} emptyHint="Room-constrained clips will appear here." />
         ) : (

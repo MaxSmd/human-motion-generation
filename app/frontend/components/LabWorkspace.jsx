@@ -1,35 +1,51 @@
 "use client";
 
 // LAB workspace — the train → evaluate → read-results loop in one place. Folds
-// the old Model (train + eval submission) and Analysis (curves · eval LaTeX ·
-// clip comparison) tabs together so the "now go to the Analysis tab" hop is just
-// a mode switch. A run-history rail lists train/eval jobs beside it.
+// the old Model (train + eval submission) and Analysis tabs together so the "now
+// go to the Analysis tab" hop is just a mode switch. A run-history rail lists
+// train/eval jobs beside it.
+//
+// Analysis is split by the question being asked, not by the code that answers it:
+// run-level (curves · eval · calibration), one clip's dynamics, and constraints
+// (did the pin hold, what did it cost, and does saying it in the prompt help).
 
 import { useState } from "react";
 import ModelTab from "./ModelTab";
 import AnalysisTab from "./AnalysisTab";
+import ClipComparisonTab from "./ClipComparisonTab";
+import ConstraintAnalysisTab from "./ConstraintAnalysisTab";
 import HistoryRail from "./HistoryRail";
 import HistoryPreview from "./HistoryPreview";
-import JobProgress from "./JobProgress";
 import { useJobHistory } from "@/lib/useJobHistory";
 import { WORKSPACE_CATEGORIES } from "@/lib/classifyJob";
 
 const MODES = [
   { id: "run", label: "Train / Eval", sub: "submit GPU jobs" },
-  { id: "analysis", label: "Analysis", sub: "curves · eval · clip metrics" },
+  { id: "analysis", label: "Analysis", sub: "curves · eval · sampling" },
+  { id: "clips", label: "Clip comparison", sub: "real vs gen — one clip" },
+  { id: "constraints", label: "Constraint analysis", sub: "fidelity · cost · text ablation" },
 ];
+
+const PANES = {
+  run: (model) => <ModelTab model={model} />,
+  analysis: () => <AnalysisTab />,
+  clips: () => <ClipComparisonTab />,
+  constraints: () => <ConstraintAnalysisTab />,
+};
 
 export default function LabWorkspace({ model }) {
   const [mode, setMode] = useState("run");
   const [showRail, setShowRail] = useState(true);
   const [preview, setPreview] = useState(null); // history job loaded into the centre
-  const { jobs, all, refresh } = useJobHistory(WORKSPACE_CATEGORIES.lab);
+  const { jobs, all } = useJobHistory(WORKSPACE_CATEGORIES.lab);
+  // Track the previewed job in the live poll so a running train/eval opened
+  // from history updates in place; progress bars live in the System drawer.
+  const previewJob = preview ? all.find((j) => j.id === preview.id) || preview : null;
 
   const main = (
     <div className="min-w-0 space-y-5">
-      <JobProgress jobs={all} onChange={refresh} />
-      {preview && <HistoryPreview job={preview} onClose={() => setPreview(null)} />}
-      {mode === "run" ? <ModelTab model={model} /> : <AnalysisTab />}
+      {previewJob && <HistoryPreview job={previewJob} onClose={() => setPreview(null)} />}
+      {(PANES[mode] || PANES.run)(model)}
     </div>
   );
 

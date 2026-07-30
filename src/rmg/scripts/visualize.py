@@ -59,10 +59,18 @@ from rmg.flow import (  # noqa: E402
     WrappedGaussianPrior,
     build_bend_projector,
     build_room_energy_fn,
+    apply_path_facing,
+    build_trajectory_energy_fn,
+    build_trajectory_projector,
+    compose_energies,
+    compose_projectors,
+    describe_control,
     parse_bends,
     parse_scene,
+    parse_trajectory,
     place_motion,
     scene_energy_series,
+    trajectory_metrics,
 )
 from rmg.models import (  # noqa: E402
     DiTConfig,
@@ -78,6 +86,7 @@ from rmg.representation import (  # noqa: E402
 from rmg.representation.tplusr import decode as tplusr_decode  # noqa: E402
 from shared.utils import EMA, load_checkpoint, set_seed, write_progress  # noqa: E402
 from shared.render import render_joints  # noqa: E402
+from shared.geometry.footlock import lock_feet  # noqa: E402
 
 
 def _render(joints: np.ndarray, save_path: Path, title: str, fps: int,
@@ -288,7 +297,7 @@ def _batch_group_key(item: dict) -> str:
     the batch runs — so items differing in any of it need their own pass."""
     return json.dumps([
         item.get("constraints") or [], item.get("ranges") or [], item.get("scene"),
-        float(item.get("room_guidance") or 0.0),
+        float(item.get("room_guidance") or 0.0), item.get("trajectory"),
         int(item.get("num_frames", 100)), int(item.get("seed", 0)),
     ], sort_keys=True, default=str)
 
@@ -296,16 +305,18 @@ def _batch_group_key(item: dict) -> str:
 def _build_constraints(cfg, representation, skel, device, item, n_frames):
     """Sampling-time constraints for one group: fixed angles (inpainting) + hinge
     ranges (swing-twist projection) + euclidean room/obstacle guidance & exact spawn
-    placement. Returns (project_fn, energy_fn, guidance_weight, constraint_viz,
-    scene_obj) — all inert when the item carries no constraints."""
-    project_fn = energy_fn = None
+    placement + spatial trajectory targets. Returns (project_fn, energy_fn,
+    guidance_weight, constraint_viz, scene_obj, control) — all inert when the item
+    carries no constraints."""
+    project_fn = energy_fn = control = None
     guidance_weight = 0.0
     constraint_viz: list[dict] = []
     c_specs = list(item.get("constraints") or [])
     r_specs = list(item.get("ranges") or [])
     scene_obj = parse_scene(item.get("scene"))
-    if not (c_specs or r_specs or scene_obj):
-        return project_fn, energy_fn, guidance_weight, constraint_viz, scene_obj
+    control = parse_trajectory(item.get("trajectory"), n_frames)
+    if not (c_specs or r_specs or scene_obj or control):
+        return project_fn, energy_fn, guidance_weight, constraint_viz, scene_obj, control
     if cfg.representation.name not in CONSTRAINABLE_REPRESENTATIONS:
         raise ValueError(
             f"constraints need a quaternion representation "
@@ -319,13 +330,56 @@ def _build_constraints(cfg, representation, skel, device, item, n_frames):
         constraint_viz = _constraint_viz(bend_specs, n_frames)
         print(f"[visualize] applying {len(c_specs)} bend pin(s) + {len(r_specs)} bend range(s): "
               f"{c_specs} {r_specs}", flush=True)
+    energies: list = []
     if scene_obj:
         guidance_weight = float(item.get("room_guidance") or 0.0)
         if guidance_weight:
-            energy_fn = build_room_energy_fn(scene_obj, skel, num_joints=nj)
+            room_fn = build_room_energy_fn(scene_obj, skel, num_joints=nj)
+            energies.append(_scaled(room_fn, guidance_weight))
         print(f"[visualize] room scene: {scene_obj.room} m, {len(scene_obj.objects)} obstacle(s), "
               f"spawn={scene_obj.spawn}, guidance={guidance_weight}", flush=True)
-    return project_fn, energy_fn, guidance_weight, constraint_viz, scene_obj
+    if control:
+        # The trajectory projector runs LAST: it reads FK joint positions, so it
+        # must see whatever the bend clamp already did and absorb it.
+        project_fn = compose_projectors(
+            project_fn,
+            build_trajectory_projector(
+                control, skel, num_frames=n_frames, num_joints=nj, device=device),
+        )
+        traj_fn = build_trajectory_energy_fn(control, skel, num_joints=nj)
+        if traj_fn is not None:
+            energies.append(_scaled(traj_fn, control.guidance_weight))
+            guidance_weight = max(guidance_weight, float(control.guidance_weight))
+        print(f"[visualize] trajectory control: {describe_control(control)}", flush=True)
+    energy_fn = compose_energies(*energies)
+    return project_fn, energy_fn, guidance_weight, constraint_viz, scene_obj, control
+
+
+def _scaled(fn, weight: float):
+    """Scale an energy term so several can be summed with the right MIX.
+
+    The sampler normalises the gradient direction and applies one overall
+    `guidance_weight`, so a term's own weight only matters relative to the
+    others — which is exactly what it should control when a room and a
+    trajectory are guiding at the same time. With a single term the scaling
+    cancels, so existing room-only runs are unchanged.
+    """
+    w = float(weight)
+    return (lambda x: w * fn(x)) if w != 1.0 else fn
+
+
+def _load_trajectory(cfg) -> dict | None:
+    """Spatial trajectory targets for mode=prompt — from JSON env var
+    `RMG_TRAJECTORY` (set by the app) or `cfg.viz.trajectory`."""
+    raw = os.environ.get("RMG_TRAJECTORY", "").strip()
+    if raw:
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"RMG_TRAJECTORY is not valid JSON: {e}") from e
+    if "trajectory" in cfg.viz:
+        return OmegaConf.to_container(cfg.viz.trajectory, resolve=True)
+    return None
 
 
 def _load_scene(cfg) -> dict | None:
@@ -508,6 +562,7 @@ def main(cfg: DictConfig) -> None:
                 "ranges": _load_specs(cfg, "RMG_RANGES", "ranges"),
                 "scene": _load_scene(cfg),
                 "room_guidance": _room_guidance(cfg),
+                "trajectory": _load_trajectory(cfg),
                 "num_frames": int(cfg.viz.num_frames),
                 "seed": int(cfg.viz.seed),
             }
@@ -540,7 +595,7 @@ def main(cfg: DictConfig) -> None:
             head = chunk[0]                    # group-wide by construction
             n_frames = int(head.get("num_frames", 100))
             set_seed(int(head.get("seed", 0)))
-            project_fn, energy_fn, guidance_weight, constraint_viz, scene_obj = (
+            project_fn, energy_fn, guidance_weight, constraint_viz, scene_obj, control = (
                 _build_constraints(cfg, representation, skel, device, head, n_frames))
             scene_dict = head.get("scene")
             prompts = [it["prompt"] for it in chunk]
@@ -556,17 +611,39 @@ def main(cfg: DictConfig) -> None:
                     energy_fn=energy_fn, guidance_weight=guidance_weight,
                 )                                            # (B, T, ambient_dim)
 
+            # Facing is a post-pass, not an ODE hook — see `apply_path_facing`.
+            if control is not None and control.face_path:
+                samples = apply_path_facing(
+                    samples, control, skel, num_joints=int(representation.num_joints),
+                    project_fn=project_fn,
+                )
+
             for i, item in enumerate(chunk):
                 write_progress(out_dir, stage="render", inner={"i": done, "n": len(batch)})
                 prompt = item["prompt"]
                 tpr = tplusr_decode(samples[i])
-                if scene_obj is not None:
+                # Spawn placement rigidly moves the whole clip, which would undo
+                # trajectory targets expressed in world coordinates — so when a
+                # trajectory is driving, IT defines the placement.
+                if scene_obj is not None and control is None:
                     tpr.translation, tpr.quaternions = place_motion(
                         tpr.translation, tpr.quaternions, scene_obj.spawn)
+                elif scene_obj is not None and control is not None:
+                    print("[visualize] NOTE: spawn placement skipped — the trajectory "
+                          "control already fixes where the body is in the room.", flush=True)
                 joints_t = forward_kinematics(
                     skel, tpr.quaternions.float(), tpr.translation.float()
                 )                                            # (T,J,3), already placed
                 joints = joints_t.cpu().numpy()
+                # Foot lock: hold planted feet by IK. Purely a pose edit — the
+                # root is untouched, so it cannot disturb a position constraint.
+                # Only helps a clip that HAS a swing phase; on a shuffle it finds
+                # no airborne frame to unwind into and declines to act.
+                if control is not None and getattr(control, "foot_lock", False):
+                    joints, fl = lock_feet(joints, fps=float(cfg.viz.fps))
+                    print(f"[visualize] foot lock: {fl['stances']} stance(s), "
+                          f"{fl['frames_locked']} frames, max shift {fl['max_shift']:.3f} m",
+                          flush=True)
                 # World-constraint penalty over time + per-joint glow — the "how is
                 # the skeleton being punished" overlay. Computed on the SAME placed
                 # joints via the SAME SDFs the guidance energy used, so it's faithful.
@@ -584,6 +661,14 @@ def main(cfg: DictConfig) -> None:
                 entry = {"file": gif.name, "kind": "pred", "caption": prompt}
                 if item.get("job"):
                     entry["job"] = item["job"]
+                # Did the spatial control actually hold? Measured on the SAME
+                # joints that were rendered, so the manifest number and the video
+                # describe one motion — the app reads this straight back.
+                if control is not None:
+                    entry["trajectory"] = trajectory_metrics(
+                        joints_t.unsqueeze(0).float().cpu(), control)
+                    print(f"[visualize] {prompt[:40]!r} trajectory avg_err="
+                          f"{entry['trajectory']['avg_err']:.4f} m", flush=True)
                 manifest.append(entry)
         write_progress(out_dir, stage="done", complete=True,
                        inner={"i": len(batch), "n": len(batch)})

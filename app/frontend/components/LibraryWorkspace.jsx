@@ -3,8 +3,9 @@
 // LIBRARY workspace — render & browse motion that already exists (no new
 // sampling). Folds the old Visualize, Ground-Truth and Training tabs together.
 //
-//   cluster: VisualizeTab already covers GT clips / GT-vs-pred / training samples
-//            in one form, so it IS the library; a render-history rail sits beside.
+//   cluster: VisualizeTab already covers clip renders (always paired GT vs
+//            prediction) and training samples in one form, so it IS the library;
+//            a render-history rail sits beside.
 //   local  : a small switch between the dataset browser and the training-sample
 //            scrubber (these read in-process, not via the job queue).
 
@@ -14,7 +15,6 @@ import GTBrowserTab from "./GTBrowserTab";
 import TrainingViewerTab from "./TrainingViewerTab";
 import HistoryRail from "./HistoryRail";
 import HistoryPreview from "./HistoryPreview";
-import JobProgress from "./JobProgress";
 import { useJobHistory } from "@/lib/useJobHistory";
 import { WORKSPACE_CATEGORIES } from "@/lib/classifyJob";
 
@@ -26,12 +26,14 @@ export default function LibraryWorkspace({ clusterMode }) {
 function LibraryCluster() {
   const [showRail, setShowRail] = useState(true);
   const [preview, setPreview] = useState(null); // history job loaded into the centre
-  const { jobs, all, refresh } = useJobHistory(WORKSPACE_CATEGORIES.library);
+  const { jobs, all } = useJobHistory(WORKSPACE_CATEGORIES.library);
+  // Track the previewed job in the live poll so an in-flight render's preview
+  // updates as it completes; progress bars live in the System drawer.
+  const previewJob = preview ? all.find((j) => j.id === preview.id) || preview : null;
 
   const main = (
     <div className="min-w-0 space-y-5">
-      <JobProgress jobs={all} onChange={refresh} />
-      {preview && <HistoryPreview job={preview} onClose={() => setPreview(null)} />}
+      {previewJob && <HistoryPreview job={previewJob} onClose={() => setPreview(null)} />}
       <VisualizeTab />
     </div>
   );
@@ -41,7 +43,7 @@ function LibraryCluster() {
       <div className="flex items-center">
         <div>
           <div className="display text-base font-bold text-white">Library</div>
-          <div className="label mt-0.5">render GT clips · GT vs prediction · training samples</div>
+          <div className="label mt-0.5">render clips (always GT + prediction) · training samples</div>
         </div>
         <button onClick={() => setShowRail((s) => !s)}
           className="ml-auto rounded-md border border-[var(--hairline)] px-3 py-1.5 text-[12px] text-slate-300 hover:border-[var(--signal)] hover:text-[var(--signal)]">

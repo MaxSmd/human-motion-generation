@@ -1,0 +1,17 @@
+# Cloudflare Tunnel config for the containerised showcase.
+#
+# Mounted into the cloudflared service as /config.yml. The credentials JSON is
+# NOT in this repo — ~/.cloudflared is bind-mounted read-only at /etc/cloudflared,
+# so the secret stays on the host.
+#
+# Origin is the compose service name (not localhost): inside the container,
+# localhost is the cloudflared container itself.
+tunnel: bf237fa0-2107-4875-87a4-dff4aa99ae14
+credentials-file: /etc/cloudflared/bf237fa0-2107-4875-87a4-dff4aa99ae14.json
+
+ingress:
+  - hostname: riemannian-motion.space
+    service: http://showcase:80
+  - hostname: www.riemannian-motion.space
+    service: http://showcase:80
+  - service: http_status:404

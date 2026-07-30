@@ -5,8 +5,11 @@ import { api } from "@/lib/api";
 import CreateWorkspace from "@/components/CreateWorkspace";
 import LibraryWorkspace from "@/components/LibraryWorkspace";
 import LabWorkspace from "@/components/LabWorkspace";
+import TrajectoryTab from "@/components/TrajectoryTab";
 import SystemDrawer from "@/components/SystemDrawer";
 import ClusterGate from "@/components/ClusterGate";
+import { LightboxProvider } from "@/components/Lightbox";
+import ErrorBoundary from "@/components/ErrorBoundary";
 
 export default function Home() {
   const [health, setHealth] = useState(null);
@@ -58,22 +61,35 @@ export default function Home() {
       { id: "create", n: "01", label: "Create", sub: "prompt · constraints · scene" },
       { id: "library", n: "02", label: "Library", sub: "render · ground truth · samples" },
     ];
-    if (clusterMode) base.push({ id: "lab", n: "03", label: "Lab", sub: "train · eval · analysis" });
+    // Lab isn't integrated for MARDM yet — cluster-only and RMG-only.
+    if (clusterMode && model !== "mardm") base.push({ id: "lab", n: "03", label: "Lab", sub: "train · eval · analysis" });
+    // Trajectory (spatial mask-control) constraints. Deliberately its own tab
+    // while the feature is being evaluated, rather than folded into Create —
+    // it is the only surface where a joint is driven to world positions.
+    if (model !== "mardm") base.push({ id: "trajectory", n: "04", label: "Trajectory", sub: "spatial control · path targets" });
     return base;
-  }, [clusterMode]);
+  }, [clusterMode, model]);
 
   const [tab, setTab] = useState("create");
 
+  // If the selected tab disappears (e.g. switching to MARDM while on Lab),
+  // fall back to the first available tab.
+  useEffect(() => {
+    if (!tabs.some((t) => t.id === tab)) setTab(tabs[0].id);
+  }, [tabs, tab]);
+
   const panel = (
     <>
-      <nav className="mb-8 grid max-w-3xl grid-cols-2 gap-2 sm:grid-cols-3">
+      {/* flex (not a fixed grid) so all tabs stay on ONE row as the count grows —
+          they share the width evenly and only wrap on narrow viewports */}
+      <nav className="mb-8 flex max-w-5xl flex-wrap gap-2">
         {tabs.map((t) => {
           const active = tab === t.id;
           return (
             <button
               key={t.id}
               onClick={() => setTab(t.id)}
-              className={`group relative overflow-hidden rounded-xl border px-4 py-3 text-left transition ${
+              className={`group relative min-w-[190px] flex-1 overflow-hidden rounded-xl border px-4 py-3 text-left transition ${
                 active
                   ? "border-[var(--signal)] bg-[var(--signal-dim)]"
                   : "border-[var(--hairline)] hover:border-[var(--hairline-strong)]"
@@ -94,17 +110,26 @@ export default function Home() {
 
       {clusterMode && <SystemDrawer status={clusterStatus} open={systemOpen} onClose={() => setSystemOpen(false)} />}
 
+      {/* One boundary per tab: a crash in one workspace shows its own error and
+          leaves the rest of the app usable, instead of blanking the page with
+          Next's generic client-side-exception screen (no console on Safari). */}
       <div key={tab} className="animate-fade-up">
+        <ErrorBoundary label={tabs.find((t) => t.id === tab)?.label || tab}>
         {tab === "create" &&
           (model === "mardm" ? <MardmUnsupported feature="Create" /> : <CreateWorkspace clusterMode={clusterMode} checkpoints={checkpoints} />)}
         {tab === "library" &&
           (model === "mardm" ? <MardmUnsupported feature="Library" /> : <LibraryWorkspace clusterMode={clusterMode} />)}
-        {tab === "lab" && <LabWorkspace model={model} />}
+        {tab === "lab" && model !== "mardm" && <LabWorkspace model={model} />}
+        {tab === "trajectory" && model !== "mardm" && (
+          <TrajectoryTab clusterMode={clusterMode} checkpoints={checkpoints} />
+        )}
+        </ErrorBoundary>
       </div>
     </>
   );
 
   return (
+    <LightboxProvider>
     <div className="min-h-screen">
       <div className="mx-auto w-full max-w-[1920px] px-6 pb-20 pt-10 lg:px-10">
         <header className="mb-9 flex flex-wrap items-end justify-between gap-6 border-b border-[var(--hairline)] pb-6">
@@ -124,13 +149,18 @@ export default function Home() {
               {clusterMode && (
                 <>
                   <ModelToggle model={model} models={modelInfo?.models} onChange={changeModel} />
+                  {/* live job progress renders ONLY inside this drawer — the
+                      button pulses while anything runs so it stays findable */}
                   <button
                     onClick={() => setSystemOpen((o) => !o)}
                     className={`surface flex items-center gap-1.5 px-3 py-2 text-[11px] uppercase tracking-widest transition ${systemOpen ? "border-[var(--signal)] text-[var(--signal)]" : "text-[var(--muted)] hover:text-slate-200"}`}
-                    title="cluster monitor: status · squeue · jobs"
+                    title={queue?.active || queue?.queued ? "cluster monitor — a job is live: progress bars are in here" : "cluster monitor: status · squeue · jobs · live progress"}
                   >
-                    <span className="dot" style={{ color: clusterStatus?.state === "online" ? "var(--signal)" : "var(--amber)" }} />
-                    system
+                    <span
+                      className={`dot ${queue?.active || queue?.queued ? "animate-pulse-soft" : ""}`}
+                      style={{ color: queue?.active || queue?.queued ? "var(--amber)" : clusterStatus?.state === "online" ? "var(--signal)" : "var(--amber)" }}
+                    />
+                    system{queue?.active ? " · busy" : queue?.queued ? " · queued" : ""}
                   </button>
                 </>
               )}
@@ -142,6 +172,7 @@ export default function Home() {
         {clusterMode ? <ClusterGate>{panel}</ClusterGate> : panel}
       </div>
     </div>
+    </LightboxProvider>
   );
 }
 

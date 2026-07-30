@@ -2,7 +2,16 @@
 #SBATCH --job-name=rmg-viz
 #SBATCH --partition=24g
 #SBATCH --qos=students_normal
-#SBATCH --gres=gpu:1
+# The 12g partition mixes GPU generations and `ccc` in each node's GRES is its
+# compute capability x10: ulm/jena are TITANX (5.2) and dortmund is TITANXp (6.1),
+# which this CUDA container has no kernels for — a job landing there dies with
+# "no kernel image is available for execution on the device", and the traceback
+# points into the text encoder so it reads like a model bug. Asking for ccc:75
+# (a no_consume GRES, so it filters rather than reserves) keeps this off the old
+# cards however the script is submitted. The app already passes its own --gres
+# for 12g, which overrides this line; this is the guard for a direct sbatch.
+# NOTE: this cluster rejects --exclude outright.
+#SBATCH --gres=gpu:1,ccc:75
 #SBATCH --nodes=1
 #SBATCH --time=00:30:00
 #SBATCH --output=slurm/logs/rmg-viz-%j.out
@@ -56,6 +65,9 @@ CONSTRAINTS="${CONSTRAINTS:-}"
 RANGES="${RANGES:-}"
 SCENE="${SCENE:-}"
 ROOM_GUIDANCE="${ROOM_GUIDANCE:-0.0}"
+# Spatial (mask-control) trajectory targets: joints pinned to world positions at
+# chosen frames. Read as RMG_TRAJECTORY — see flow.trajectory.
+TRAJECTORY="${TRAJECTORY:-}"
 # Fused mode=prompt batch (JSON list). The vars above apply to every prompt in the
 # job; BATCH instead gives each its OWN prompt + constraints/ranges/scene/frames/
 # seed, so the app can render a whole study in ONE job instead of queueing N. When
@@ -80,6 +92,7 @@ enroot start \
     --env "RMG_RANGES=${RANGES}" \
     --env "RMG_SCENE=${SCENE}" \
     --env "RMG_ROOM_GUIDANCE=${ROOM_GUIDANCE}" \
+    --env "RMG_TRAJECTORY=${TRAJECTORY}" \
     --env "RMG_BATCH=${BATCH}" \
     "${IMAGE}" \
     bash -lc "

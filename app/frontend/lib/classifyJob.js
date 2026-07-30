@@ -22,6 +22,10 @@ export function classifyJob(job) {
   if (mode === "samples") return "samples";
   if (mode === "clip") return "clip";
   if (mode === "prompt") {
+    // Checked before scene/constraints: a trajectory job may also carry a room,
+    // but its defining feature is that a joint is driven to world positions —
+    // and it belongs in the Trajectory tab's rail, not Create's.
+    if (params.trajectory) return "trajectory";
     if (params.scene) return "scene";
     if (params.constraints?.length || params.ranges?.length) return "constrained";
     return "prompt";
@@ -34,6 +38,7 @@ export const CATEGORY_META = {
   prompt:      { label: "Prompt",      color: "var(--signal)" },
   constrained: { label: "Constrained", color: "var(--amber)" },
   scene:       { label: "Scene",       color: "var(--accent2)" },
+  trajectory:  { label: "Trajectory",  color: "#34d399" },
   clip:        { label: "GT clips",    color: "var(--muted)" },
   compare:     { label: "Compare",     color: "var(--signal)" },
   samples:     { label: "Samples",     color: "var(--accent2)" },
@@ -51,4 +56,5 @@ export const WORKSPACE_CATEGORIES = {
   create: ["prompt", "constrained", "scene"],
   library: ["clip", "compare", "samples"],
   lab: ["train", "eval"],
+  trajectory: ["trajectory"],
 };

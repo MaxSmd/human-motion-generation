@@ -23,7 +23,7 @@ import RemoteCheckpointPicker from "./RemoteCheckpointPicker";
 import VizJobResult from "./VizJobResult";
 import HistoryRail from "./HistoryRail";
 import HistoryPreview from "./HistoryPreview";
-import JobProgress from "./JobProgress";
+import { useLightbox } from "./Lightbox";
 import { useVizJob } from "@/lib/useVizJob";
 import { useJobHistory } from "@/lib/useJobHistory";
 import { WORKSPACE_CATEGORIES } from "@/lib/classifyJob";
@@ -48,28 +48,43 @@ const PRESETS = [
   "a person does jumping jacks",
 ];
 
+// One-click sampling-quality recipes (ODE steps + guidance). Draft trades
+// fidelity for speed; high pushes both up. These set num_steps + guidance
+// together so you don't fiddle two raw number boxes for the common cases.
+const QUALITY = [
+  { key: "draft", label: "draft", sub: "fast", cfg: { num_steps: 20, guidance: 5.5 } },
+  { key: "balanced", label: "balanced", sub: "default", cfg: { num_steps: 50, guidance: 6.5 } },
+  { key: "high", label: "high", sub: "slow", cfg: { num_steps: 120, guidance: 7.5 } },
+];
+
 export default function CreateWorkspace({ clusterMode, checkpoints = [] }) {
   const [mode, setMode] = useState("prompt");
   const [showRail, setShowRail] = useState(true);
   const [restore, setRestore] = useState(null); // {params, at} pushed from history
   const [preview, setPreview] = useState(null); // history job loaded into the centre
-  const { jobs, all, refresh } = useJobHistory(WORKSPACE_CATEGORIES.create);
+  const { jobs, all } = useJobHistory(WORKSPACE_CATEGORIES.create);
+
+  // Resolve the previewed job against the live poll so an in-flight job's
+  // preview keeps updating (state chip, outputs) instead of freezing at
+  // click-time. Live *progress bars* stay in the System drawer.
+  const previewJob = preview ? all.find((j) => j.id === preview.id) || preview : null;
 
   // Restoring a job's settings jumps to the right mode and prefills the editor.
-  function onRestore(params, cat) {
+  // The whole job rides along (not just params) so the scene editor can reload
+  // the clip that job produced, not merely the room that made it.
+  function onRestore(params, cat, job) {
     setMode(cat === "scene" ? "scene" : "prompt");
-    setRestore({ params, at: Date.now() });
+    setRestore({ params, job, at: Date.now() });
     setShowRail(true);
   }
 
   const main = (
     <div className="min-w-0 space-y-5">
-      {clusterMode && <JobProgress jobs={all} onChange={refresh} />}
-      {preview && <HistoryPreview job={preview} onClose={() => setPreview(null)} />}
+      {previewJob && <HistoryPreview job={previewJob} onClose={() => setPreview(null)} />}
       {mode === "prompt" && (
         <CreatePrompt clusterMode={clusterMode} checkpoints={checkpoints} restore={restore} />
       )}
-      {mode === "scene" && <RoomEditor clusterMode={clusterMode} checkpoints={checkpoints} />}
+      {mode === "scene" && <RoomEditor clusterMode={clusterMode} checkpoints={checkpoints} restore={restore} />}
       {mode === "studio" && <StudioTab clusterMode={clusterMode} checkpoints={checkpoints} />}
     </div>
   );
@@ -97,7 +112,8 @@ export default function CreateWorkspace({ clusterMode, checkpoints = [] }) {
           {main}
           <div className="xl:sticky xl:top-6 xl:self-start">
             <HistoryRail jobs={jobs} categories={WORKSPACE_CATEGORIES.create} onRestore={onRestore}
-              onOpen={setPreview} emptyHint="Generations you launch here collect by type." />
+              onOpen={setPreview}
+              emptyHint="Generations you launch here collect by type." />
           </div>
         </div>
       ) : (
@@ -124,7 +140,10 @@ function fromRanges(arr = []) {
   }));
 }
 
+const LOCAL_HIST_KEY = "rmg-local-generate-history";
+
 function CreatePrompt({ clusterMode, checkpoints, restore }) {
+  const { open: openLightbox } = useLightbox();
   const [joints, setJoints] = useState(FALLBACK_JOINTS);
   const [form, setForm] = useState({ text: "a person walks forward", guidance: 6.5, num_steps: 50, seed: 0, num_frames: 100 });
   const [checkpoint, setCheckpoint] = useState("");
@@ -132,7 +151,9 @@ function CreatePrompt({ clusterMode, checkpoints, restore }) {
   const [pins, setPins] = useState([]);
   const [ranges, setRanges] = useState([]);
 
-  // local-mode result + history strip
+  // local-mode result + history strip — persisted to localStorage so past
+  // generations stay viewable across reloads (local /generate has no job
+  // registry; the media files themselves live on in the backend's .media dir)
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -142,6 +163,7 @@ function CreatePrompt({ clusterMode, checkpoints, restore }) {
 
   useEffect(() => {
     api.metaJoints().then((m) => m?.joints?.length && setJoints(m.joints)).catch(() => {});
+    try { setLocalHist(JSON.parse(localStorage.getItem(LOCAL_HIST_KEY) || "[]")); } catch { /* corrupt/absent */ }
   }, []);
 
   // Pull settings in from a history "use these settings" click.
@@ -150,10 +172,11 @@ function CreatePrompt({ clusterMode, checkpoints, restore }) {
     const p = restore.params;
     setForm((f) => ({
       ...f,
-      text: p.prompts ?? p.text ?? f.text,
+      text: (p.prompts ?? p.text ?? f.text).replace(/\|/g, "\n"), // batch jobs join on "|"
       guidance: p.guidance ?? f.guidance,
       num_steps: p.num_steps ?? f.num_steps,
       num_frames: p.num_frames ?? f.num_frames,
+      seed: p.seed ?? f.seed,
     }));
     if (p.checkpoint) setCheckpoint(p.checkpoint);
     setPins(fromConstraints(p.constraints));
@@ -164,15 +187,22 @@ function CreatePrompt({ clusterMode, checkpoints, restore }) {
     setForm((f) => ({ ...f, [k]: e.target.type === "number" || e.target.type === "range" ? Number(e.target.value) : e.target.value }));
 
   const nActive = pins.length + ranges.length;
+  // Batch: one prompt per non-empty line. The cluster path samples them in a
+  // single job (visualize.py splits on "|"); >1 line disables constraints (a
+  // pin's frame window is prompt-specific) and the seconds/frame authoring.
+  const promptLines = form.text.split("\n").map((s) => s.trim()).filter(Boolean);
+  const nBatch = promptLines.length;
+  const activeQuality = QUALITY.find((q) => q.cfg.num_steps === form.num_steps && q.cfg.guidance === form.guidance)?.key;
+  const reroll = () => setForm((f) => ({ ...f, seed: (Number(f.seed) || 0) + 1 }));
 
   async function go(e) {
     e.preventDefault();
-    const constraints = pinsToConstraints(pins);
-    const rngs = rangesToPayload(ranges);
+    const constraints = nBatch > 1 ? [] : pinsToConstraints(pins);
+    const rngs = nBatch > 1 ? [] : rangesToPayload(ranges);
     if (clusterMode) {
       run({
-        mode: "prompt", checkpoint, prompts: form.text, guidance: form.guidance,
-        num_steps: form.num_steps, num_frames: form.num_frames,
+        mode: "prompt", checkpoint, prompts: promptLines.join("|"), guidance: form.guidance,
+        num_steps: form.num_steps, num_frames: form.num_frames, seed: form.seed,
         model_preset: presets?.model_preset, train_preset: presets?.train_preset,
         constraints, ranges: rngs,
       });
@@ -180,12 +210,16 @@ function CreatePrompt({ clusterMode, checkpoints, restore }) {
     }
     setLoading(true); setError(null);
     try {
-      const body = { ...form, constraints, ranges: rngs };
+      const body = { ...form, text: promptLines[0] || form.text, constraints, ranges: rngs };
       if (checkpoint) body.checkpoint = checkpoint;
       const res = await api.generate(body);
-      const item = { ...res, caption: form.text };
+      const item = { ...res, caption: body.text };
       setResult(item);
-      setLocalHist((h) => [item, ...h].slice(0, 12));
+      setLocalHist((h) => {
+        const next = [item, ...h].slice(0, 12);
+        try { localStorage.setItem(LOCAL_HIST_KEY, JSON.stringify(next)); } catch { /* quota */ }
+        return next;
+      });
     } catch (err) { setError(err.message); setResult(null); }
     finally { setLoading(false); }
   }
@@ -195,8 +229,15 @@ function CreatePrompt({ clusterMode, checkpoints, restore }) {
       <form className="space-y-5" onSubmit={go}>
         <div className="surface space-y-4 p-5">
           <div>
-            <div className="label mb-1.5">prompt</div>
-            <textarea rows={2} className="field-input resize-none" value={form.text} onChange={set("text")} />
+            <div className="mb-1.5 flex items-center justify-between">
+              <span className="label">prompt {clusterMode && <span className="text-[var(--muted)]">· one per line = batch</span>}</span>
+              {nBatch > 1 && (
+                <span className="rounded-full border border-[var(--amber)]/50 bg-[var(--amber)]/10 px-2 py-0.5 text-[10px] font-semibold text-[var(--amber)]">
+                  {nBatch} clips
+                </span>
+              )}
+            </div>
+            <textarea rows={nBatch > 1 ? Math.min(6, nBatch + 1) : 2} className="field-input resize-none" value={form.text} onChange={set("text")} />
             <div className="mt-2 flex flex-wrap gap-1.5">
               {PRESETS.map((p) => (
                 <button key={p} type="button" onClick={() => setForm((f) => ({ ...f, text: p }))}
@@ -218,25 +259,53 @@ function CreatePrompt({ clusterMode, checkpoints, restore }) {
             </Field>
           )}
 
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="guidance ω"><input type="number" step="0.5" className="field-input" value={form.guidance} onChange={set("guidance")} /></Field>
-            <Field label="ODE steps"><input type="number" className="field-input" value={form.num_steps} onChange={set("num_steps")} /></Field>
-            <Field label="frames"><input type="number" className="field-input" value={form.num_frames} onChange={set("num_frames")} /></Field>
-            {!clusterMode && <Field label="seed"><input type="number" className="field-input" value={form.seed} onChange={set("seed")} /></Field>}
+          <div>
+            <div className="mb-1.5 flex items-center justify-between">
+              <span className="label">quality</span>
+              <div className="flex gap-1.5">
+                {QUALITY.map((q) => (
+                  <button key={q.key} type="button" onClick={() => setForm((f) => ({ ...f, ...q.cfg }))} title={`${q.cfg.num_steps} steps · ω ${q.cfg.guidance}`}
+                    className={`rounded-md px-2.5 py-1 text-[11px] transition ${activeQuality === q.key ? "border border-[var(--signal)] bg-[var(--signal-dim)] text-[var(--signal)]" : "border border-[var(--hairline)] text-slate-400 hover:text-slate-200"}`}>
+                    {q.label}<span className="ml-1 text-[9px] text-[var(--muted)]">{q.sub}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="guidance ω"><input type="number" step="0.5" className="field-input" value={form.guidance} onChange={set("guidance")} /></Field>
+              <Field label="ODE steps"><input type="number" className="field-input" value={form.num_steps} onChange={set("num_steps")} /></Field>
+              <Field label="frames"><input type="number" className="field-input" value={form.num_frames} onChange={set("num_frames")} /></Field>
+              <Field label="seed">
+                <div className="flex gap-1.5">
+                  <input type="number" className="field-input" value={form.seed} onChange={set("seed")} />
+                  <button type="button" onClick={reroll} title="new seed → a different sample"
+                    className="shrink-0 rounded-md border border-[var(--hairline-strong)] px-2.5 text-[13px] text-slate-300 hover:border-[var(--signal)] hover:text-[var(--signal)]">
+                    ⟳
+                  </button>
+                </div>
+              </Field>
+            </div>
           </div>
         </div>
 
-        {/* collapsible constraint authoring — attaches to the same generate call */}
-        <Collapsible title="Joint constraints" sub="fixed bend angles + hinge ranges" badge={nActive || null}>
-          <div className="space-y-5">
-            <ConstraintEditor joints={joints} pins={pins} setPins={setPins} />
-            <RangeEditor joints={joints} ranges={ranges} setRanges={setRanges} />
-          </div>
-        </Collapsible>
+        {/* collapsible constraint authoring — attaches to the same generate call.
+            Disabled in batch mode: a pin's frame window is prompt-specific. */}
+        {nBatch > 1 ? (
+          <p className="surface px-5 py-3 text-[12px] text-[var(--muted)]">
+            Joint constraints are disabled while batching {nBatch} prompts — drop back to a single prompt to author pins.
+          </p>
+        ) : (
+          <Collapsible title="Joint constraints" sub="fixed bend angles + hinge ranges" badge={nActive || null}>
+            <div className="space-y-5">
+              <ConstraintEditor joints={joints} pins={pins} setPins={setPins} numFrames={form.num_frames} />
+              <RangeEditor joints={joints} ranges={ranges} setRanges={setRanges} numFrames={form.num_frames} />
+            </div>
+          </Collapsible>
+        )}
 
         <button type="submit" className="btn-signal w-full" disabled={(clusterMode && (submitting || !checkpoint)) || (!clusterMode && loading)}>
           {clusterMode
-            ? (submitting ? "SUBMITTING…" : nActive ? "▶  GENERATE (CONSTRAINED) ON CLUSTER" : "▶  GENERATE ON CLUSTER")
+            ? (submitting ? "SUBMITTING…" : nBatch > 1 ? `▶  GENERATE ${nBatch} CLIPS ON CLUSTER` : nActive ? "▶  GENERATE (CONSTRAINED) ON CLUSTER" : "▶  GENERATE ON CLUSTER")
             : (loading ? "Generating…" : nActive ? "▶  GENERATE (CONSTRAINED)" : "▶  GENERATE MOTION")}
         </button>
         {clusterMode && !checkpoint && <p className="label text-center">pick a remote checkpoint first</p>}
@@ -250,14 +319,23 @@ function CreatePrompt({ clusterMode, checkpoints, restore }) {
             <MediaViewer url={result?.media_url} caption={result?.caption} loading={loading} error={error} />
             {localHist.length > 0 && (
               <div className="space-y-2">
-                <h4 className="label">session history</h4>
+                <h4 className="label">history</h4>
                 <div className="flex gap-2 overflow-x-auto pb-2">
                   {localHist.map((h, i) => (
-                    <button key={i} type="button" onClick={() => setResult(h)} className="shrink-0 overflow-hidden rounded-md border border-[var(--hairline)] hover:border-[var(--signal)]">
-                      {h.media_url.toLowerCase().endsWith(".mp4")
-                        ? <video src={mediaUrl(h.media_url)} className="h-20 w-20 object-cover" muted />
-                        : <img src={mediaUrl(h.media_url)} alt={h.caption} className="h-20 w-20 object-cover" />}
-                    </button>
+                    // Click = fullscreen (with the rest of the strip arrow-key
+                    // reachable); ↺ puts it back in the viewport as the result.
+                    <div key={i} className="group relative shrink-0">
+                      <button type="button" onClick={() => openLightbox(localHist, i)} title={h.caption}
+                        className="block overflow-hidden rounded-md border border-[var(--hairline)] hover:border-[var(--signal)]">
+                        {h.media_url.toLowerCase().endsWith(".mp4")
+                          ? <video src={mediaUrl(h.media_url)} className="pointer-events-none h-20 w-20 object-cover" muted />
+                          : <img src={mediaUrl(h.media_url)} alt={h.caption} className="h-20 w-20 object-cover" />}
+                      </button>
+                      <button type="button" onClick={() => setResult(h)} title="load into viewport"
+                        className="absolute right-0.5 top-0.5 rounded bg-black/70 px-1 text-[9px] text-slate-300 opacity-0 transition hover:text-[var(--signal)] group-hover:opacity-100">
+                        ↺
+                      </button>
+                    </div>
                   ))}
                 </div>
               </div>

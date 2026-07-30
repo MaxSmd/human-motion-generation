@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 import { mediaUrl } from "@/lib/api";
 import { classifyJob, categoryMeta } from "@/lib/classifyJob";
+import { useLightbox } from "./Lightbox";
 
 const STATE_COLOR = {
   queued: "var(--amber)", submitting: "var(--muted)", pending: "var(--amber)",
@@ -77,6 +78,7 @@ function Chip({ active, onClick, label, color }) {
 
 function Row({ job, onRestore, onOpen }) {
   const [open, setOpen] = useState(false);
+  const { open: openLightbox } = useLightbox();
   const cat = classifyJob(job);
   const meta = categoryMeta(cat);
   const sColor = STATE_COLOR[job.state] || "var(--muted)";
@@ -105,10 +107,12 @@ function Row({ job, onRestore, onOpen }) {
             </span>
           </span>
         </button>
-        <button onClick={() => setOpen((o) => !o)} title="details"
-          className="shrink-0 px-1 text-[10px] text-[var(--muted)] hover:text-slate-200">
-          {open ? "▾" : "▸"}
-        </button>
+        <div className="flex shrink-0 items-center gap-1">
+          <button onClick={() => setOpen((o) => !o)} title="details"
+            className="px-1 text-[10px] text-[var(--muted)] hover:text-slate-200">
+            {open ? "▾" : "▸"}
+          </button>
+        </div>
       </div>
 
       {open && (
@@ -117,19 +121,20 @@ function Row({ job, onRestore, onOpen }) {
           {outputs.length > 0 && (
             <div className="flex gap-1.5 overflow-x-auto">
               {outputs.map((o, i) => (
-                <a key={i} href={mediaUrl(o.media_url)} target="_blank" rel="noreferrer" className="shrink-0" title={o.caption}>
+                <button key={i} type="button" onClick={() => openLightbox(outputs, i)}
+                  className="shrink-0" title={o.caption}>
                   {o.media_url.toLowerCase().endsWith(".mp4")
-                    ? <video src={mediaUrl(o.media_url)} className="h-16 w-16 rounded border border-[var(--hairline)] object-cover" muted />
-                    : <img src={mediaUrl(o.media_url)} alt={o.caption} className="h-16 w-16 rounded border border-[var(--hairline)] object-cover" />}
-                </a>
+                    ? <video src={mediaUrl(o.media_url)} className="h-16 w-16 rounded border border-[var(--hairline)] object-cover transition hover:border-[var(--signal)]" muted />
+                    : <img src={mediaUrl(o.media_url)} alt={o.caption} className="h-16 w-16 rounded border border-[var(--hairline)] object-cover transition hover:border-[var(--signal)]" />}
+                </button>
               ))}
             </div>
           )}
           <Params params={job.params} />
           {onRestore && job.params && (
-            <button onClick={() => onRestore(job.params, cat)}
+            <button onClick={() => onRestore(job.params, cat, job)}
               className="w-full rounded border border-[var(--hairline)] py-1 text-[10px] text-slate-300 hover:border-[var(--signal)] hover:text-[var(--signal)]">
-              ↻ use these settings
+              {cat === "scene" ? "↻ load room + clip into editor" : "↻ use these settings"}
             </button>
           )}
         </div>

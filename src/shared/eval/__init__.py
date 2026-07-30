@@ -9,8 +9,13 @@ from .metrics import (
     r_precision,
     r_precision_batch,
 )
+from .motion_quality import foot_skate_ratio, jerk, motion_quality, root_speed
 
 __all__ = [
+    "foot_skate_ratio",
+    "jerk",
+    "motion_quality",
+    "root_speed",
     "GuoEvaluator",
     "RealGuoEvaluator",
     "RandomGuoEvaluator",

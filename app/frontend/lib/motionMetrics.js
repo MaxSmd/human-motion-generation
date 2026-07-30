@@ -203,6 +203,116 @@ export function constraintSatisfaction(series, win, target, tolDeg = 5) {
   return { frac: ok / n, n, meanBend: sumBend / n, meanViol: sumViol / n, maxViol };
 }
 
+// Richer constraint-respect report for one pin/hinge over its window.
+//
+// `frac` (held %) saturates: every projected clip holds ~100%, so it can't tell a
+// constraint the model was happy to obey from one it fought the whole way. These
+// are the measures that separate those two:
+//
+//   demand        — mean violation in DEGREES. Read on an UNENFORCED clip this is
+//                   the headline number of the whole study: how far the prior
+//                   wants to be from the constraint. It's the conflict severity,
+//                   measured directly on the constraint instead of inferred from
+//                   jerk, and it's what the text is supposed to shrink.
+//   violIntegral  — Σ violation·dt (deg·s). Magnitude × duration, so a brief huge
+//                   breach and a long small drift stop looking alike.
+//   boundaryOcc   — hinge only: fraction of frames pinned within 1° of a limit.
+//                   A trace resting ON the boundary means the prior is pushing
+//                   through it and the projection is holding it back — strain
+//                   that "100% held" hides completely.
+//   longestHold   — longest unbroken satisfied run (seconds); catches hold-then-break.
+//
+// `target` is { bend } (pin) or { min, max } (hinge), as in constraintSatisfaction.
+export function constraintReport(series, win, target, tolDeg = 5, fps = 20) {
+  const base = constraintSatisfaction(series, win, target, tolDeg);
+  if (!base) return null;
+  const lo = Math.max(0, win?.start ?? 0);
+  const hi = Math.min(series.length, win?.end ?? series.length);
+  const dt = 1 / fps;
+  const isHinge = target.bend == null;
+  const EPS = 1; // deg; "resting on the limit"
+
+  let integral = 0, atBoundary = 0, n = 0;
+  let run = 0, longest = 0;
+  for (let f = lo; f < hi; f++) {
+    const v = series[f];
+    if (Number.isNaN(v)) continue;
+    n++;
+    const viol = isHinge
+      ? (v < target.min ? target.min - v : v > target.max ? v - target.max : 0)
+      : Math.abs(v - target.bend);
+    integral += viol * dt;
+    if (isHinge && viol === 0 && (Math.abs(v - target.min) <= EPS || Math.abs(v - target.max) <= EPS)) atBoundary++;
+    if (viol <= tolDeg) { run++; longest = Math.max(longest, run); } else run = 0;
+  }
+  return {
+    ...base,
+    demand: base.meanViol,
+    violIntegral: integral,
+    boundaryOcc: isHinge && n ? atBoundary / n : null,
+    longestHold: longest * dt,
+    windowSeconds: n * dt,
+  };
+}
+
+// Mean per-joint positional distance (metres) between two clips of the same
+// nominal motion, root-aligned per frame (subtract the pelvis) and truncated to
+// the shorter clip — so it measures POSE difference, not a global translation
+// offset. Used for diversity (same prompt, different seeds → higher = more
+// varied) and ODE convergence (distance to a high-step reference → lower =
+// converged). Both args are {shape, data} from loadNpy.
+export function clipDistance(A, B) {
+  const [Ta, Ja] = A.shape, [Tb, Jb] = B.shape;
+  const T = Math.min(Ta, Tb), J = Math.min(Ja, Jb);
+  if (T === 0 || J === 0) return null;
+  let total = 0, n = 0;
+  for (let f = 0; f < T; f++) {
+    const ar = jointAt(A.data, Ja, f, 0), br = jointAt(B.data, Jb, f, 0);
+    for (let j = 0; j < J; j++) {
+      const a = jointAt(A.data, Ja, f, j), b = jointAt(B.data, Jb, f, j);
+      // subtract each clip's own root, then difference
+      const dx = (a[0] - ar[0]) - (b[0] - br[0]);
+      const dy = (a[1] - ar[1]) - (b[1] - br[1]);
+      const dz = (a[2] - ar[2]) - (b[2] - br[2]);
+      total += Math.hypot(dx, dy, dz);
+      n++;
+    }
+  }
+  return n ? total / n : null;
+}
+
+// Same root-aligned pose distance as clipDistance, but decomposed in one pass:
+// the scalar `mean`, a per-JOINT vector (which body parts carry the difference —
+// arms flail, pelvis stays put) and a per-FRAME vector (WHEN in the clip the two
+// samples diverge). Truncated to the shorter clip; both vectors are averaged over
+// the other axis so they read in the same metres as `mean`. Powers the seed-
+// diversity decomposition (heatmap cell, per-joint bars, divergence envelope).
+export function clipDistanceDetailed(A, B) {
+  const [Ta, Ja] = A.shape, [Tb, Jb] = B.shape;
+  const T = Math.min(Ta, Tb), J = Math.min(Ja, Jb);
+  if (T === 0 || J === 0) return null;
+  const perJoint = new Float64Array(J);
+  const perFrame = new Float64Array(T);
+  let total = 0;
+  for (let f = 0; f < T; f++) {
+    const ar = jointAt(A.data, Ja, f, 0), br = jointAt(B.data, Jb, f, 0);
+    let frameSum = 0;
+    for (let j = 0; j < J; j++) {
+      const a = jointAt(A.data, Ja, f, j), b = jointAt(B.data, Jb, f, j);
+      const dx = (a[0] - ar[0]) - (b[0] - br[0]);
+      const dy = (a[1] - ar[1]) - (b[1] - br[1]);
+      const dz = (a[2] - ar[2]) - (b[2] - br[2]);
+      const d = Math.hypot(dx, dy, dz);
+      perJoint[j] += d;
+      frameSum += d;
+    }
+    perFrame[f] = frameSum / J;
+    total += frameSum;
+  }
+  for (let j = 0; j < J; j++) perJoint[j] /= T;
+  return { mean: total / (T * J), perJoint: Array.from(perJoint), perFrame: Array.from(perFrame), T, J };
+}
+
 // First child of each joint, derived from the parent table (for the hold proxy).
 export function childrenFromParents(parents) {
   const children = new Array(parents.length).fill(null);
