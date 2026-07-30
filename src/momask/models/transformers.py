@@ -302,3 +302,166 @@ class ResidualTransformer(_TransformerBackbone):
             )
             tokens = torch.cat([tokens, next_tokens.unsqueeze(1)], dim=1)
         return tokens
+
+
+class CodebookResidualTransformer(_TransformerBackbone):
+    """Official-style residual transformer using per-quantizer code embeddings.
+
+    Unlike `ResidualTransformer`, this mirrors MoMask's residual stage more
+    closely: previous residual levels are embedded with level-specific code
+    embeddings and summed in code space before the transformer predicts the
+    next quantizer's token distribution.
+    """
+
+    def __init__(
+        self,
+        cfg: TokenTransformerConfig | None = None,
+        num_quantizers: int = 6,
+        code_dim: int = 256,
+        share_weight: bool = False,
+    ) -> None:
+        cfg = cfg or TokenTransformerConfig()
+        super().__init__(cfg)
+        if num_quantizers < 2:
+            raise ValueError("num_quantizers must be >= 2")
+        self.num_quantizers = num_quantizers
+        self.code_dim = code_dim
+        self.share_weight = share_weight
+        self.pad_id = cfg.vocab_size
+        n_residual = num_quantizers - 1
+        if share_weight:
+            shared = nn.Parameter(torch.empty(n_residual, cfg.vocab_size + 1, code_dim))
+            nn.init.normal_(shared, mean=0.0, std=0.02)
+            self.token_embed_weight = shared
+            self.output_proj_weight = shared
+            self.output_proj_bias = None
+        else:
+            self.token_embed_weight = nn.Parameter(torch.empty(n_residual, cfg.vocab_size + 1, code_dim))
+            self.output_proj_weight = nn.Parameter(torch.empty(n_residual, cfg.vocab_size + 1, code_dim))
+            self.output_proj_bias = nn.Parameter(torch.zeros(n_residual, cfg.vocab_size + 1))
+            nn.init.normal_(self.token_embed_weight, mean=0.0, std=0.02)
+            nn.init.normal_(self.output_proj_weight, mean=0.0, std=0.02)
+        self.input_proj = nn.Linear(code_dim, cfg.hidden_dim)
+        self.output_proj = nn.Sequential(
+            nn.Linear(cfg.hidden_dim, cfg.hidden_dim),
+            nn.GELU(),
+            nn.LayerNorm(cfg.hidden_dim),
+            nn.Linear(cfg.hidden_dim, code_dim),
+        )
+        self.quant_embed = nn.Embedding(num_quantizers, cfg.hidden_dim)
+
+    def _history_codes(self, prev_tokens: Tensor, target_level: int) -> Tensor:
+        B, L, T = prev_tokens.shape
+        if L != target_level:
+            raise ValueError(f"expected {target_level} previous levels, got {L}")
+        safe_tokens = prev_tokens.clamp(0, self.pad_id)
+        out = torch.zeros(B, T, self.code_dim, device=prev_tokens.device, dtype=self.token_embed_weight.dtype)
+        for level in range(target_level):
+            out = out + F.embedding(safe_tokens[:, level], self.token_embed_weight[level])
+        return out
+
+    def _encode_codes(
+        self,
+        history_codes: Tensor,
+        target_level: int,
+        *,
+        cond: Tensor | None,
+        mask: Tensor | None,
+        drop_cond_mask: Tensor | None,
+    ) -> Tensor:
+        B, T, _ = history_codes.shape
+        if T > self.cfg.max_seq_len:
+            raise ValueError(f"sequence length {T} exceeds max_seq_len {self.cfg.max_seq_len}")
+        h = self.input_proj(history_codes) + self.pos_embed[:, :T]
+        c = self._condition(cond, B, h.device, drop_cond_mask).unsqueeze(1)
+        q = self.quant_embed(torch.full((B,), target_level, device=h.device, dtype=torch.long)).unsqueeze(1)
+        src = torch.cat([c, q, h], dim=1)
+        key_padding_mask = None
+        if mask is not None:
+            key_padding_mask = torch.cat(
+                [torch.zeros(B, 2, dtype=torch.bool, device=mask.device), ~mask],
+                dim=1,
+            )
+        out = self.encoder(src, src_key_padding_mask=key_padding_mask)
+        return self.norm(out[:, 2:])
+
+    def _project_logits(self, h: Tensor, target_level: int) -> Tensor:
+        idx = target_level - 1
+        code = self.output_proj(h)
+        weight = self.output_proj_weight[idx, : self.cfg.vocab_size]
+        logits = code @ weight.t()
+        if self.output_proj_bias is not None:
+            logits = logits + self.output_proj_bias[idx, : self.cfg.vocab_size]
+        return logits
+
+    def forward(
+        self,
+        prev_tokens: Tensor,
+        target_level: int,
+        *,
+        cond: Tensor | None = None,
+        mask: Tensor | None = None,
+        drop_cond_mask: Tensor | None = None,
+    ) -> Tensor:
+        if prev_tokens.dim() != 3:
+            raise ValueError(f"prev_tokens must be (B, L, T), got {tuple(prev_tokens.shape)}")
+        if not 1 <= target_level < self.num_quantizers:
+            raise ValueError(f"target_level must be in [1, {self.num_quantizers - 1}]")
+        history_codes = self._history_codes(prev_tokens, target_level)
+        h = self._encode_codes(
+            history_codes,
+            target_level,
+            cond=cond,
+            mask=mask,
+            drop_cond_mask=drop_cond_mask,
+        )
+        return self._project_logits(h, target_level)
+
+    def training_loss(
+        self,
+        tokens: Tensor,
+        target_level: int,
+        *,
+        cond: Tensor | None = None,
+        valid_mask: Tensor | None = None,
+        cond_drop_prob: float = 0.2,
+    ) -> Tensor:
+        prev = tokens[:, :target_level]
+        target = tokens[:, target_level]
+        drop = torch.rand(tokens.shape[0], device=tokens.device) < cond_drop_prob
+        logits = self(prev, target_level, cond=cond, mask=valid_mask, drop_cond_mask=drop)
+        if valid_mask is None:
+            return F.cross_entropy(logits.reshape(-1, logits.shape[-1]), target.reshape(-1))
+        return F.cross_entropy(logits[valid_mask], target[valid_mask])
+
+    @torch.no_grad()
+    def generate_residuals(
+        self,
+        base_tokens: Tensor,
+        *,
+        cond: Tensor | None,
+        num_quantizers: int | None = None,
+        guidance_scale: float = 4.0,
+        temperature: float = 1.0,
+        topk_filter_thres: float = 1.0,
+        sample: bool = False,
+        mask: Tensor | None = None,
+    ) -> Tensor:
+        tokens = base_tokens.unsqueeze(1)
+        Q = num_quantizers or self.num_quantizers
+        for level in range(1, Q):
+            logits_c = self(tokens, level, cond=cond, mask=mask)
+            if guidance_scale != 1.0 and cond is not None:
+                logits_u = self(tokens, level, cond=None, mask=mask)
+                logits = logits_u + guidance_scale * (logits_c - logits_u)
+            else:
+                logits = logits_c
+            next_tokens = (
+                sample_logits(logits, temperature=temperature, topk_filter_thres=topk_filter_thres)
+                if sample
+                else logits.argmax(dim=-1)
+            )
+            if mask is not None:
+                next_tokens = torch.where(mask, next_tokens, torch.zeros_like(next_tokens))
+            tokens = torch.cat([tokens, next_tokens.unsqueeze(1)], dim=1)
+        return tokens

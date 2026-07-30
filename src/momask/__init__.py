@@ -5,6 +5,7 @@ Shared data/eval utilities intentionally stay in `rmg` and `shared`; use
 """
 
 from .models import (
+    CodebookResidualTransformer,
     MaskedMotionTransformer,
     MotionRVQVAE,
     ResidualTransformer,
@@ -18,4 +19,5 @@ __all__ = [
     "TokenTransformerConfig",
     "MaskedMotionTransformer",
     "ResidualTransformer",
+    "CodebookResidualTransformer",
 ]

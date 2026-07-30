@@ -35,6 +35,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from momask.models import (
+    CodebookResidualTransformer,
     MaskedMotionTransformer,
     MotionRVQVAE,
     ResidualTransformer,
@@ -209,7 +210,7 @@ def build_vqvae(ckpt: dict, device: torch.device) -> MotionRVQVAE:
     return vqvae
 
 
-def build_token_models(ckpt: dict, device: torch.device) -> tuple[MaskedMotionTransformer, ResidualTransformer]:
+def build_token_models(ckpt: dict, device: torch.device):
     a = ckpt_args(ckpt)
     cfg = TokenTransformerConfig(
         vocab_size=int(a.get("codebook_size", 64)),
@@ -222,11 +223,19 @@ def build_token_models(ckpt: dict, device: torch.device) -> tuple[MaskedMotionTr
         dropout=float(a.get("transformer_dropout", 0.0)),
     )
     masked = MaskedMotionTransformer(cfg).to(device)
-    residual = ResidualTransformer(
-        cfg,
-        num_quantizers=int(a.get("num_quantizers", 3)),
-        separate_level_heads=not bool(a.get("shared_residual_head", False)),
-    ).to(device)
+    if a.get("residual_arch", "simple") == "codebook":
+        residual = CodebookResidualTransformer(
+            cfg,
+            num_quantizers=int(a.get("num_quantizers", 3)),
+            code_dim=int(a.get("vq_latent_dim", 32)),
+            share_weight=bool(a.get("residual_share_weight", False)),
+        ).to(device)
+    else:
+        residual = ResidualTransformer(
+            cfg,
+            num_quantizers=int(a.get("num_quantizers", 3)),
+            separate_level_heads=not bool(a.get("shared_residual_head", False)),
+        ).to(device)
 
     for key, model in (("masked_transformer", masked), ("residual_transformer", residual)):
         if key not in ckpt:

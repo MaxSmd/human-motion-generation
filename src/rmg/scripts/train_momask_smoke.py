@@ -23,6 +23,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Subset
 
 from momask.models import (
+    CodebookResidualTransformer,
     MaskedMotionTransformer,
     MotionRVQVAE,
     ResidualTransformer,
@@ -71,6 +72,16 @@ def parse_args() -> argparse.Namespace:
         "--load-token-checkpoint",
         default=None,
         help="Resume token-transformer training from a periodic token checkpoint.",
+    )
+    p.add_argument(
+        "--load-masked-checkpoint",
+        default=None,
+        help="Load only the masked/base-token transformer from an existing token checkpoint.",
+    )
+    p.add_argument(
+        "--freeze-masked-transformer",
+        action="store_true",
+        help="Train only the residual transformer after loading/freezing the masked transformer.",
     )
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--weight-decay", type=float, default=0.0)
@@ -125,6 +136,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--transformer-dropout", type=float, default=0.0)
     p.add_argument("--base-cond-drop", type=float, default=0.1)
     p.add_argument("--residual-cond-drop", type=float, default=0.2)
+    p.add_argument("--residual-arch", choices=["simple", "codebook"], default="simple")
+    p.add_argument(
+        "--residual-share-weight",
+        action="store_true",
+        help="For --residual-arch codebook, share residual input/output projection weights.",
+    )
     p.add_argument(
         "--base-full-mask-prob",
         type=float,
@@ -229,6 +246,8 @@ def restore_model_args(args: argparse.Namespace, ckpt: dict) -> None:
         "transformer_ffn_dim",
         "transformer_dropout",
         "shared_residual_head",
+        "residual_arch",
+        "residual_share_weight",
     )
     restore_names = vq_names + (transformer_names if "masked_transformer" in ckpt else ())
     for name in restore_names:
@@ -635,6 +654,11 @@ def main() -> None:
 
     text_encoder = build_text_encoder(args)
     print(f"[momask-smoke] text_encoder={args.text_encoder} text_dim={args.text_dim}", flush=True)
+    print(
+        f"[momask-smoke] residual_arch={args.residual_arch} "
+        f"residual_share_weight={args.residual_share_weight}",
+        flush=True,
+    )
     cached_batches = cache_token_batches(vqvae, text_encoder, loader, device, normalizer)
     token_batch_size = args.token_batch_size or args.batch_size
     token_cache = None
@@ -662,28 +686,52 @@ def main() -> None:
         dropout=args.transformer_dropout,
     )
     masked_model = MaskedMotionTransformer(cfg).to(device)
-    residual_model = ResidualTransformer(
-        cfg,
-        num_quantizers=args.num_quantizers,
-        separate_level_heads=not args.shared_residual_head,
-    ).to(device)
-    token_opt = torch.optim.AdamW(
-        list(masked_model.parameters()) + list(residual_model.parameters()),
-        lr=args.lr,
-        weight_decay=args.weight_decay,
-    )
+    if args.residual_arch == "codebook":
+        residual_model = CodebookResidualTransformer(
+            cfg,
+            num_quantizers=args.num_quantizers,
+            code_dim=args.vq_latent_dim,
+            share_weight=args.residual_share_weight,
+        ).to(device)
+    else:
+        residual_model = ResidualTransformer(
+            cfg,
+            num_quantizers=args.num_quantizers,
+            separate_level_heads=not args.shared_residual_head,
+        ).to(device)
     start_token_step = 0
+    optimizer_state = None
     if loaded_token_ckpt is not None:
         masked_model.load_state_dict(loaded_token_ckpt["masked_transformer"])
         residual_model.load_state_dict(loaded_token_ckpt["residual_transformer"])
         if "token_optimizer" in loaded_token_ckpt:
-            token_opt.load_state_dict(loaded_token_ckpt["token_optimizer"])
+            optimizer_state = loaded_token_ckpt["token_optimizer"]
         start_token_step = int(loaded_token_ckpt.get("step", 0))
         print(
             f"[momask-smoke] restored token transformers from step={start_token_step} "
             f"target_steps={args.token_steps}",
             flush=True,
         )
+    if args.load_masked_checkpoint:
+        masked_ckpt = torch_load(args.load_masked_checkpoint, map_location=device)
+        masked_model.load_state_dict(masked_ckpt["masked_transformer"])
+        print(f"[momask-smoke] restored masked transformer only from {args.load_masked_checkpoint}", flush=True)
+    if args.freeze_masked_transformer:
+        for param in masked_model.parameters():
+            param.requires_grad_(False)
+        masked_model.eval()
+        optimizer_state = None
+        print("[momask-smoke] frozen masked transformer; optimizer trains residual transformer only", flush=True)
+    token_params = list(residual_model.parameters())
+    if not args.freeze_masked_transformer:
+        token_params = list(masked_model.parameters()) + token_params
+    token_opt = torch.optim.AdamW(
+        token_params,
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+    )
+    if optimizer_state is not None:
+        token_opt.load_state_dict(optimizer_state)
 
     vqvae.eval()
     for step in range(start_token_step + 1, args.token_steps + 1):
@@ -707,13 +755,23 @@ def main() -> None:
             tok = tok.long()
             token_mask = token_mask.bool()
             cond = cond.float()
-        base_loss = masked_model.training_loss(
-            tok[:, 0],
-            cond=cond,
-            valid_mask=token_mask,
-            cond_drop_prob=args.base_cond_drop,
-            force_full_mask=bool(torch.rand(()) < args.base_full_mask_prob),
-        )
+        if args.freeze_masked_transformer:
+            with torch.no_grad():
+                base_loss = masked_model.training_loss(
+                    tok[:, 0],
+                    cond=cond,
+                    valid_mask=token_mask,
+                    cond_drop_prob=0.0,
+                    force_full_mask=True,
+                )
+        else:
+            base_loss = masked_model.training_loss(
+                tok[:, 0],
+                cond=cond,
+                valid_mask=token_mask,
+                cond_drop_prob=args.base_cond_drop,
+                force_full_mask=bool(torch.rand(()) < args.base_full_mask_prob),
+            )
         residual_parts = [
             residual_model.training_loss(
                 tok,
@@ -725,7 +783,7 @@ def main() -> None:
             for level in range(1, tok.shape[1])
         ]
         res_loss = torch.stack(residual_parts).mean() if residual_parts else base_loss.new_tensor(0.0)
-        loss = base_loss + res_loss
+        loss = res_loss if args.freeze_masked_transformer else base_loss + res_loss
         token_opt.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(list(masked_model.parameters()) + list(residual_model.parameters()), 1.0)
