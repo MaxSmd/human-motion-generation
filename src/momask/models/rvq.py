@@ -2,7 +2,7 @@
 
 The implementation keeps the repo-wide `(B, T, D)` motion layout and is meant
 to tokenize standard 263-D HumanML3D features returned by
-`HumanML3DDataset(..., output_mode="h3d_263")`.
+`shared.data.H3D263Dataset`.
 """
 
 from __future__ import annotations

@@ -25,9 +25,9 @@ from matplotlib.animation import FuncAnimation, PillowWriter
 from torch import Tensor
 
 from momask.models import MaskedMotionTransformer, MotionRVQVAE, ResidualTransformer, TokenTransformerConfig
-from rmg.data import HumanML3DDataset, collate
-from rmg.models import CLIPTextEncoder, RandomTextEncoder, TextEncoder
-from rmg.representation import H3D_FEATURE_DIM, PARENTS, quat_rotate, recover_joints_from_ric
+from shared.data import H3D263Dataset, collate
+from shared.text import CLIPTextEncoder, RandomTextEncoder, TextEncoder
+from shared.geometry import H3D_FEATURE_DIM, PARENTS, quat_rotate, recover_joints_from_ric
 
 plt.rcParams.update(
     {
@@ -365,7 +365,7 @@ def draw_path_frame(ax, joints_seq: Tensor, target: Tensor, anchor_mask: Tensor,
     ax.grid(True, linewidth=0.75, alpha=0.45)
 
 
-def select_sample(ds: HumanML3DDataset, start_idx: int, max_frames: int, min_root_span: float, auto: bool):
+def select_sample(ds: H3D263Dataset, start_idx: int, max_frames: int, min_root_span: float, auto: bool):
     if not auto:
         return start_idx, ds[start_idx], None
     best_idx = start_idx
@@ -398,13 +398,12 @@ def main() -> None:
     text_encoder = build_text_encoder(args, saved_args)
     vqvae, masked, residual = build_models(ckpt, device)
 
-    ds = HumanML3DDataset(
+    ds = H3D263Dataset(
         root=args.data_root,
         split=args.split,
         max_seq_len=max_seq_len,
         min_seq_len=args.min_seq_len,
         mirror_augment=False,
-        output_mode="h3d_263",
     )
     if not 0 <= args.sample < len(ds):
         raise ValueError(f"--sample must be in [0, {len(ds) - 1}]")

@@ -61,7 +61,7 @@ enroot start \
         set -euo pipefail
         cd ${REPO}
         pip install -e . --no-deps --quiet
-        python -u -m rmg.scripts.visualize_momask_constraints \
+        python -u -m momask.scripts.visualize_momask_constraints \
             --checkpoint '${CKPT}' \
             --data-root '${DATA_ROOT}' \
             --sample ${SAMPLE} \

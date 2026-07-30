@@ -109,7 +109,7 @@ enroot start \
                     tag=\"\${tag//./p}\"
                     out=\"${OUTPUT_DIR}/\${tag}.json\"
                     echo \"[momask-sweep] evaluating ckpt=\${ckpt} guidance=\${guidance} temp=\${temp} out=\${out}\"
-                    python -u -m rmg.scripts.evaluate_momask \
+                    python -u -m momask.scripts.evaluate_momask \
                         --checkpoint \"\${ckpt}\" \
                         --data-root '${DATA_ROOT}' \
                         --humanml3d-repo '${HUMANML3D_REPO}' \
@@ -136,5 +136,5 @@ enroot start \
             done
         done
 
-        python -u -m rmg.scripts.summarize_momask_sweep '${OUTPUT_DIR}' --variant full
+        python -u -m momask.scripts.summarize_momask_sweep '${OUTPUT_DIR}' --variant full
     "

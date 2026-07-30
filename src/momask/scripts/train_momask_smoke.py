@@ -3,7 +3,7 @@
 This is not the full MoMask training recipe. It is a cheap check that the data
 path and the three model stages can learn something on a very small subset:
 
-  1. Load `HumanML3DDataset(..., output_mode="h3d_263")`.
+  1. Load `shared.data.H3D263Dataset`.
   2. Train a small MotionRVQVAE for a handful of steps.
   3. Freeze/tokenize with the VQ-VAE.
   4. Train the masked base-token transformer and residual transformer briefly.
@@ -29,9 +29,9 @@ from momask.models import (
     ResidualTransformer,
     TokenTransformerConfig,
 )
-from rmg.data import CanonicalHumanML3DDataset, HumanML3DDataset, collate
-from rmg.models import CLIPTextEncoder, RandomTextEncoder, TextEncoder
-from rmg.representation import H3D_FEATURE_DIM, recover_joints_from_ric
+from shared.data import CanonicalHumanML3DDataset, H3D263Dataset, collate
+from shared.text import CLIPTextEncoder, RandomTextEncoder, TextEncoder
+from shared.geometry import H3D_FEATURE_DIM, recover_joints_from_ric
 
 
 def parse_args() -> argparse.Namespace:
@@ -525,13 +525,12 @@ def main() -> None:
         )
         feature_source = f"canonical:{args.canonical_h3d_dir}"
     else:
-        ds = HumanML3DDataset(
+        ds = H3D263Dataset(
             root=Path(args.data_root),
             split=args.split,
             max_seq_len=args.max_seq_len,
             min_seq_len=args.min_seq_len,
             mirror_augment=False,
-            output_mode="h3d_263",
         )
         feature_source = "packed-derived h3d_263"
     n = min(args.max_clips, len(ds))

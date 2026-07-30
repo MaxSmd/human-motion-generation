@@ -10,40 +10,51 @@ evaluator, and 263-D HumanML3D feature conversion are shared with the rest of
 the repository. See the top-level `README.md` for data setup and evaluator
 status before launching full training runs.
 
-Use the shared loader through the rmg compatibility wrapper in MoMask mode:
+Load training data straight from `shared` — MoMask imports no other model package:
 
 ```python
-from rmg.data import HumanML3DDataset
+from shared.data import H3D263Dataset
 
-ds = HumanML3DDataset(root, split="train", output_mode="h3d_263")
+ds = H3D263Dataset(root, split="train")
 ```
 
 This returns `sample.x1` as `(T-1, 263)` HumanML3D features, ready for
-`momask.models.MotionRVQVAE`.
+`momask.models.MotionRVQVAE`. To train on the *official* feature distribution
+the Guo evaluator was fitted on, use
+`shared.data.CanonicalHumanML3DDataset(root, canonical_dir=...)` instead, which
+reads `new_joint_vecs/*.npy` directly.
 
 ## Layout
 
 ```text
 src/momask/
-    models/        MotionRVQVAE, MaskedMotionTransformer, ResidualTransformer
+    models/        MotionRVQVAE, MaskedMotionTransformer, ResidualTransformer,
+                   CodebookResidualTransformer
     training/      Stage 1/2/3 single-step helpers
     tasks/         generation.py - text embedding -> 263-D motion sampling
+    scripts/       train_momask_smoke · evaluate_momask{,_constraints} ·
+                   visualize_momask_{checkpoint,constraints} ·
+                   resample_momask_checkpoint · summarize_momask_sweep
 configs/momask/    TODO: Hydra configs
-scripts/           TODO: train/evaluate entry points
 tests/test_momask.py
 ```
 
+Entry points run as `python -m momask.scripts.<name>`; the matching sbatch
+wrappers are `slurm/*_momask*.sbatch`.
+
 ## What to reuse
 
-- `rmg.data.HumanML3DDataset(..., output_mode="h3d_263")` + `rmg.data.collate`
-- `rmg.eval.RealGuoEvaluator` + `rmg.eval.{fid,r_precision,...}`
-- `rmg.models.text_encoder.Qwen3EmbeddingEncoder`
-- `rmg.utils.{EMA, Logger, save_checkpoint, load_checkpoint, set_seed, ...}`
+- `shared.data.H3D263Dataset` / `shared.data.CanonicalHumanML3DDataset` + `shared.data.collate`
+- `shared.eval.RealGuoEvaluator` + `shared.eval.{fid,r_precision,...}`
+- `shared.text.{CLIPTextEncoder, Qwen3EmbeddingEncoder, RandomTextEncoder}`
+- `shared.geometry.{H3D_FEATURE_DIM, PARENTS, recover_joints_from_ric, ...}`
+- `shared.utils.{EMA, Logger, save_checkpoint, load_checkpoint, set_seed, ...}`
 
 ## Do not reuse
 
-- `rmg.flow.*`, `rmg.manifolds.*`, or `rmg.representation.tplusr` inside the
-  MoMask model. MoMask operates on flat 263-D HumanML3D features.
+- Anything under `rmg.*`. MoMask operates on flat 263-D HumanML3D features and
+  must not depend on rmg's manifold representation (`rmg.flow`, `rmg.manifolds`,
+  `rmg.representation.tplusr`) or on rmg's package layout.
 
 ## Next Steps
 
