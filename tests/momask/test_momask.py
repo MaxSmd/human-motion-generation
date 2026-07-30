@@ -17,8 +17,8 @@ from momask.models import (
     TokenTransformerConfig,
 )
 from momask.tasks import generate_h3d263
-from rmg.data import HumanML3DDataset, collate
-from rmg.representation import H3D_FEATURE_DIM, NUM_JOINTS
+from shared.data import H3D263Dataset, collate
+from shared.geometry import H3D_FEATURE_DIM, NUM_JOINTS
 
 
 def _toy_offsets() -> torch.Tensor:
@@ -72,13 +72,12 @@ def _build_dataset(root: Path) -> None:
 
 def test_shared_dataset_can_emit_h3d_263_for_momask(tmp_path: Path) -> None:
     _build_dataset(tmp_path)
-    ds = HumanML3DDataset(
+    ds = H3D263Dataset(
         tmp_path,
         split="train",
         min_seq_len=10,
         max_seq_len=40,
         mirror_augment=False,
-        output_mode="h3d_263",
     )
     sample = ds[0]
     assert sample.x1.shape == (31, H3D_FEATURE_DIM)

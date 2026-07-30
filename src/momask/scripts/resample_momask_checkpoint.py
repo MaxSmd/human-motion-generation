@@ -13,7 +13,7 @@ from momask.models import (
     ResidualTransformer,
     TokenTransformerConfig,
 )
-from rmg.representation import H3D_FEATURE_DIM
+from shared.geometry import H3D_FEATURE_DIM
 
 
 def parse_args() -> argparse.Namespace:

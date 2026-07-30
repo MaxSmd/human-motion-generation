@@ -41,9 +41,9 @@ from momask.models import (
     ResidualTransformer,
     TokenTransformerConfig,
 )
-from rmg.data import HumanML3DDataset, collate
-from rmg.models import CLIPTextEncoder, RandomTextEncoder, TextEncoder
-from rmg.representation import H3D_FEATURE_DIM
+from shared.data import H3D263Dataset, collate
+from shared.text import CLIPTextEncoder, RandomTextEncoder, TextEncoder
+from shared.geometry import H3D_FEATURE_DIM
 from shared.eval import RandomGuoEvaluator, RealGuoEvaluator, diversity, fid, mm_distance, r_precision
 
 
@@ -472,13 +472,12 @@ def main() -> None:
             )
         masked, residual = build_token_models(ckpt, device)
 
-    ds = HumanML3DDataset(
+    ds = H3D263Dataset(
         root=args.data_root,
         split=args.split,
         max_seq_len=max_seq_len,
         min_seq_len=args.min_seq_len,
         mirror_augment=False,
-        output_mode="h3d_263",
     )
     loader = DataLoader(ds, batch_size=args.batch_size, shuffle=False, collate_fn=collate, num_workers=0, drop_last=False)
     evaluator = build_evaluator(args, device)

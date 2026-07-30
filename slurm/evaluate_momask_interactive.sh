@@ -53,7 +53,7 @@ enroot start \
         set -euo pipefail
         cd ${REPO}
         pip install -e . --no-deps --quiet
-        python -u -m rmg.scripts.evaluate_momask \
+        python -u -m momask.scripts.evaluate_momask \
             --checkpoint '${CKPT}' \
             --data-root '${DATA_ROOT}' \
             --split test \

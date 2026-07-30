@@ -1,4 +1,4 @@
-"""Tests for `rmg.eval.metrics` on synthetic features.
+"""Tests for `shared.eval.metrics` on synthetic features.
 
 We can't exercise the real Guo evaluator without ~hundreds of MB of
 checkpoints, but the metric formulas are isolated and have known limits:

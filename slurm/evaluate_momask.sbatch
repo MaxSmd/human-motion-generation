@@ -115,7 +115,7 @@ enroot start \
         cd ${REPO}
         pip install -e . --no-deps --quiet
         python -m spacy download en_core_web_sm --quiet
-        python -u -m rmg.scripts.evaluate_momask \
+        python -u -m momask.scripts.evaluate_momask \
             --checkpoint '${CKPT}' \
             --data-root '${DATA_ROOT}' \
             --humanml3d-repo '${HUMANML3D_REPO}' \

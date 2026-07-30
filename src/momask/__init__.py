@@ -1,7 +1,9 @@
 """MoMask reproduction components (Guo et al. 2024).
 
-Shared data/eval utilities intentionally stay in `rmg` and `shared`; use
-`HumanML3DDataset(..., output_mode="h3d_263")` for MoMask training data.
+Data, text-encoder and evaluator utilities live in `shared`; this package imports
+no other model package. Use `shared.data.H3D263Dataset` for MoMask training data
+(standard 263-D HumanML3D features), or `shared.data.CanonicalHumanML3DDataset`
+to train on the official `new_joint_vecs` distribution the Guo evaluator expects.
 """
 
 from .models import (

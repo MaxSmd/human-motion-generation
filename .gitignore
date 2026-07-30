@@ -41,6 +41,13 @@ node_modules/
 *.h5
 *.sqsh
 
+# stray logs + LaTeX aux junk (never commit these; runs/ already covers job output)
+*.log
+*.aux
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+
 # editor / OS
 .vscode/
 .idea/

@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 import torch
 from matplotlib.animation import FuncAnimation, PillowWriter
 
-from rmg.representation import PARENTS, recover_joints_from_ric
+from shared.geometry import PARENTS, recover_joints_from_ric
 
 
 def parse_args() -> argparse.Namespace:

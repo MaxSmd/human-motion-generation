@@ -110,7 +110,7 @@ enroot start \
         set -euo pipefail
         cd ${REPO}
         pip install -e . --no-deps --quiet
-        python -u -m rmg.scripts.train_momask_smoke \\
+        python -u -m momask.scripts.train_momask_smoke \\
             --data-root '${DATA_ROOT}' \\
             ${CANONICAL_ARG} \\
             --max-clips ${MAX_CLIPS} \\

@@ -38,9 +38,9 @@ from momask.models import (
     ResidualTransformer,
     TokenTransformerConfig,
 )
-from rmg.data import HumanML3DDataset, collate
-from rmg.models import CLIPTextEncoder, RandomTextEncoder, TextEncoder
-from rmg.representation import H3D_FEATURE_DIM, quat_rotate, recover_joints_from_ric
+from shared.data import H3D263Dataset, collate
+from shared.text import CLIPTextEncoder, RandomTextEncoder, TextEncoder
+from shared.geometry import H3D_FEATURE_DIM, quat_rotate, recover_joints_from_ric
 from shared.eval import RandomGuoEvaluator, RealGuoEvaluator, diversity, fid, mm_distance, r_precision
 
 
@@ -402,13 +402,12 @@ def main() -> None:
         except FileNotFoundError as e:
             print(f"[constraints] WARN: {e}; falling back to spaCy text encoding", flush=True)
 
-    ds = HumanML3DDataset(
+    ds = H3D263Dataset(
         root=args.data_root,
         split=args.split,
         max_seq_len=max_seq_len,
         min_seq_len=args.min_seq_len,
         mirror_augment=False,
-        output_mode="h3d_263",
     )
     loader = DataLoader(ds, batch_size=args.batch_size, shuffle=False, collate_fn=collate, num_workers=0)
 
