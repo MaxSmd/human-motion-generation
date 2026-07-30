@@ -10,16 +10,19 @@ under matched compute. It is not a 1:1 port — see *Key design decisions* below
 
 ## Status
 
-Code complete and smoke-validated end-to-end on CPU (AE → generation branch →
-sampling → eval bridge). **Real training is gated on the dataset**: per the
-top-level `README.md` "Data status", the packed dataset is still being
-debugged — do not train against it until `sanity_eval` passes.
+Trained and evaluated. The paper-M configuration, retrained on canonical
+features and scored with the standard 263-D Guo evaluator on the full HumanML3D
+test split, reaches **FID 0.097 / R@1 0.499** at CFG *w* = 4.0 — at or slightly
+better than the published 0.114 / 0.500. Tables and the runs behind them are in
+`reports/tables/` (`eval_genm_canonical.tex` is the current one).
 
-Param counts at the default `mardm_mini` scale: AE ≈ 18.8M, generation branch
-≈ 14.7M (the generation branch is the axis we scale; the AE is paper-faithful).
-Expect absolute FID well above the paper's 0.114 (their headline is the ~290M
-"XL" model; paper-"S" ~30M reaches ~0.278). The goal here is the *relative*
-standing vs. RMG/MoMask at matched, ≤1-day-per-model compute.
+A spatial-control layer sits on top of the base model — see `control/` and
+`reports/maskcontrol-differences.md`, which records what was translated from
+MaskControl exactly, where this implementation departs, and the measured cost of
+control at each phase.
+
+The smaller `mardm_mini` scale (AE ≈ 18.8M, generation branch ≈ 14.7M) is still
+in the configs and remains useful for cheap end-to-end checks.
 
 ## Method (two stages)
 
@@ -189,7 +192,7 @@ python -m mardm.scripts.train_mardm subset_frac=0.005 \
 
 ### Setting `max_steps` (throughput probe)
 
-`train.max_steps` in both configs are placeholders. Run a short probe
+`train.max_steps` in the `mardm_mini` configs are placeholders. Run a short probe
 (`train.max_steps=500`), read `steps_per_s` from the log, then set
 `max_steps ≈ steps_per_s × budget_seconds`. Budget the AE (cheap, a few hours)
 and the generation branch so the **sum ≤ ~23h** — the 1-day-per-model rule.
@@ -207,10 +210,13 @@ and the generation branch so the **sum ≤ ~23h** — the 1-day-per-model rule.
 
 ## Caveats
 
-- **Dataset blocker**: wait for `sanity_eval` (top-level README) before training.
 - **IK eval bridge needs `external/HumanML3D`**: the `essential→263` conversion
-  imports the upstream skeleton for IK; initialize the submodule (the eval
-  sbatch assumes it, as `sanity_eval` does). The bridge test is guarded without it.
+  imports the upstream skeleton for IK, so initialize the submodule (the eval
+  sbatch assumes it). The bridge test is guarded without it.
+- **The preload cache duplicates the shared loader's preprocessing by hand.**
+  `EssentialDataset._build_preload_cache` must mirror
+  `HumanML3DDataset.__getitem__` exactly, or `preload=True` and `preload=False`
+  yield different features. Cluster runs need `preload=True`.
 - **Off-by-one in eval**: generated motion is one frame shorter than the
   ground truth after the joints→263 round-trip; the evaluator handles per-sample
   lengths, and this matches the paper's reported conversion.
