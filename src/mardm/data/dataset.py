@@ -33,7 +33,7 @@ from torch import Tensor
 from torch.utils.data import Dataset
 
 from shared.data import HumanML3DDataset, HumanML3DSample, mirror_motion
-from shared.geometry import make_continuous, normalize_quaternions
+from shared.geometry import normalize_quaternions
 
 from ..representation import EssentialRepresentation
 
@@ -100,13 +100,20 @@ class EssentialDataset(Dataset):
                 quats: Tensor = blob["quats"]
                 texts: list[str] = blob["texts"]
 
-                q = make_continuous(normalize_quaternions(quats), time_dim=0)
+                # Must mirror `HumanML3DDataset.__getitem__` exactly, or the cache
+                # stops being a pure speedup. In particular: upper-hemisphere
+                # restriction only — no `make_continuous`. The shared loader
+                # deliberately dropped temporal sign-continuity (it let near-180°
+                # joint frames settle in the lower hemisphere and blew up the
+                # flow-matching target), and continuity here would flip the sign
+                # of a handful of frames relative to the on-the-fly path.
+                q = normalize_quaternions(quats)
                 x1 = self._rep.encode_clip(translation, q, skeleton=skeleton).float()
                 entry: dict = {"x1": x1, "texts": texts}
 
                 if self.inner.mirror_augment:
                     tm, qm = mirror_motion(translation, quats)
-                    qm = make_continuous(normalize_quaternions(qm), time_dim=0)
+                    qm = normalize_quaternions(qm)
                     entry["x1_mirrored"] = self._rep.encode_clip(tm, qm, skeleton=skeleton).float()
 
                 cache[clip_id] = entry
