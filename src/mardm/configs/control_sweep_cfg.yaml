@@ -1,0 +1,41 @@
+# CFG axis, held on the tol5_inline base (the best runtime-lever arm: FID 0.673
+# / avg 0.049 m at 512 clips). Every control result so far ran w=3.0, the
+# optimum found for UNGUIDED sampling — there is no reason the guided optimum
+# should sit at the same place, and stronger text conditioning pushes against
+# the freezing that z-optimization induces.
+#
+# w=3.0 is re-run here rather than reused from job 15149 so the new
+# foot_skate / motion_mag / jerk columns exist for the reference point too.
+# 128 clips: read FID against the 0.755 unguided floor at this scale.
+# Runs as a separate job from control_sweep_improve.yaml (its own GPU).
+
+- name: cfg1_5
+  tolerance: 0.05
+  repair_every: 3
+  repair_frac: 0.25
+  repair_iters: 5
+  cond_scale_override: 1.5
+- name: cfg3_0
+  tolerance: 0.05
+  repair_every: 3
+  repair_frac: 0.25
+  repair_iters: 5
+  cond_scale_override: 3.0
+- name: cfg4_5
+  tolerance: 0.05
+  repair_every: 3
+  repair_frac: 0.25
+  repair_iters: 5
+  cond_scale_override: 4.5
+- name: cfg6_0
+  tolerance: 0.05
+  repair_every: 3
+  repair_frac: 0.25
+  repair_iters: 5
+  cond_scale_override: 6.0
+- name: cfg7_5
+  tolerance: 0.05
+  repair_every: 3
+  repair_frac: 0.25
+  repair_iters: 5
+  cond_scale_override: 7.5

@@ -60,8 +60,13 @@ _T2M_CHAINS: tuple[tuple[int, ...], ...] = (
 )
 
 
-def _render(joints: np.ndarray, save_path: Path, title: str, fps: int) -> Path:
+def _render(joints: np.ndarray, save_path: Path, title: str, fps: int,
+            markers: np.ndarray | None = None) -> Path:
     """Render (T, 22, 3) joint positions to a GIF (Pillow — no ffmpeg).
+
+    `markers` (K, 3), optional: static world-space control waypoints, drawn as
+    fixed red X's the skeleton should thread — makes a spatial-control result
+    legible (you see the controlled joint pass through its target points).
 
     Also dumps the raw joints next to the GIF as `<stem>.npy` for local
     re-render to MP4 with a system ffmpeg.
@@ -75,8 +80,10 @@ def _render(joints: np.ndarray, save_path: Path, title: str, fps: int) -> Path:
     from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  (registers 3d projection)
 
     T = joints.shape[0]
-    pts = joints.reshape(-1, 3)
-    lo, hi = pts.min(axis=0), pts.max(axis=0)
+    span = joints.reshape(-1, 3)
+    if markers is not None and len(markers):
+        span = np.concatenate([span, markers.reshape(-1, 3)], axis=0)
+    lo, hi = span.min(axis=0), span.max(axis=0)
     center = (lo + hi) / 2
     radius = float(np.max(hi - lo)) / 2 * 1.1 + 1e-3
 
@@ -93,6 +100,10 @@ def _render(joints: np.ndarray, save_path: Path, title: str, fps: int) -> Path:
         ax.set_zlim(center[1] - radius, center[1] + radius)
         ax.set_xlabel("x"); ax.set_ylabel("z"); ax.set_zlabel("y")
         ax.view_init(elev=15, azim=-70)
+        if markers is not None and len(markers):
+            # Y<->Z swap to match the skeleton's axis convention above.
+            ax.scatter(markers[:, 0], markers[:, 2], markers[:, 1],
+                       c="red", marker="x", s=80, linewidths=2, depthshade=False)
 
     def update(t):
         _setup_axes()
@@ -107,6 +118,71 @@ def _render(joints: np.ndarray, save_path: Path, title: str, fps: int) -> Path:
     ani.save(str(gif_path), writer=PillowWriter(fps=fps))
     plt.close(fig)
     print(f"[viz] wrote {gif_path.name}  (+ joints {npy_path.name})", flush=True)
+    return gif_path
+
+
+def _render_compare(panels: list[tuple[np.ndarray, str]], save_path: Path,
+                    suptitle: str, fps: int, markers: np.ndarray | None = None) -> Path:
+    """Render several (T,22,3) motions side by side in one synchronized GIF.
+
+    `panels`: list of (joints, label) drawn left-to-right (e.g. Ground truth |
+    Unguided | Guided). `suptitle` (the text prompt) is the figure title. All
+    panels share a frame index (clipped to the shortest) and the same world
+    box + control `markers`, so poses are directly comparable across panels.
+    """
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    import textwrap
+
+    import matplotlib.pyplot as plt
+    from matplotlib.animation import FuncAnimation, PillowWriter
+    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  (registers 3d projection)
+
+    T = min(j.shape[0] for j, _ in panels)
+    panels = [(j[:T], lbl) for j, lbl in panels]
+    span = np.concatenate([j.reshape(-1, 3) for j, _ in panels], axis=0)
+    if markers is not None and len(markers):
+        span = np.concatenate([span, markers.reshape(-1, 3)], axis=0)
+    lo, hi = span.min(axis=0), span.max(axis=0)
+    center = (lo + hi) / 2
+    radius = float(np.max(hi - lo)) / 2 * 1.1 + 1e-3
+
+    n = len(panels)
+    fig = plt.figure(figsize=(6 * n, 6.5))
+    fig.suptitle("\n".join(textwrap.wrap(suptitle, width=40 * n)), fontsize=13)
+    axes, lines_per = [], []
+    for i, (_, label) in enumerate(panels):
+        ax = fig.add_subplot(1, n, i + 1, projection="3d")
+        ax.set_title(label, fontsize=11)
+        axes.append(ax)
+        lines_per.append([ax.plot([], [], [], "-o", linewidth=2, markersize=3)[0]
+                          for _ in _T2M_CHAINS])
+
+    def _setup(ax):
+        # HumanML3D is Y-up; matplotlib 3D treats Z as up, so swap Y<->Z.
+        ax.set_xlim(center[0] - radius, center[0] + radius)
+        ax.set_ylim(center[2] - radius, center[2] + radius)
+        ax.set_zlim(center[1] - radius, center[1] + radius)
+        ax.set_xlabel("x"); ax.set_ylabel("z"); ax.set_zlabel("y")
+        ax.view_init(elev=15, azim=-70)
+        if markers is not None and len(markers):
+            ax.scatter(markers[:, 0], markers[:, 2], markers[:, 1],
+                       c="red", marker="x", s=80, linewidths=2, depthshade=False)
+
+    def update(t):
+        artists = []
+        for (joints, _), ax, chain_lines in zip(panels, axes, lines_per):
+            _setup(ax)
+            for line, chain in zip(chain_lines, _T2M_CHAINS):
+                line.set_data(joints[t, list(chain), 0], joints[t, list(chain), 2])
+                line.set_3d_properties(joints[t, list(chain), 1])
+            artists += chain_lines
+        return artists
+
+    ani = FuncAnimation(fig, update, frames=T, interval=1000 // fps, blit=False)
+    gif_path = save_path.with_suffix(".gif")
+    ani.save(str(gif_path), writer=PillowWriter(fps=fps))
+    plt.close(fig)
+    print(f"[viz] wrote {gif_path.name}  ({n} panels, {T} frames)", flush=True)
     return gif_path
 
 

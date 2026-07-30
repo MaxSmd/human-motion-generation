@@ -1,0 +1,107 @@
+# Phase-3 probe: four independent attacks on the realism cost of control.
+# 128 clips (the cheap scale proved order-predictive against the 512-clip
+# confirmation — arm ordering matched exactly), so read FID against the
+# 128-clip unguided floor 0.755, NOT the 512-clip floor 0.268.
+#
+# Reference points at this scale (job 15149):
+#   opt30_tol5   FID  —      avg 0.015 m (512: 1.447)
+#   tol5_ramp    FID 1.574   avg 0.050 m
+#   tol5_inline  FID 0.823   avg 0.047 m
+#   combo_all    FID 0.565   avg 0.114 m
+#   unguided     FID 0.755   avg 0.648 m
+#
+# Every earlier lever attacked the OPTIMIZER. The diagnosis was that the
+# OBJECTIVE is the problem: `control_loss` is purely positional, so a static
+# pose is a global minimum whenever the prior's habit conflicts with the
+# waypoints. Arms below are grouped by which of the four proposals they test.
+# The new `foot_skate` / `motion_mag` / `jerk` columns are what actually
+# adjudicate this — FID is blind to damping, and `motion_mag` reads freezing
+# directly (compare against the `motion_real` reference row in results.json).
+#
+# NOTE on tolerance: it short-circuits the inner loop on the CONTROL term
+# alone, so it would cut the new realism terms off after ~5 iterations. All
+# objective-augmentation arms therefore run tolerance=0 (full 30 iters) and
+# are compared against `opt30`, not against the tol5_* arms.
+
+# --- reference at this scale, no aux terms ------------------------------
+- name: opt30
+  tolerance: 0.0
+
+# --- (1) objective augmentation: dynamics anchor + geometric foot skate --
+# dyn_weight scale: dynamics_loss is a squared velocity difference (~1e-4)
+# against a control term in metres (~5e-2), hence the large lambdas.
+- name: dyn50
+  tolerance: 0.0
+  dyn_weight: 50.0
+- name: dyn500
+  tolerance: 0.0
+  dyn_weight: 500.0
+- name: skate2
+  tolerance: 0.0
+  skate_weight: 2.0
+- name: skate20
+  tolerance: 0.0
+  skate_weight: 20.0
+- name: dyn_skate
+  tolerance: 0.0
+  dyn_weight: 500.0
+  skate_weight: 20.0
+
+# --- (2) root-channel reparameterization (joints=[0] only) --------------
+# inner_iters=0: unguided sampling, then a closed-form edit of dims 0:4.
+# Expect avg_err ~ 0 at unguided cost and unguided FID; the open question is
+# how much foot skate the root displacement introduces.
+- name: root
+  inner_iters: 0
+  root_edit: true
+- name: root_pol
+  inner_iters: 0
+  root_edit: true
+  root_edit_skate_iters: 30
+  root_edit_skate_weight: 1.0
+- name: root_pol_hi
+  inner_iters: 0
+  root_edit: true
+  root_edit_skate_iters: 50
+  root_edit_skate_weight: 5.0
+
+# --- (3) U-turn resampling (RePaint on the transport path) --------------
+# uturn_t is the time renoised BACK to: 0.7 is mild (30 % of the path
+# re-integrated), 0.5 aggressive. Built on the tol5 base for cost parity
+# with tol5_inline, which it is meant to replace.
+- name: uturn_mild
+  tolerance: 0.05
+  uturn_rounds: 2
+  uturn_t: 0.7
+  uturn_iters: 5
+- name: uturn_deep
+  tolerance: 0.05
+  uturn_rounds: 2
+  uturn_t: 0.5
+  uturn_iters: 5
+
+# --- (4) hard trust region + CFG ----------------------------------------
+# trust_radius is relative: ‖z − z₀‖ ≤ r·‖z₀‖ per token, projected after
+# every Adam step. Unlike prox_weight this bounds drift outright.
+- name: trust15
+  tolerance: 0.0
+  trust_radius: 0.15
+- name: trust05
+  tolerance: 0.0
+  trust_radius: 0.05
+- name: cfg6_inline
+  tolerance: 0.05
+  repair_every: 3
+  repair_frac: 0.25
+  repair_iters: 5
+  cond_scale_override: 6.0
+
+# --- best-guess stack of everything that should compose -----------------
+- name: combo3
+  tolerance: 0.0
+  dyn_weight: 500.0
+  skate_weight: 20.0
+  trust_radius: 0.15
+  repair_every: 3
+  repair_frac: 0.25
+  repair_iters: 5
