@@ -15,9 +15,8 @@ Pi behind a Cloudflare Tunnel.
 | `/evaluation` | The "we found no bug" validation story — the stage-by-stage audit scorecard, systems table, the two FID traps, the forensics |
 | `/training` | Training analysis — recipe, the geometry, the bf16 / antipodal-cut-locus stability story, cluster auto-resubmit |
 
-All numbers live in `lib/results.js` (transcribed from `docs/figures/make_figs.py`
-+ `docs/rmg_mid_validation.md`) — the single source of truth for every chart and
-table. The charts are dependency-free SVG; math is styled Unicode (no KaTeX dep).
+All numbers live in `lib/results.js` — the single source of truth for every chart
+and table here, with each block commenting the run and eval job it came from. The charts are dependency-free SVG; math is styled Unicode (no KaTeX dep).
 
 ## The flagship — Constraint Studio
 

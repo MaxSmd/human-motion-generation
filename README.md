@@ -1,125 +1,125 @@
-# Motion-generation reproductions on HumanML3D
+# Human motion representation
 
-Several motion-generation reproductions in one repo — `rmg` today, `momask` and
-`mardm` next — sharing one HumanML3D data pipeline, one Guo evaluator, one
-container, and one web + cluster control plane.
+Text-to-motion reproductions on HumanML3D. Three models share one data pipeline,
+one Guo evaluator, one container, and one web + cluster control plane:
 
----
+- **RMG** — the primary contribution. Riemannian flow matching on the pose
+  manifold **R³ × (S³)²²**: the root translates in Euclidean space while all 22
+  joint rotations live on the quaternion sphere, so the model integrates an ODE
+  along geodesics instead of denoising a flat vector. Adds sampling-time
+  **constraints** (joint-angle limits, pelvis waypoints, scene collision) that
+  project exactly onto the manifold rather than being penalised into place.
+- **MARDM** — masked autoregressive diffusion, plus a spatial-control layer
+  (guidance, a trained condition regularizer, and a closed-form root edit).
+- **MoMask** — residual VQ-VAE tokenizer with masked and residual token
+  transformers.
 
-## Repo layout
+A public write-up of the RMG results is at
+[riemannian-motion.space](https://riemannian-motion.space).
 
-```
-src/
-  shared/               model-agnostic, shared by every model:
-    data/               HumanML3D pack (prepare_humanml3d) + load/mirror/subset/crop/pad
-    geometry/           SMPL skeleton + forward kinematics + 263-D feature conversion
-    eval/               Guo evaluator + FID/R@k/Diversity/MM-Dist
-    utils/              EMA · checkpointing · logging · seeding · scheduler
-  rmg/                  Riemannian flow matching on (R³ × S³^22)
-    configs/            Hydra configs (data / model / representation / train + train.yaml)
-    scripts/            entry points: train · evaluate · visualize
-    data/               packed-clip reader + manifold encoding (composes shared.data)
-    flow/ manifolds/ models/ representation/   (rmg manifold reps; geometry → shared)
-  momask/               MoMask: residual VQ-VAE + masked/residual token transformers
-    models/ scripts/ tasks/ training/    (263-D H3D features; shared only, no rmg)
-  mardm/                MARDM + spatial control (guidance, condition regularizer)
-    configs/ control/ models/ representation/ scripts/ tasks/
+## Results
 
-app/
-  backend/              FastAPI: SLURM control plane + in-process rmg inference
-  frontend/             Next.js UI
+**RMG on the full HumanML3D test split.** Each row is at its own best guidance
+scale ω and ODE step count:
 
-slurm/
-  rmg/  momask/  mardm/    per-model jobs (rmg: train · eval · viz)
-  prep_data.sbatch    prep_features.sbatch    build_image.sbatch
-  ensure_eval_assets.sh                                            (shared)
-containers/             enroot image: Dockerfile + requirements.txt
-external/               git submodules: HumanML3D, text-to-motion
-tests/{rmg,shared,momask,mardm,app}/   pytest suite
-runs/<model>/{train,eval,viz}/   run outputs (gitignored)
-```
+| | params | FID ↓ | R@1 ↑ | R@3 ↑ | MM-Dist ↓ | Diversity → |
+|---|---|---|---|---|---|---|
+| Real motion (reference) | — | 0.0019 | 0.513 | 0.797 | 3.10 | 9.79 |
+| **RMG-mid** (ours, ω 6.5 / 800) | 111.7 M | **0.429** | 0.507 | 0.790 | 3.13 | 9.06 |
+| RMG-base (ours, ω 5.5 / 200) | 24.7 M | 8.049 | 0.224 | 0.479 | 5.40 | 8.06 |
+| RMG paper (600k steps) | ≈460 M | 0.043 | 0.525 | — | — | 9.56 |
 
-Each model package is independently importable (`import rmg`); `pyproject.toml`
-picks them up automatically.
+Retrieval quality essentially matches the paper: R@1 0.507 against their 0.525,
+with our value just under the 0.513 real-motion reference and theirs marginally
+above it. FID does not match — we land an order of magnitude higher. Scaling
+accounts for the bulk of that: RMG-base → RMG-mid is 4.5× the parameters for a
+**13× FID improvement** (8.049 → 0.607, both at 200 ODE steps, each at its own
+best ω), and we stop at roughly a quarter of the paper's compute (111.7 M / 300k
+vs ≈460 M / 600k).
 
----
+Two caveats on that FID column: ours is a **single pass** over the test split
+while the published figure is a 20-replication mean, and our own replication
+spread is ±0.024. FID is also not comparable across papers unless the guidance
+scale and feature normalisation match.
 
-## Quickstart (local)
+**MARDM** reproduces its published result. Ours, retrained on canonical features
+and evaluated with the standard 263-D Guo evaluator at *w* = 4.0: **FID 0.097**,
+R@1 0.499 — against the paper's 0.114 / 0.500.
+
+**MARDM spatial control.** The pelvis trajectory is the exact cumulative sum of
+four root channels, so a waypoint is a prefix-sum constraint with a closed-form
+minimum-norm correction. That gives **exact waypoint satisfaction (0.000 m) at
+unguided cost** — 45 s per clip, versus 1216 s for optimizer-based guidance that
+still leaves 0.016 m of error. Where guidance is unavoidable, a hard trust region
+holds FID at 0.786 against a 0.755 unguided floor (128-clip probe).
+
+**MoMask** is implemented end to end and its data path is verified, but it has no
+reproduction-quality evaluation yet.
+
+Numbers above come from `showcase/lib/results.js` (RMG),
+`src/mardm/reports/tables/` (MARDM), and
+`src/mardm/reports/maskcontrol-differences.md` (control), each of which records
+the run and eval job it came from.
+
+## Setup
 
 ```bash
+git clone --recurse-submodules https://github.com/julsmzr/human-motion-representation.git
+cd human-motion-representation
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
-pytest
-# tiny CPU smoke run
+pytest                                    # 256 tests, no GPU or data needed
+```
+
+Training and evaluation need the packed HumanML3D dataset. Build it once from
+AMASS + the HumanML3D submodule, then point `MGEN_DATA_ROOT` at it:
+
+```bash
+python -m shared.data.prepare_humanml3d       # writes humanml3d.zip + splits.json
+export MGEN_DATA_ROOT=/path/to/humanml3d_packed
+```
+
+The web app (cluster control plane + in-process inference) runs from images:
+
+```bash
+docker compose up --build      # frontend :3000 · backend :8000
+```
+
+Code changes need a rebuild — the images bake `src/` rather than mounting it.
+
+## Development
+
+```
+src/shared/     data · geometry · eval · text · utils   (model-agnostic; the only shared dependency)
+src/rmg/        flow · manifolds · models · representation · configs · scripts
+src/momask/     models · tasks · training · scripts
+src/mardm/      models · control · representation · tasks · configs · scripts
+app/            FastAPI backend (SLURM control plane) + Next.js frontend
+showcase/       standalone static site for the public write-up
+slurm/          rmg/ · momask/ · mardm/ job wrappers; shared prep at the root
+tests/          rmg · shared · momask · mardm · app
+```
+
+Each model package is importable on its own (`import rmg`) and depends only on
+`shared` — never on another model package. `pyproject.toml` picks them up
+automatically.
+
+A tiny CPU run that exercises the whole rmg training path:
+
+```bash
 python -m rmg.scripts.train model=dit_base train=rmg_base \
     train.max_steps=20 train.micro_batch_size=4 train.grad_accum=2 \
     text_encoder.type=random run_name=local-smoke
 ```
 
-The web app (cluster control plane + inference):
+On the cluster, every job is a fresh enroot container plus env overrides:
 
 ```bash
-RMG_CLUSTER_MODE=1 uvicorn backend.app:app --app-dir app --reload --port 8000
-# or full stack (backend + frontend):
-docker compose up --build
+sbatch slurm/rmg/train.sbatch                     # also eval.sbatch, viz.sbatch
+OVERRIDES='data.subset_n=16 train.max_steps=15000' sbatch slurm/rmg/train.sbatch
+# logs → slurm/logs/ ; outputs → runs/<model>/{train,eval,viz}/<run>/
 ```
 
----
-
-## Cluster
-
-### Build the environment / container
-
-The training+eval environment is a single enroot image (PyTorch + our deps).
-Build it once on an interactive 24g job — or just `sbatch slurm/build_image.sbatch`:
-
-```bash
-enroot import -o /tmp/base.sqsh 'docker://pytorch/pytorch:2.9.0-cuda13.0-cudnn9-devel'
-enroot create --name rmg /tmp/base.sqsh
-enroot start --root --rw --mount /mnt:mnt rmg   # then: pip install -r containers/requirements.txt
-enroot export -o ~/rmg.sqsh rmg
-```
-
-Every sbatch starts a fresh container from `~/rmg.sqsh`. Change `containers/requirements.txt`
-→ rebuild the image; never `pip install` inside an sbatch.
-
-### Run jobs
-
-```bash
-sbatch slurm/rmg/train.sbatch                       # default RMG-base
-MODEL_PRESET=dit_base PRESET=rmg_base \
-  OVERRIDES='data.subset_n=16 train.max_steps=15000' \
-  sbatch slurm/rmg/train.sbatch                     # everything is env + OVERRIDES
-sbatch slurm/rmg/eval.sbatch                        # Guo eval assets bootstrap on first run
-# logs → slurm/logs/ ; outputs → <project>/runs/rmg/{train,eval,viz}/<run>/
-```
-
-### Storage
-
-The only **shared** cluster storage is the data mount under
-`/mnt/projects/drl4cvb/data/` — `humanml3d/`, `text-to-motion/`, and the packed
-`data/`. Everything else is **per-user**: your repo clone, your `~/rmg.sqsh`
-image, and all run outputs under `<project>/runs/`.
-
-```bash
-export MGEN_DATA_ROOT=/mnt/projects/drl4cvb/data/humanml3d_packed  # shared dataset (legacy RMG_DATA_ROOT honoured)
-export IMAGE=$HOME/rmg.sqsh                                        # your image
-```
-
----
-
-## Common pitfalls
-
-- **`weights_only=False`** is required when loading our packed `.pt` blobs
-  (`dict[str, Tensor | list[str]]`, which torch ≥2.6 rejects under strict mode).
-  Safe because we produce these files ourselves.
-- **`nn.MultiheadAttention` doesn't always dispatch to flash/SDPA.** For
-  speed-critical paths use `F.scaled_dot_product_attention` directly.
-- **`WANDB_MODE=offline` by default**; cluster egress isn't always available.
-  Override with `WANDB_MODE=online sbatch ...` once confirmed.
-- **Don't `pip install` inside an sbatch** — rebuild the container instead.
-- **`mirror_augment=True` is train-only.** Pass `False` for eval splits (the
-  dataset respects this when `split != "train"`, but be explicit).
-- **HumanML3D L/R variable naming is swapped** (`l_hip, r_hip, sdr_r, sdr_l =
-  [2, 1, 17, 16]` — `l_hip` holds index 2, the R_Hip). If you touch these, copy
-  upstream's variable names verbatim and keep them confined.
+Build the image once with `sbatch slurm/build_image.sbatch`; change
+`containers/requirements.txt` and rebuild rather than installing inside a job.
+Engineering notes and the non-obvious traps live in `CLAUDE.md`.

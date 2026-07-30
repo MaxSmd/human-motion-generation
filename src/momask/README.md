@@ -5,10 +5,12 @@ Reproduction of *MoMask: Generative Masked Modeling of 3D Human Motions*
 
 ## Status
 
-Initial implementation is present. The packed HumanML3D loader, Guo et al.
-evaluator, and 263-D HumanML3D feature conversion are shared with the rest of
-the repository. See the top-level `README.md` for data setup and evaluator
-status before launching full training runs.
+Implemented end to end — residual VQ-VAE tokenizer plus the masked and residual
+token transformers — and the 263-D data path is verified by `tests/momask/`. There
+is **no reproduction-quality evaluation yet**: the RVQ has no EMA codebook update
+and no dead-code revival, so codebook collapse is the failure mode to expect and
+the one the diagnostic runs kept hitting. The loader, Guo evaluator and 263-D
+feature conversion all come from `shared`.
 
 Load training data straight from `shared` — MoMask imports no other model package:
 
