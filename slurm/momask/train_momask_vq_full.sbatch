@@ -10,11 +10,11 @@
 # Full-dataset MoMask RVQ-VAE training run.
 #
 # Submit from the repo root:
-#     sbatch --partition=24g slurm/train_momask_vq_full.sbatch
+#     sbatch --partition=24g slurm/momask/train_momask_vq_full.sbatch
 #
 # Useful overrides:
-#     VQ_STEPS=150000 RUN_NAME=momask-full-vq-raw-v2 sbatch --partition=24g slurm/train_momask_vq_full.sbatch
-#     IMAGE=/mnt/home/$USER/rmg-momask.sqsh sbatch --partition=24g slurm/train_momask_vq_full.sbatch
+#     VQ_STEPS=150000 RUN_NAME=momask-full-vq-raw-v2 sbatch --partition=24g slurm/momask/train_momask_vq_full.sbatch
+#     IMAGE=/mnt/home/$USER/rmg-momask.sqsh sbatch --partition=24g slurm/momask/train_momask_vq_full.sbatch
 
 set -euo pipefail
 mkdir -p slurm/logs
@@ -23,7 +23,7 @@ if [ -n "${SLURM_SUBMIT_DIR:-}" ]; then
     REPO="${REPO:-${SLURM_SUBMIT_DIR}}"
 else
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
-    REPO="${REPO:-$(dirname "${SCRIPT_DIR}")}"
+    REPO="${REPO:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
 fi
 
 IMAGE="${IMAGE:-${HOME}/rmg-momask.sqsh}"

@@ -10,12 +10,12 @@
 # Full-dataset MoMask token-transformer training from a pretrained VQ-VAE.
 #
 # Submit from the repo root:
-#     sbatch --partition=24g slurm/train_momask_tokens_full.sbatch
+#     sbatch --partition=24g slurm/momask/train_momask_tokens_full.sbatch
 #
 # Useful overrides:
-#     VQ_CKPT=runs/momask-full-vq-raw-12668/momask_vq_latest.pt sbatch --partition=24g slurm/train_momask_tokens_full.sbatch
-#     TOKEN_STEPS=50000 TOKEN_BATCH_SIZE=128 RUN_NAME=momask-full-tokens-v2 sbatch --partition=24g slurm/train_momask_tokens_full.sbatch
-#     TOKEN_CKPT=runs/momask-full-tokens-12767/checkpoints/tokens_latest_train.pt sbatch --partition=24g slurm/train_momask_tokens_full.sbatch
+#     VQ_CKPT=runs/momask-full-vq-raw-12668/momask_vq_latest.pt sbatch --partition=24g slurm/momask/train_momask_tokens_full.sbatch
+#     TOKEN_STEPS=50000 TOKEN_BATCH_SIZE=128 RUN_NAME=momask-full-tokens-v2 sbatch --partition=24g slurm/momask/train_momask_tokens_full.sbatch
+#     TOKEN_CKPT=runs/momask-full-tokens-12767/checkpoints/tokens_latest_train.pt sbatch --partition=24g slurm/momask/train_momask_tokens_full.sbatch
 
 set -euo pipefail
 mkdir -p slurm/logs
@@ -24,7 +24,7 @@ if [ -n "${SLURM_SUBMIT_DIR:-}" ]; then
     REPO="${REPO:-${SLURM_SUBMIT_DIR}}"
 else
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
-    REPO="${REPO:-$(dirname "${SCRIPT_DIR}")}"
+    REPO="${REPO:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
 fi
 
 IMAGE="${IMAGE:-${HOME}/rmg-momask.sqsh}"

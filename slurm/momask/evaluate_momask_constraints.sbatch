@@ -12,7 +12,7 @@
 # Submit from repo root, for example:
 #   CKPT=runs/momask-full-tokens-clip150k/momask_smoke_latest.pt \
 #   MAX_CLIPS=256 GUIDANCE_SCALE=4 ANCHOR_STRIDE=20 \
-#   sbatch slurm/evaluate_momask_constraints.sbatch
+#   sbatch slurm/momask/evaluate_momask_constraints.sbatch
 
 set -euo pipefail
 mkdir -p slurm/logs
@@ -21,7 +21,7 @@ if [ -n "${SLURM_SUBMIT_DIR:-}" ]; then
     REPO="${REPO:-${SLURM_SUBMIT_DIR}}"
 else
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
-    REPO="${REPO:-$(dirname "${SCRIPT_DIR}")}"
+    REPO="${REPO:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
 fi
 
 IMAGE="${IMAGE:-${HOME}/rmg-momask.sqsh}"
