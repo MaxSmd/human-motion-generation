@@ -16,6 +16,12 @@ dist/
 
 # backend rendered-media cache (server/cache.py)
 .media/
+# durable backend state (job registry + active-model flag) — docker bind mount
+.appstate/
+
+# working notes / slide sources — kept locally, not part of the submission
+.docs/
+.presentation/
 
 # experiment outputs
 runs/

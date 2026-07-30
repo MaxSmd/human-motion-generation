@@ -257,3 +257,31 @@ def test_random_text_encoder_is_deterministic_per_text() -> None:
     assert torch.allclose(a, b)
     # different texts → different rows
     assert not torch.allclose(a[0], a[1])
+
+
+def test_time_scale_changes_conditioning_and_defaults_to_legacy() -> None:
+    """time_scale must reshape the sinusoidal basis (t·1000 ≠ t), while the
+    default 1.0 reproduces the legacy embedding bit-for-bit (checkpoint compat)."""
+    import torch as _torch
+    from rmg.models.conditioning import ConditioningFusion, sinusoidal_time_embedding
+
+    t = _torch.tensor([0.25, 0.75])
+    legacy = sinusoidal_time_embedding(t, 256)
+
+    _torch.manual_seed(0)
+    f1 = ConditioningFusion(text_dim=8, hidden_dim=16, time_scale=1.0)
+    _torch.manual_seed(0)
+    f1000 = ConditioningFusion(text_dim=8, hidden_dim=16, time_scale=1000.0)
+
+    assert _torch.equal(sinusoidal_time_embedding(t * f1.time_scale, 256), legacy)
+    cond = _torch.randn(2, 8)
+    out1 = f1(t, cond)
+    out1000 = f1000(t, cond)
+    assert not _torch.allclose(out1, out1000)
+
+
+def test_dit_config_time_scale_reaches_fusion() -> None:
+    from rmg.models import DiTConfig, RMGDiT
+
+    model = RMGDiT(DiTConfig(hidden_dim=32, depth=1, num_heads=2, ffn_mult=2, time_scale=1000.0))
+    assert model.cond.time_scale == 1000.0

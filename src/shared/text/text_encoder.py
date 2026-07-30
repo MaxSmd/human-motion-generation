@@ -22,6 +22,22 @@ class TextEncoder(ABC):
         """Encode a list of strings into a `(B, text_dim)` tensor."""
 
 
+def _local_snapshot(model_name: str, cache_dir: str | None) -> str | None:
+    """Resolve `model_name` to its fully-downloaded local HF-cache snapshot, or
+    None if it isn't cached. Handing `from_pretrained` a local *directory*
+    (instead of a hub id) makes the load fully offline: transformers skips every
+    Hub API round-trip — including tokenization_utils_base's
+    `_patch_mistral_regex` → `model_info()` lookup, which turns a transient Hub
+    outage into a hard crash at tokenizer load even though all files are cached
+    (seen 2026-07-15: eval job died on a hub 504 for Qwen3-Embedding-0.6B)."""
+    try:
+        from huggingface_hub import snapshot_download
+
+        return snapshot_download(model_name, cache_dir=cache_dir, local_files_only=True)
+    except Exception:
+        return None  # not (fully) cached — caller falls back to the network path
+
+
 class Qwen3EmbeddingEncoder(TextEncoder):
     """Wrapper around `Qwen/Qwen3-Embedding-0.6B`.
 
@@ -43,8 +59,9 @@ class Qwen3EmbeddingEncoder(TextEncoder):
                 "Qwen3EmbeddingEncoder needs `transformers`. "
                 "Install it inside the enroot image or local environment."
             ) from e
-        self._tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir=cache_dir)
-        self._model = AutoModel.from_pretrained(model_name, cache_dir=cache_dir)
+        source = _local_snapshot(model_name, cache_dir) or model_name
+        self._tokenizer = AutoTokenizer.from_pretrained(source, cache_dir=cache_dir)
+        self._model = AutoModel.from_pretrained(source, cache_dir=cache_dir)
         self._model.eval()
         for p in self._model.parameters():
             p.requires_grad_(False)

@@ -1,0 +1,67 @@
+# Training config for RMG-mid (≈112M, dit_mid) on a single 24g cluster GPU.
+#
+# Goal vs rmg-base (24.7M, 150k steps, FID 0.5): a ~4.5x larger model trained
+# ~2x longer to push FID lower and motion smoother. Effective BS stays 256
+# (paper Table 7) via micro-BS 32 + 8x grad accum.
+#
+# Wall-clock: at ~4.5x base's per-step cost this is multi-day; the run survives
+# the cluster's 24h walltime because the job manager auto-resubmits (resume from
+# latest.pt) until the `.complete` marker is written at max_steps. Eval FID along
+# the way from any numbered checkpoint and stop early if it has plateaued.
+
+preset: rmg_mid
+max_steps: 300_000
+# Effective BS stays 256 (paper Table 7); micro 64 fills the 24g GPU (≈17GB at
+# 112M) and halves the micro-steps per optimizer step vs 32/8. Drop to 32/8 if
+# you OOM (e.g. fragmentation or a tighter GPU).
+micro_batch_size: 64
+grad_accum: 4                  # effective BS = 256
+
+optimizer:
+  name: AdamW
+  lr: 1.0e-4
+  betas: [0.9, 0.999]
+  weight_decay: 0.0
+  eps: 1.0e-8
+
+scheduler:
+  warmup_ratio: 0.05            # ~15k warmup steps; a touch shorter than base's
+                                # 8% since the run is 2x longer
+  min_lr_ratio: 0.0
+  # Continued-training re-warm (OFF by default; enable only to extend a run past
+  # a schedule that already annealed to 0 — e.g. 300k→600k). When true, resume
+  # skips the old (zeroed) scheduler state and builds a fresh warmup→cosine over
+  # the extension, peaking at rewarm_peak_ratio·lr. See build_rewarm_scheduler.
+  rewarm: false
+  rewarm_warmup_steps: 5000
+  rewarm_peak_ratio: 0.3        # peak = 0.3·1e-4 = 3e-5 (gentle; keeps converged
+                                # weights in-basin)
+  rewarm_origin: 300000         # step the extension begins (old max_steps); FIXED
+                                # across walltime resubmits so warm-up fires once
+
+grad_clip: 0.5
+# Finite-spike guard (train.py): skip optimizer+EMA steps whose loss/grad_norm
+# is finite but absurd — bf16 grad storms (seen from ~160k on this preset: grad
+# 8→23k→3.7e8, all finite) sail past the non-finite guard and slow-poison Adam.
+# Ceilings are absolute (logged scale); mults are vs a running mean of accepted
+# steps (healthy grad ≈8–30, absolute max 278 over 160k clean steps).
+guard_loss_ceiling: 200.0
+guard_grad_ceiling: 500.0     # clean-run absolute max was 278; storms ≥331
+guard_loss_mult: 5.0
+guard_grad_mult: 25.0
+cfg_dropout: 0.1               # paper §4.1
+prior_sigma: 1.0              # wrapped Gaussian σ
+
+ema:
+  decay: 0.9999
+
+precision: bf16               # bf16 | fp16 | fp32 | tf32 (fp32 + TF32 matmuls)
+
+log_every: 100
+ckpt_every: 10_000            # numbered (durable, ~1.8GB each) history every 10k
+latest_every: 500             # cheap resumable latest.pt every 500 steps → a hard
+                              # walltime kill loses ≤500 steps (graceful SIGTERM
+                              # loses 0); decoupled from the heavy numbered cadence
+sample_every: 10_000
+num_sample_steps: 50          # Riemannian Euler steps for periodic samples
+guidance_scale: 6.5           # paper's ω*

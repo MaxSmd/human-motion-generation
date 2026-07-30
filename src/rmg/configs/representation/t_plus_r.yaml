@@ -3,3 +3,12 @@
 
 name: tr
 num_joints: 22
+# Quaternion double-cover quotient (q ~ -q): flip data quats into the prior
+# sample's hemisphere so CFM geodesics stay off the antipodal cut locus, where
+# the target velocity θ/sin(θ) blows up (→ finite ~7000 with the arccos clamp,
+# slips past the non-finite guard, and collapses training — observed at ~46k/49k
+# on two from-scratch rmg_mid runs). ON by default so every fresh run is safe.
+# CORRECT ONLY FROM SCRATCH: resuming a model trained WITHOUT this is a ~5×
+# target-distribution shock that diverges. We currently have no pre-alignment
+# model to resume, so defaulting it on is clean.
+antipodal_quotient: true

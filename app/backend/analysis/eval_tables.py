@@ -91,10 +91,75 @@ def fetch_results(run: str) -> dict:
     raise FileNotFoundError(f"no eval/results.json for run {run!r}")
 
 
+_BULK_SEP = "##RMG-RUN##"
+
+
+def fetch_all_results(match: str = "") -> dict[str, dict]:
+    """{run: {omega(str): metrics}} for every eval run, in ONE ssh round trip.
+
+    `fetch_results` costs two round trips per run (resolve the dir, then cat), so
+    a panel that wants N runs pays 2N — minutes of dead UI when the login node is
+    slow. The `ls` glob already encodes the run name, so the whole set can be
+    catted in a single command instead. `match` is an optional case-insensitive
+    substring filter on the run name, applied remotely to keep the payload small.
+
+    A run whose results.json is missing or unparseable is simply absent from the
+    result — same contract as the per-run fetch, but it can't stall the others.
+    """
+    base = shlex.quote(ssh.abs_remote(cfgmod.cluster_runs_dir()))
+    sel = (
+        f'case "$run" in *{glob_ci(match)}*) ;; *) continue ;; esac; '
+        if match else ""
+    )
+    cmd = (
+        f'for f in {base}/*/eval/*/eval/results.json; do '
+        '[ -f "$f" ] || continue; '
+        'd="${f%/eval/results.json}"; run="$(basename "$d")"; '
+        f'{sel}'
+        f'printf "%s%s\\n" {shlex.quote(_BULK_SEP)} "$run"; '
+        'cat "$f"; printf "\\n"; '
+        'done'
+    )
+    r = ssh.run(cmd, timeout=45, check=False)
+
+    out: dict[str, dict] = {}
+    run: str | None = None
+    buf: list[str] = []
+
+    def flush() -> None:
+        if not run:
+            return
+        text = "".join(buf).strip()
+        if not text:
+            return
+        try:
+            raw = _parse_results(text)
+        except json.JSONDecodeError:
+            return  # a run mid-write with nothing salvageable yet
+        out[run] = {str(float(k)): _flatten(v) for k, v in raw.items()}
+
+    for line in r.stdout.splitlines(keepends=True):
+        if line.startswith(_BULK_SEP):
+            flush()
+            run, buf = line[len(_BULK_SEP):].strip(), []
+        elif run:
+            buf.append(line)
+    flush()
+    return out
+
+
+def glob_ci(s: str) -> str:
+    """`s` as a case-insensitive shell glob body: "traj" -> "[Tt][Rr][Aa][Jj]"."""
+    return "".join(
+        f"[{c.lower()}{c.upper()}]" if c.isalpha() else c
+        for c in re.sub(r"[^A-Za-z0-9_.-]", "", s)
+    )
+
+
 def _flatten(m: dict) -> dict:
     """Pull r_precision[0:3] out into r1/r2/r3; keep the scalar metrics."""
     rp = m.get("r_precision") or [None, None, None]
-    return {
+    out = {
         "fid": m.get("fid"),
         "r1": rp[0] if len(rp) > 0 else None,
         "r2": rp[1] if len(rp) > 1 else None,
@@ -104,6 +169,44 @@ def _flatten(m: dict) -> dict:
         "diversity_real": m.get("diversity_real"),
         "multimodality": m.get("multimodality"),
     }
+    # Constrained runs carry blocks this flattening would otherwise drop, and a
+    # constrained FID is not interpretable without them: `constraints` says
+    # whether a bend limit held, `trajectory` carries the spatial-control
+    # error + the foot-skate/jerk cost of enforcing it (see flow.trajectory).
+    for key in ("trajectory", "constraints", "quality", "quality_real"):
+        if m.get(key) is not None:
+            out[key] = m[key]
+    return out
+
+
+def fetch_run_meta(runs: list[str]) -> dict[str, dict]:
+    """Per-run metadata mined from each run dir's hydra dump, in ONE ssh round
+    trip: {run: {"steps": int|None, "model": str|None}}. eval.sbatch always
+    passes `+eval.num_sample_steps=` and `model=` overrides and hydra records
+    them verbatim in `.hydra/hydra.yaml` — so this recovers both even for
+    renamed or merged run dirs where the job registry has no (or a stale)
+    entry. Runs without a hydra dump simply yield no entry."""
+    base = shlex.quote(ssh.abs_remote(cfgmod.cluster_runs_dir()))
+    names = " ".join(shlex.quote(r) for r in runs)
+    cmd = (
+        f'for r in {names}; do '
+        f'f=$(ls {base}/*/eval/"$r"/.hydra/hydra.yaml 2>/dev/null | head -1); '
+        f'[ -n "$f" ] && echo "$r|$(grep -oE "num_sample_steps=[0-9]+" "$f" | head -1)'
+        f'|$(grep -oE "model=[A-Za-z0-9_]+" "$f" | head -1)"; '
+        f'done'
+    )
+    r = ssh.run(cmd, check=False)
+    out: dict[str, dict] = {}
+    for line in r.stdout.splitlines():
+        parts = line.strip().split("|")
+        if len(parts) != 3 or not parts[0]:
+            continue
+        run, steps_tok, model_tok = parts
+        out[run] = {
+            "steps": int(steps_tok.split("=")[1]) if "=" in steps_tok else None,
+            "model": model_tok.split("=")[-1] or None if "=" in model_tok else None,
+        }
+    return out
 
 
 def _best_omega_row(run: str, per_omega: dict) -> dict:
@@ -142,8 +245,13 @@ def comparison(runs: list[str]) -> dict:
         pick = min if direction == "min" else max
         best[key] = pick(vals, key=lambda t: t[1])[0]
 
+    try:
+        meta = fetch_run_meta(runs)
+    except Exception:  # noqa: BLE001 — metadata is an enrichment, never a blocker
+        meta = {}
+
     return {"rows": rows, "best": best, "errors": errors, "sweeps": sweeps,
-            "latex": build_latex(rows, best)}
+            "meta": meta, "latex": build_latex(rows, best)}
 
 
 def _fmt(v) -> str:

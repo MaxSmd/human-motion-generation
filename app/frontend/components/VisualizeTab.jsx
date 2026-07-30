@@ -6,9 +6,12 @@ import RemoteCheckpointPicker from "./RemoteCheckpointPicker";
 import VizJobResult from "./VizJobResult";
 import { useVizJob } from "@/lib/useVizJob";
 
+// Clip renders ALWAYS come with their ground truth — a prediction with nothing
+// to compare it against isn't worth a GPU job, so there's no mode switch for it.
+// GT that's already been rendered is reused from the backend's registry, so the
+// pairing is usually free (only the prediction is actually sampled).
 const MODES = [
-  { id: "clip", label: "GT clips", hint: "render stored ground-truth motions" },
-  { id: "compare", label: "GT vs prediction", hint: "GT + the model's prediction on each clip's caption" },
+  { id: "clip", label: "Clips", hint: "GT + the model's prediction on each clip's own caption" },
   { id: "samples", label: "Training samples", hint: "the trainer's fixed-prompt dumps across saved steps" },
 ];
 
@@ -22,10 +25,12 @@ export default function VisualizeTab() {
   const [checkpoint, setCheckpoint] = useState("");
   // Selected run's config (presets + training subset) — drives seen/unseen split.
   const [cfg, setCfg] = useState(null);
-  // GT-clip browse (id + caption, plus `seen` in compare mode) — hints what exists.
+  // GT-clip browse (id + caption + `seen` against the run's subset).
   const [gtClips, setGtClips] = useState([]);
   const [gtErr, setGtErr] = useState(null);
   const [gtLoading, setGtLoading] = useState(false);
+  // Clip ids whose GT is already rendered → those pair up without GPU work.
+  const [gtCached, setGtCached] = useState(new Set());
   // Caption search box (debounced → server-side, spans the whole dataset).
   const [query, setQuery] = useState("");
   const [debouncedQ, setDebouncedQ] = useState("");
@@ -46,27 +51,32 @@ export default function VisualizeTab() {
     api.clusterRuns().then((r) => setRuns(r.filter((x) => x.has_samples))).catch(() => {});
   }, []);
 
+  // Which GT renders the registry already holds. Refetched after each job so a
+  // finished render immediately shows its clips as cached.
+  useEffect(() => {
+    api.clusterGtRegistry()
+      .then((r) => setGtCached(new Set(r.clip_ids || [])))
+      .catch(() => {});
+  }, [job?.state]);
+
   // Debounce the search box so each keystroke doesn't fire an SSH-backed query.
   useEffect(() => {
     const t = setTimeout(() => setDebouncedQ(query.trim()), 350);
     return () => clearTimeout(t);
   }, [query]);
 
-  // Load the GT clip list. Plain browse for "clip"; for "compare" wait until a run
-  // is picked, then tag each clip seen/unseen against that run's training subset.
-  // `debouncedQ` searches captions across the whole dataset server-side.
+  // Load the GT clip list once a run is picked, tagging each clip seen/unseen
+  // against that run's training subset. `debouncedQ` searches captions across the
+  // whole dataset server-side.
   useEffect(() => {
-    if (mode !== "clip" && mode !== "compare") return;
-    if (mode === "compare" && !cfg) { setGtClips([]); return; }
+    if (mode !== "clip") return;
+    if (!cfg) { setGtClips([]); return; }
     setGtErr(null);
     setGtLoading(true);
-    const params = mode === "compare"
-      ? {
-          subset_fraction: cfg.subset_fraction, subset_seed: cfg.subset_seed,
-          subset_n: cfg.subset_n, tag_seen: true, limit: 120, q: debouncedQ,
-        }
-      : { limit: 120, q: debouncedQ };
-    api.clusterGtClips(params)
+    api.clusterGtClips({
+      subset_fraction: cfg.subset_fraction, subset_seed: cfg.subset_seed,
+      subset_n: cfg.subset_n, tag_seen: true, limit: 120, q: debouncedQ,
+    })
       .then(setGtClips)
       .catch((e) => { setGtClips([]); setGtErr(e.message); })
       .finally(() => setGtLoading(false));
@@ -84,8 +94,8 @@ export default function VisualizeTab() {
 
   function go(e) {
     e.preventDefault();
-    if (mode === "clip") launch({ mode: "clip", clips });
-    else if (mode === "compare") launch({
+    // `compare` is the backend's GT+PRED renderer — the only way we render clips.
+    if (mode === "clip") launch({
       mode: "compare", clips, checkpoint,
       model_preset: cfg?.model_preset, train_preset: cfg?.train_preset,
       subset_fraction: cfg?.subset_fraction, subset_seed: cfg?.subset_seed,
@@ -94,6 +104,7 @@ export default function VisualizeTab() {
   }
 
   const cur = MODES.find((m) => m.id === mode);
+  const nCached = selected.filter((c) => gtCached.has(c)).length;
 
   // One clickable clip row. `min-w-0` + `truncate` clamps long captions to a
   // single ellipsised line so the list never overflows the panel horizontally.
@@ -103,6 +114,11 @@ export default function VisualizeTab() {
       <span className="shrink-0 font-mono">{isSel(c.cid) ? "▣" : "▢"}</span>
       <span className="shrink-0 font-mono text-slate-300">{c.cid}</span>
       <span className="min-w-0 flex-1 truncate">{c.caption || "—"}</span>
+      {gtCached.has(c.cid) && (
+        <span className="shrink-0 font-mono text-[9px] text-[var(--muted)]" title="GT already rendered — this job samples the prediction only">
+          gt✓
+        </span>
+      )}
     </button>
   );
 
@@ -131,7 +147,7 @@ export default function VisualizeTab() {
   return (
     <div className="grid gap-5 lg:grid-cols-[1fr_1.1fr]">
       <form className="surface min-w-0 space-y-4 p-6" onSubmit={go}>
-        <div className="grid grid-cols-3 gap-1.5">
+        <div className="grid grid-cols-2 gap-1.5">
           {MODES.map((m) => (
             <button key={m.id} type="button" onClick={() => setMode(m.id)}
               className={`rounded-md px-2 py-2 text-[12px] font-medium transition ${mode === m.id ? "border border-[var(--signal)] bg-[var(--signal-dim)] text-[var(--signal)]" : "border border-[var(--hairline)] text-slate-400 hover:text-slate-200"}`}>
@@ -141,17 +157,17 @@ export default function VisualizeTab() {
         </div>
         <p className="label">{cur.hint}</p>
 
-        {mode === "compare" && (
+        {mode === "clip" && (
           <RemoteCheckpointPicker value={checkpoint} onChange={setCheckpoint} onConfig={setCfg} />
         )}
 
-        {(mode === "clip" || mode === "compare") && (
+        {mode === "clip" && (
           <div>
             <div className="mb-1.5 flex items-center justify-between">
               <span className="label">available GT clips · click to select</span>
               <span className="font-mono text-[11px] text-[var(--muted)]">{selected.length} selected</span>
             </div>
-            {mode === "compare" && !cfg ? (
+            {!cfg ? (
               <p className={note}>select a run above to list the clips it trained on, separated from unseen ones.</p>
             ) : (
               <>
@@ -161,13 +177,19 @@ export default function VisualizeTab() {
                   <p className={note}>GT clip list unavailable ({gtErr}).</p>
                 ) : gtClips.length === 0 ? (
                   <p className={note}>{gtLoading ? "loading clips…" : debouncedQ ? `no captions match “${debouncedQ}”.` : "no clips found."}</p>
-                ) : mode === "compare" ? (
+                ) : (
                   <div className="space-y-3">
                     {clipGroup("seen in training", "bg-[var(--signal)]", gtClips.filter((c) => c.seen))}
                     {clipGroup("unseen", "bg-slate-500", gtClips.filter((c) => !c.seen))}
                   </div>
-                ) : (
-                  clipList(gtClips)
+                )}
+                {selected.length > 0 && (
+                  <p className="mt-1.5 label normal-case tracking-normal">
+                    every clip renders GT + prediction ·{" "}
+                    {nCached > 0
+                      ? `${nCached} of ${selected.length} GT reused from the registry (prediction only on those)`
+                      : "no GT cached yet for this selection — it gets stored for next time"}
+                  </p>
                 )}
               </>
             )}
@@ -223,8 +245,7 @@ export default function VisualizeTab() {
 
         <button type="submit" className="btn-signal w-full"
           disabled={submitting
-            || ((mode === "clip" || mode === "compare") && selected.length === 0)
-            || (mode === "compare" && !checkpoint)
+            || (mode === "clip" && (selected.length === 0 || !checkpoint))
             || (mode === "samples" && (!run || selSteps.length === 0))}>
           {submitting ? "SUBMITTING…" : `▶  RENDER ${cur.label.toUpperCase()}`}
         </button>

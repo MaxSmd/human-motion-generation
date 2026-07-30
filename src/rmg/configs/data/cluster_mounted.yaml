@@ -34,3 +34,12 @@ prefetch_factor: 4
 # which otherwise pins GPU util at ~5%. Default off to keep tests and tiny smoke
 # runs fast; flip on for full-dataset training.
 preload: false
+
+# Opt-in per-crop SE(2) canonicalization (train split; see
+# shared/data/humanml3d.py::canonicalize_crop): first-frame root XZ → origin,
+# first-frame heading → +Z. Matches the official HumanML3D convention; the
+# packed clips are otherwise in AMASS world frame. Eval-neutral (263-D features
+# canonicalize placement). OFF by default — existing checkpoints were trained
+# world-frame and must stay on their convention; enable only for from-scratch
+# A/B runs (data.canonicalize_crops=true).
+canonicalize_crops: false

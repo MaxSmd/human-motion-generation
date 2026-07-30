@@ -17,32 +17,21 @@ const EXAMPLES = ["000021", "000019", "000022", "000026"];
 
 function GTCluster() {
   const [clips, setClips] = useState("000021,000019,000022");
-  const [mode, setMode] = useState("clip"); // clip | compare
   const [checkpoint, setCheckpoint] = useState("");
   const { job, error, submitting, run } = useVizJob();
 
+  // Always GT + prediction: `compare` is the backend's paired renderer, and GT
+  // it has rendered before is reused from the registry rather than re-rendered.
   function go(e) {
     e.preventDefault();
-    const body = mode === "compare"
-      ? { mode: "compare", clips, checkpoint }
-      : { mode: "clip", clips };
-    run(body);
+    run({ mode: "compare", clips, checkpoint });
   }
 
   return (
     <div className="grid gap-5 lg:grid-cols-[1.05fr_1fr]">
       <form className="surface space-y-4 p-6" onSubmit={go}>
-        <div className="flex gap-1.5">
-          {["clip", "compare"].map((m) => (
-            <button key={m} type="button" onClick={() => setMode(m)}
-              className={`rounded-md px-3 py-1.5 text-[12px] font-medium transition ${mode === m ? "border border-[var(--signal)] bg-[var(--signal-dim)] text-[var(--signal)]" : "border border-[var(--hairline)] text-slate-400 hover:text-slate-200"}`}>
-              {m === "clip" ? "GT clips" : "GT vs prediction"}
-            </button>
-          ))}
-        </div>
-
         <label className="block">
-          <span className="label mb-1.5 block">clip ids (comma-sep{mode === "compare" ? ", or 'auto'" : ""})</span>
+          <span className="label mb-1.5 block">clip ids (comma-sep, or 'auto')</span>
           <input className="field-input" value={clips} onChange={(e) => setClips(e.target.value)} />
         </label>
         <div className="flex flex-wrap gap-1.5">
@@ -54,13 +43,14 @@ function GTCluster() {
           ))}
         </div>
 
-        {mode === "compare" && <RemoteCheckpointPicker value={checkpoint} onChange={setCheckpoint} />}
+        <RemoteCheckpointPicker value={checkpoint} onChange={setCheckpoint} />
 
-        <button type="submit" className="btn-signal w-full" disabled={submitting || (mode === "compare" && !checkpoint)}>
-          {submitting ? "SUBMITTING…" : `▶  RENDER ${mode === "compare" ? "COMPARE" : "CLIPS"} ON CLUSTER`}
+        <button type="submit" className="btn-signal w-full" disabled={submitting || !checkpoint}>
+          {submitting ? "SUBMITTING…" : "▶  RENDER CLIPS ON CLUSTER"}
         </button>
         <p className="label text-center">
-          renders the stored GT motion{mode === "compare" ? " + the model's prediction for each clip's caption" : ""} via forward kinematics
+          renders the stored GT motion (forward kinematics) + the model's prediction
+          for each clip's caption · GT already rendered is reused, not re-rendered
         </p>
       </form>
 

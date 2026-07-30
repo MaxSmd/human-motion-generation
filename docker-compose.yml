@@ -25,6 +25,7 @@ services:
       dockerfile: app/backend/Dockerfile
       args:
         TORCH_INDEX_URL: https://download.pytorch.org/whl/cpu
+    restart: unless-stopped
     ports:
       - "8000:8000"
     environment:
@@ -35,13 +36,22 @@ services:
       MGEN_RUNS_DIR: /data/runs
       MGEN_DATA_ROOT: /data/humanml3d_packed
       MGEN_MEDIA_DIR: /data/media
-      MGEN_JOBS_STATE: /data/media/jobs.json
+      # Raw HumanML3D captions — read-only, indexed once for the constraint→text
+      # ablation's "does the prior know this phrase?" scoring.
+      MGEN_TEXTS_DIR: /data/humanml3d_texts
+      # Job registry (+ the active-model flag beside it) lives on a HOST bind mount,
+      # not the rmg-media named volume — so `docker compose down -v` / volume prune /
+      # a Docker Desktop reset can't wipe your job history. The media cache stays in
+      # the named volume below (it's regenerable by re-running viz).
+      MGEN_JOBS_STATE: /data/state/jobs.json
     volumes:
       # Your SSH config + keys + known_hosts → cluster auth (read-only).
       - ${HOME}/.ssh:/root/.ssh:ro
       - ./runs:/data/runs
       - ./external/data/humanml3d_packed:/data/humanml3d_packed
-      - rmg-media:/data/media
+      - ./external/HumanML3D/HumanML3D/texts:/data/humanml3d_texts:ro
+      - ./.appstate:/data/state          # durable: job history + active-model flag
+      - rmg-media:/data/media            # regenerable media cache
     # GPU host: uncomment, and rebuild with TORCH_INDEX_URL set to a CUDA wheel.
     # deploy:
     #   resources:
@@ -58,10 +68,38 @@ services:
       args:
         # Baked at build time — must be a URL the BROWSER can reach.
         NEXT_PUBLIC_API_BASE: http://localhost:8000
+    restart: unless-stopped
     ports:
       - "3000:3000"
     depends_on:
       - backend
+
+  # Public showcase: Next.js static export served by nginx.
+  # Reachable at http://localhost:3100 and, via the tunnel below, at
+  # https://riemannian-motion.space.
+  showcase:
+    build:
+      context: ./showcase
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "3100:80"
+
+  # Cloudflare Tunnel → riemannian-motion.space. No inbound ports are opened;
+  # cloudflared dials out to Cloudflare's edge and proxies to `showcase`.
+  #
+  # Credentials come from the host's ~/.cloudflared (created by
+  # `cloudflared tunnel login` + `cloudflared tunnel create showcase`) and are
+  # never copied into the repo or the image.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --config /config.yml --no-autoupdate run
+    volumes:
+      - ${HOME}/.cloudflared:/etc/cloudflared:ro
+      - ./deploy/cloudflared/config.yml:/config.yml:ro
+    depends_on:
+      - showcase
 
 volumes:
   rmg-media:

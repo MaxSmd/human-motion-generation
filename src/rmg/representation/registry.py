@@ -58,6 +58,12 @@ from .tplusr import normalize_quaternions
 class Representation(ABC):
     name: str
     num_joints: int = NUM_JOINTS
+    # Opt-in quaternion double-cover quotient on the Sphere factors (flip data
+    # quats into the prior sample's hemisphere so CFM paths stay off the
+    # antipodal cut locus). Correct only from a fresh run: retrofitting it onto
+    # a model trained without it is a large target-distribution shift that
+    # destabilises training. Default OFF; enable for from-scratch runs.
+    antipodal_quotient: bool = False
 
     @property
     @abstractmethod
@@ -101,7 +107,13 @@ class TRRepresentation(Representation):
         return 3 + 4 * self.num_joints
 
     def build_manifold(self) -> Manifold:
-        return ProductManifold([Euclidean(3)] + [Sphere(3) for _ in range(self.num_joints)])
+        # Sphere factors are unit quaternions; the double-cover quotient is
+        # opt-in (see Representation.antipodal_quotient) — only safe from scratch.
+        return ProductManifold(
+            [Euclidean(3)]
+            + [Sphere(3, antipodal_quotient=self.antipodal_quotient)
+               for _ in range(self.num_joints)]
+        )
 
     def prior_mu(self, dtype: torch.dtype = torch.float32) -> Tensor:
         rest_T = torch.zeros(3, dtype=dtype)
@@ -202,7 +214,8 @@ class TRPRepresentation(Representation):
     def build_manifold(self) -> Manifold:
         return ProductManifold(
             [Euclidean(3)]
-            + [Sphere(3) for _ in range(self.num_joints)]
+            + [Sphere(3, antipodal_quotient=self.antipodal_quotient)
+               for _ in range(self.num_joints)]
             + [PreShape(self.num_joints, dim=3)]
         )
 

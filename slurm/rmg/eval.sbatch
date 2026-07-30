@@ -2,7 +2,16 @@
 #SBATCH --job-name=rmg-eval
 #SBATCH --partition=24g
 #SBATCH --qos=students_normal
-#SBATCH --gres=gpu:1
+# The 12g partition mixes GPU generations and `ccc` in each node's GRES is its
+# compute capability x10: ulm/jena are TITANX (5.2) and dortmund is TITANXp (6.1),
+# which this CUDA container has no kernels for — a job landing there dies with
+# "no kernel image is available for execution on the device", and the traceback
+# points into the text encoder so it reads like a model bug. Asking for ccc:75
+# (a no_consume GRES, so it filters rather than reserves) keeps this off the old
+# cards however the script is submitted. The app already passes its own --gres
+# for 12g, which overrides this line; this is the guard for a direct sbatch.
+# NOTE: this cluster rejects --exclude outright.
+#SBATCH --gres=gpu:1,ccc:75
 #SBATCH --nodes=1
 #SBATCH --time=10:00:00
 #SBATCH --output=slurm/logs/rmg-eval-%j.out

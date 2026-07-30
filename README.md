@@ -2,8 +2,7 @@
 
 Several motion-generation reproductions in one repo — `rmg` today, `momask` and
 `mardm` next — sharing one HumanML3D data pipeline, one Guo evaluator, one
-container, and one web + cluster control plane. Adding a model:
-[`ADDING_A_MODEL.md`](ADDING_A_MODEL.md).
+container, and one web + cluster control plane.
 
 ---
 
@@ -21,7 +20,7 @@ src/
     scripts/            entry points: train · evaluate · visualize
     data/               packed-clip reader + manifold encoding (composes shared.data)
     flow/ manifolds/ models/ representation/   (rmg manifold reps; geometry → shared)
-  momask/  mardm/       other models (placeholders — see ADDING_A_MODEL.md)
+  momask/  mardm/       other models (placeholders)
 
 app/
   backend/              FastAPI: SLURM control plane + in-process rmg inference

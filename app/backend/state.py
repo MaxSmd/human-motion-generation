@@ -20,7 +20,25 @@ import torch
 from omegaconf import DictConfig
 from torch import Tensor
 
-from rmg.flow import RiemannianEulerSampler, SamplerCfg, WrappedGaussianPrior
+from rmg.flow import (
+    CONSTRAINABLE_REPRESENTATIONS,
+    RiemannianEulerSampler,
+    SamplerCfg,
+    WrappedGaussianPrior,
+    build_bend_projector,
+    build_room_energy_fn,
+    apply_path_facing,
+    build_trajectory_energy_fn,
+    build_trajectory_projector,
+    compose_energies,
+    compose_projectors,
+    flat_to_joints,
+    parse_bends,
+    parse_scene,
+    parse_trajectory,
+    place_motion,
+    trajectory_metrics,
+)
 from rmg.models import DiTConfig, Qwen3EmbeddingEncoder, RandomTextEncoder, RMGDiT
 from rmg.models.text_encoder import TextEncoder
 from shared.geometry import Skeleton
@@ -105,6 +123,7 @@ class AppState:
             ffn_mult=int(run_cfg.model.ffn_mult),
             text_dim=int(run_cfg.model.text_dim),
             time_freq_dim=int(run_cfg.model.time_freq_dim),
+            time_scale=float(run_cfg.model.get("time_scale", 1.0)),
             max_seq_len=int(run_cfg.model.max_seq_len),
         )
         model = RMGDiT(dit_cfg).to(self.device)
@@ -153,10 +172,75 @@ class AppState:
         guidance: float,
         num_steps: int,
         seed: int,
+        constraints: list[dict] | None = None,
+        ranges: list[dict] | None = None,
+        scene: dict | None = None,
+        room_guidance: float = 0.0,
+        trajectory: dict | None = None,
+        stats: dict | None = None,
     ) -> Tensor:
-        """Text → (T, ambient_dim) sample on the manifold."""
+        """Text → (T, ambient_dim) sample on the manifold.
+
+        `constraints` are exact bend-angle pins, `ranges` are bend min/max limits
+        — both projected onto the joint's feasible bend each ODE step (see
+        flow.constraints); `scene` adds euclidean room/obstacle guidance + exact
+        spawn placement; `trajectory` drives chosen joints to world positions at
+        chosen frames (see flow.trajectory). All apply only to the
+        quaternion-on-S^3 representations (tr/trp).
+
+        `stats`, when given, is filled with measured outcomes — currently
+        `stats["trajectory"]`, the achieved control error, so the caller can
+        report whether the targets were actually met.
+        """
         gen = torch.Generator(device=self.device).manual_seed(int(seed))
         cond = bundle.text_encoder.encode([text], device=self.device)
+
+        fixed_values = fixed_mask = project_fn = energy_fn = None
+        scene_obj = parse_scene(scene)
+        control = parse_trajectory(trajectory, int(num_frames))
+        if constraints or ranges or scene_obj or control:
+            if bundle.representation_name not in CONSTRAINABLE_REPRESENTATIONS:
+                raise NotImplementedError(
+                    f"constraints need a quaternion representation "
+                    f"({CONSTRAINABLE_REPRESENTATIONS}); this run uses "
+                    f"{bundle.representation_name!r}."
+                )
+            num_joints = int(bundle.cfg.representation.get("num_joints", 22))
+            # Both pins (exact bend) and ranges (bend min/max) are bend-angle
+            # constraints projected each ODE step — see flow.constraints. Each
+            # acts on the joint's controller quaternion (per-chain off-by-one).
+            bend_specs = [*parse_bends(constraints), *parse_bends(ranges)]
+            if bend_specs:
+                project_fn = build_bend_projector(
+                    bend_specs, self.skeleton(),
+                    num_frames=int(num_frames), num_joints=num_joints, device=self.device,
+                )
+            energies = []
+            if scene_obj and room_guidance:
+                room_fn = build_room_energy_fn(scene_obj, self.skeleton(), num_joints=num_joints)
+                energies.append(_scaled(room_fn, room_guidance))
+            if control:
+                # Applied AFTER the bend projector: it reads FK joint positions,
+                # so it must absorb whatever the bend clamp just moved.
+                project_fn = compose_projectors(
+                    project_fn,
+                    build_trajectory_projector(
+                        control, self.skeleton(), num_frames=int(num_frames),
+                        num_joints=num_joints, device=self.device,
+                    ),
+                )
+                traj_fn = build_trajectory_energy_fn(
+                    control, self.skeleton(), num_joints=num_joints)
+                if traj_fn is not None:
+                    energies.append(_scaled(traj_fn, control.guidance_weight))
+            energy_fn = compose_energies(*energies)
+
+        # One overall guidance strength for the composed energy; each term's own
+        # weight sets the MIX inside it (see `_scaled`).
+        guidance_weight = float(room_guidance)
+        if control and control.uses_guidance:
+            guidance_weight = max(guidance_weight, float(control.guidance_weight))
+
         samples = bundle.sampler.sample(
             bundle.model,
             shape=(1, int(num_frames)),
@@ -165,8 +249,57 @@ class AppState:
             num_steps=int(num_steps),
             device=self.device,
             generator=gen,
+            fixed_values=fixed_values,
+            fixed_mask=fixed_mask,
+            project_fn=project_fn,
+            energy_fn=energy_fn,
+            guidance_weight=guidance_weight if energy_fn is not None else 0.0,
         )
-        return samples[0]
+        # Facing runs AFTER sampling, never inside the ODE loop: the root
+        # quaternion is a point on S^3 the integrator is working on, and yawing
+        # it each step lands the disturbance on every limb through FK (measured
+        # 30x the jerk). As a post-pass it costs nothing.
+        if control and control.face_path:
+            samples = apply_path_facing(
+                samples, control, self.skeleton(),
+                num_joints=int(bundle.cfg.representation.get("num_joints", 22)),
+                project_fn=project_fn,
+            )
+        sample = samples[0]
+
+        # Did the spatial control hold? Measured before spawn placement, on the
+        # same FK positions the projector acted on.
+        if control and stats is not None:
+            stats["trajectory"] = trajectory_metrics(
+                flat_to_joints(samples, self.skeleton()), control
+            )
+
+        # Exact spawn placement: rigidly move the clip so it starts at the spawn
+        # pose inside the room (translation + root orientation). tr/trp only.
+        # Skipped under trajectory control — a rigid move would undo world-space
+        # targets, and the trajectory already says where the body is.
+        if scene_obj is not None and not control:
+            nj = int(bundle.cfg.representation.get("num_joints", 22))
+            qd = 3 + 4 * nj
+            trans = sample[:, :3]
+            quats = sample[:, 3:qd].reshape(sample.shape[0], nj, 4)
+            trans2, quats2 = place_motion(trans, quats, scene_obj.spawn)
+            sample = sample.clone()
+            sample[:, :3] = trans2
+            sample[:, 3:qd] = quats2.reshape(sample.shape[0], -1)
+        return sample
+
+
+def _scaled(fn, weight: float):
+    """Scale an energy term so several can be summed with the right MIX.
+
+    The sampler normalises the gradient direction and applies one overall
+    `guidance_weight`, so a term's own weight only matters relative to the
+    others. With a single term the scaling cancels, leaving room-only runs
+    numerically unchanged.
+    """
+    w = float(weight)
+    return (lambda x: w * fn(x)) if w != 1.0 else fn
 
 
 # Module-level singleton, initialised on FastAPI startup.

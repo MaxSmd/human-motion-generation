@@ -1,0 +1,22 @@
+# RMG-small DiT — ≈50M params, a 2x-base step that keeps wall-clock modest
+# while still being meaningfully bigger than dit_base (24.7M). Sits below
+# dit_mid (112M) and dit_large (462M).
+#
+# Shape rationale (same family as dit_mid):
+#   * hidden_dim 512  — a clean width up from base's 384, head_dim = 512/8 = 64.
+#   * depth 10        — deeper than base's 6L (depth drives temporal coherence /
+#     smoothness) without the cost of mid's wider blocks.
+#   * ffn_mult 4      — standard (base's ×8 only made sense at its tiny width).
+#
+# H=512/depth=10/8 heads/ffn×4 is exactly 50.0M; verify after any edit with
+# `RMGDiT(DiTConfig(**)).num_params()`.
+
+name: dit_small
+input_dim: 91
+hidden_dim: 512
+depth: 10
+num_heads: 8
+ffn_mult: 4
+text_dim: 1024
+time_freq_dim: 256
+max_seq_len: 200

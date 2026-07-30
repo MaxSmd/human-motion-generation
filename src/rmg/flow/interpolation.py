@@ -33,6 +33,12 @@ def build_cfm_batch(
     Inputs may have any leading shape; the manifold operates on the last dim.
     `t` is broadcast across the leading dims.
     """
+    # Pick the target representative that keeps the conditional path off any
+    # quotient cut locus (quaternion double cover: flip x1 into x0's hemisphere
+    # so θ <= π/2). No-op for manifolds without a quotient. This is what makes
+    # the geodesic velocity θ/sin(θ) finite for every (x0, x1) pair instead of
+    # blowing up near antipodal — see Sphere.align_base_point.
+    x1 = manifold.align_base_point(x0, x1)
     x_t = manifold.geodesic(x0, x1, t)
     target = manifold.cfm_target_velocity(x0, x1, t)
     return FlowMatchingBatch(x_t=x_t, t=t, target=target)

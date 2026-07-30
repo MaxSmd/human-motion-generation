@@ -1,0 +1,26 @@
+# RMG-mid DiT — a deliberate middle point between dit_base (≈25M) and
+# dit_large (≈462M), sized at ≈112M params.
+#
+# Shape rationale:
+#   * hidden_dim 768  — the canonical "Base" transformer width; keeps a healthy
+#     768 bottleneck for the 1024-d text conditioning (base's 384 was a tight
+#     squeeze) and gives head_dim = 768/12 = 64, the well-tuned attention default.
+#   * depth 10        — meaningfully deeper than base's 6L (depth is the main
+#     lever for temporal coherence / motion smoothness) without the wall-clock
+#     of large's 24L on a single GPU.
+#   * ffn_mult 4      — standard, and what the paper's large model uses (base's
+#     ×8 only made sense at its tiny width).
+#   * 12 heads, head_dim 64.
+#
+# Param count is dominated by depth * (10 + 2*ffn_mult) * hidden_dim^2; verify
+# with `RMGDiT(DiTConfig(**)).num_params()` after any edit.
+
+name: dit_mid
+input_dim: 91
+hidden_dim: 768
+depth: 10
+num_heads: 12
+ffn_mult: 4
+text_dim: 1024
+time_freq_dim: 256
+max_seq_len: 200

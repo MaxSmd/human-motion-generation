@@ -21,6 +21,8 @@ The training loop:
 
 from __future__ import annotations
 
+import math
+import signal
 import time
 from contextlib import nullcontext
 from pathlib import Path
@@ -56,6 +58,7 @@ from shared.utils import (
     Logger,
     LoggerConfig,
     TrainState,
+    build_rewarm_scheduler,
     build_scheduler,
     collect_rng_state,
     find_latest_checkpoint,
@@ -85,6 +88,8 @@ def _build_dataset(cfg: DictConfig, split: str, representation: Representation) 
         subset_fraction=float(cfg.data.get("subset_fraction", 1.0)),
         subset_seed=int(cfg.data.get("subset_seed", 0)),
         subset_n=int(cfg.data.get("subset_n", 0)),
+        preload=bool(cfg.data.get("preload", False)),
+        canonicalize_crops=bool(cfg.data.get("canonicalize_crops", False)),
     )
 
 
@@ -126,6 +131,7 @@ def _build_model(cfg: DictConfig, representation: Representation) -> RMGDiT:
         ffn_mult=cfg.model.ffn_mult,
         text_dim=cfg.model.text_dim,
         time_freq_dim=cfg.model.time_freq_dim,
+        time_scale=float(cfg.model.get("time_scale", 1.0)),
         max_seq_len=cfg.model.max_seq_len,
     )
     return RMGDiT(dit_cfg)
@@ -157,6 +163,25 @@ def _infinite(loader: DataLoader):
 
 
 # ---------------------------------------------------------------------------
+# Graceful pre-walltime stop
+# ---------------------------------------------------------------------------
+
+# SLURM (and the job manager's resubmit machinery) deliver SIGTERM/SIGUSR1 a
+# little before the 24h walltime kill. We catch them, flush one last checkpoint,
+# and exit cleanly WITHOUT writing the `.complete` marker — so the next
+# resubmission resumes from latest.pt. The frequent latest.pt saves already cap
+# the worst-case loss to a few hundred steps even on a hard kill; this just makes
+# the graceful case lossless.
+_STOP_REQUESTED = False
+
+
+def _request_stop(signum, _frame) -> None:
+    global _STOP_REQUESTED
+    _STOP_REQUESTED = True
+    print(f"[train] caught signal {signum} — will checkpoint and exit at next step boundary")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -165,6 +190,10 @@ def _infinite(loader: DataLoader):
 def main(cfg: DictConfig) -> None:
     output_dir = Path(cfg.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Catch the pre-walltime / resubmit signals (see `_request_stop`).
+    for _sig in (signal.SIGTERM, signal.SIGUSR1):
+        signal.signal(_sig, _request_stop)
 
     set_seed(cfg.seed, deterministic=cfg.deterministic)
 
@@ -216,11 +245,28 @@ def main(cfg: DictConfig) -> None:
     ema = EMA(model, decay=cfg.train.ema.decay)
 
     use_amp = cfg.train.precision in ("bf16", "fp16")
-    amp_dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[cfg.train.precision]
+    amp_dtype = {
+        "bf16": torch.bfloat16, "fp16": torch.float16,
+        "fp32": torch.float32, "tf32": torch.float32,
+    }[cfg.train.precision]
     scaler = torch.amp.GradScaler(device.type) if cfg.train.precision == "fp16" else None
+    # "tf32" = fp32 everywhere (no autocast) but matmuls on TF32 tensor cores:
+    # 10-bit mantissa vs bf16's 8 — 4x finer rounding at near-bf16 throughput.
+    # Escape hatch for bf16 late-training grad storms (see the finite-spike
+    # guard below) when true fp32 would be too slow. "fp32" keeps TF32 off.
+    if cfg.train.precision == "tf32":
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
 
     # -------------------- resume? --------------------
     step = 0
+    # Continued-training re-warm: when extending a run past a schedule that
+    # already annealed the LR to ~0 (min_lr_ratio=0 at the old max_steps),
+    # resuming on the old schedule trains at LR≈0 and learns nothing. Instead we
+    # SKIP the old scheduler state and build a fresh re-warm schedule over the
+    # extension (see build_rewarm_scheduler). Off by default — normal runs and
+    # ordinary walltime resubmits keep the single smooth cosine.
+    rewarm = bool(cfg.train.scheduler.get("rewarm", False))
     latest = find_latest_checkpoint(output_dir)
     if latest is not None:
         print(f"[train] resuming from {latest}")
@@ -228,13 +274,29 @@ def main(cfg: DictConfig) -> None:
         model.load_state_dict(state.model)
         ema.load_state_dict(state.ema) if state.ema else None
         opt.load_state_dict(state.optimizer)
-        if state.scheduler is not None:
+        if state.scheduler is not None and not rewarm:
             sched.load_state_dict(state.scheduler)
         if scaler is not None and state.scaler is not None:
             scaler.load_state_dict(state.scaler)
         if state.rng:
             restore_rng_state(state.rng)
         step = state.step
+        if rewarm:
+            warmup = int(cfg.train.scheduler.get("rewarm_warmup_steps", 5000))
+            peak_ratio = float(cfg.train.scheduler.get("rewarm_peak_ratio", 0.3))
+            # origin = the step the extension began (old max_steps). Fixed across
+            # every walltime resubmit so the warm-up fires exactly once; default
+            # to the current resume step only for the very first block.
+            origin = int(cfg.train.scheduler.get("rewarm_origin", step))
+            sched = build_rewarm_scheduler(
+                opt, origin=origin, max_steps=int(cfg.train.max_steps),
+                warmup_steps=warmup, peak_ratio=peak_ratio,
+                base_lr=float(cfg.train.optimizer.lr), current_step=step,
+            )
+            print(f"[train] RE-WARM extension: origin {origin} → max {cfg.train.max_steps}, "
+                  f"resuming at step {step}, warmup {warmup} → peak "
+                  f"{peak_ratio * float(cfg.train.optimizer.lr):.2e}, cosine→0. "
+                  f"LR now = {sched.get_last_lr()[0]:.3e}")
 
     # -------------------- logger --------------------
     logger = Logger(LoggerConfig(
@@ -253,6 +315,12 @@ def main(cfg: DictConfig) -> None:
 
     # -------------------- training loop --------------------
     t_last = time.time()
+    nan_skips = 0  # count of steps skipped due to non-finite OR spiking loss/grad
+    # Running references for the finite-spike guard (see below). Updated only on
+    # ACCEPTED steps so a storm can never drag the reference up to its own level.
+    ema_loss_ref: float | None = None
+    ema_grad_ref: float | None = None
+    _GUARD_DECAY = 0.99  # ~100-step memory; log_every-scale adaptivity
     while step < cfg.train.max_steps:
         opt.zero_grad(set_to_none=True)
         accum_loss = 0.0
@@ -282,13 +350,68 @@ def main(cfg: DictConfig) -> None:
         if scaler is not None:
             scaler.unscale_(opt)
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.train.grad_clip)
-        if scaler is not None:
-            scaler.step(opt)
-            scaler.update()
+
+        # Non-finite guard. On the sphere's antipodal cut locus the CFM target
+        # velocity (θ/sin θ) can blow up to Inf/NaN for an unlucky prior/data
+        # pair; clip_grad_norm_ can't help (a NaN grad-norm yields a NaN clip
+        # coefficient, so the NaN flows straight into the weights) and a single
+        # poisoned step corrupts model + EMA + Adam moments permanently. So we
+        # skip the update entirely whenever the loss or grad is non-finite —
+        # one wasted step instead of a dead run.
+        #
+        # Finite-spike guard. bf16 late-training instability (rmg_mid run
+        # f8f7cf5e, steps 160.7k–177k) produces grad storms that are FINITE —
+        # grad_norm jumped 8→23k→3.7e8 while the loss ratcheted 3→64 — so the
+        # non-finite check never fires; clipping caps the step SIZE but the
+        # DIRECTION is garbage and Adam's moments get poisoned over a few
+        # thousand steps until the weights are cooked. Clean-run stats: grad p50
+        # ≈8, absolute max 278 over 160k steps; storm steps ≥331 and typically
+        # 100–10⁶× the running level. We skip a step when loss/grad exceeds an
+        # absolute ceiling OR a multiple of an accepted-steps-only running EMA;
+        # thresholds sit ≥10× above anything a healthy step produced. Values are
+        # on the LOGGED scale (accum_loss × grad_accum) so yaml knobs match the
+        # numbers on the dashboard.
+        loss_metric = accum_loss * cfg.train.grad_accum
+        skip_reason = None
+        if not (math.isfinite(accum_loss) and bool(torch.isfinite(grad_norm))):
+            skip_reason = "non-finite"
         else:
-            opt.step()
+            gn = float(grad_norm)
+            loss_ceiling = float(cfg.train.get("guard_loss_ceiling", 200.0))
+            grad_ceiling = float(cfg.train.get("guard_grad_ceiling", 1000.0))
+            loss_mult = float(cfg.train.get("guard_loss_mult", 5.0))
+            grad_mult = float(cfg.train.get("guard_grad_mult", 25.0))
+            if loss_metric > loss_ceiling or gn > grad_ceiling:
+                skip_reason = f"spike>ceiling ({loss_ceiling:g}/{grad_ceiling:g})"
+            elif ema_loss_ref is not None and (
+                loss_metric > loss_mult * ema_loss_ref
+                or gn > grad_mult * ema_grad_ref
+            ):
+                skip_reason = (
+                    f"spike>{loss_mult:g}x/{grad_mult:g}x running mean "
+                    f"({ema_loss_ref:.2f}/{ema_grad_ref:.2f})"
+                )
+
+        if skip_reason is not None:
+            nan_skips += 1
+            opt.zero_grad(set_to_none=True)
+            print(f"[train] WARNING: {skip_reason} step at step {step} "
+                  f"(loss={loss_metric}, grad_norm={float(grad_norm)}); skipped "
+                  f"optimizer + EMA update (total skips={nan_skips})", flush=True)
+        else:
+            # Accepted step — advance the guard's running references.
+            if ema_loss_ref is None:
+                ema_loss_ref, ema_grad_ref = loss_metric, float(grad_norm)
+            else:
+                ema_loss_ref = _GUARD_DECAY * ema_loss_ref + (1 - _GUARD_DECAY) * loss_metric
+                ema_grad_ref = _GUARD_DECAY * ema_grad_ref + (1 - _GUARD_DECAY) * float(grad_norm)
+            if scaler is not None:
+                scaler.step(opt)
+                scaler.update()
+            else:
+                opt.step()
+            ema.update(model)
         sched.step()
-        ema.update(model)
 
         step += 1
 
@@ -307,6 +430,7 @@ def main(cfg: DictConfig) -> None:
                     "t_mean": float(info["t_mean"]),
                     "x_t_offmanifold_frac": float(info["x_t_offmanifold"]),
                     "steps_per_s": steps_per_s,
+                    "nan_skips": nan_skips,
                 },
                 step=step,
             )
@@ -315,7 +439,11 @@ def main(cfg: DictConfig) -> None:
         # latest.pt updates much more often than the numbered checkpoints so
         # that a 24h wallclock kill loses at most a few hundred steps. The
         # numbered ckpt-*.pt files are durable history for analysis / rollback.
-        latest_every = max(1, int(cfg.train.ckpt_every) // 10)
+        # `train.latest_every` decouples the cheap latest.pt cadence from the
+        # heavy numbered cadence (a big model's numbered ckpt is GBs, so we keep
+        # those sparse but still snapshot latest.pt frequently); defaults to
+        # ckpt_every//10 to preserve the original behaviour.
+        latest_every = int(cfg.train.get("latest_every", 0)) or max(1, int(cfg.train.ckpt_every) // 10)
         save_latest = step % latest_every == 0 or step == cfg.train.max_steps
         save_numbered = step % cfg.train.ckpt_every == 0 or step == cfg.train.max_steps
 
@@ -340,6 +468,9 @@ def main(cfg: DictConfig) -> None:
                     output_dir / "checkpoints" / "latest.pt",
                     state_dict_payload,
                 )
+                # Cheap progress beacon the job manager reads (over SSH) to gate
+                # auto-resubmit: it resumes only while this keeps advancing.
+                (output_dir / ".progress").write_text(str(step))
 
         # ------------------------- periodic samples -------------------------
         if step % cfg.train.sample_every == 0:
@@ -360,8 +491,36 @@ def main(cfg: DictConfig) -> None:
             sample_path.parent.mkdir(parents=True, exist_ok=True)
             torch.save({"texts": sample_texts, "samples": samples.cpu()}, sample_path)
 
+        # ------------------------- graceful stop -------------------------
+        # Pre-walltime signal: flush latest.pt (if this step didn't already) and
+        # exit without the `.complete` marker so the next job resumes here.
+        if _STOP_REQUESTED:
+            if not save_latest:
+                save_checkpoint(
+                    output_dir / "checkpoints" / "latest.pt",
+                    TrainState(
+                        step=step,
+                        model=model.state_dict(),
+                        ema=ema.state_dict(),
+                        optimizer=opt.state_dict(),
+                        scheduler=sched.state_dict(),
+                        scaler=scaler.state_dict() if scaler is not None else None,
+                        rng=collect_rng_state(),
+                        extras={"wandb_run_id": logger.wandb_run_id},
+                    ),
+                )
+                (output_dir / ".progress").write_text(str(step))
+            print(f"[train] stopping early at step {step} (signal) — resumable from latest.pt")
+            break
+
     logger.close()
-    print(f"[train] done at step {step}")
+    if step >= cfg.train.max_steps:
+        # Durable "training finished" marker. The job manager checks for this to
+        # decide done-vs-resubmit, so it must only be written on real completion.
+        (output_dir / ".complete").write_text(str(step))
+        print(f"[train] done at step {step} (.complete written)")
+    else:
+        print(f"[train] exited at step {step} / {cfg.train.max_steps} (not complete)")
 
 
 if __name__ == "__main__":

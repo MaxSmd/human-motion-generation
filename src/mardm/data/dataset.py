@@ -46,7 +46,7 @@ from torch import Tensor
 from torch.utils.data import Dataset
 
 from shared.data import HumanML3DDataset, HumanML3DSample
-from shared.geometry import make_continuous, normalize_quaternions
+from shared.geometry import normalize_quaternions
 
 from ..representation import ESSENTIAL_DIM, EssentialRepresentation
 
@@ -134,7 +134,15 @@ class EssentialDataset(Dataset):
                 else:
                     translation: Tensor = blob["translation"]
                     quats: Tensor = blob["quats"]
-                    q = make_continuous(normalize_quaternions(quats), time_dim=0)
+                    # Must mirror `HumanML3DDataset.__getitem__` exactly, or the
+                    # cache is a numerical change rather than a pure speedup.
+                    # Upper-hemisphere restriction only — no `make_continuous`:
+                    # the shared loader deliberately dropped temporal sign-
+                    # continuity (it let near-180° joint frames settle in the
+                    # lower hemisphere, making (x0, x1) near-antipodal and
+                    # blowing the flow-matching target up), so applying it here
+                    # would sign-flip a handful of frames vs the on-the-fly path.
+                    q = normalize_quaternions(quats)
                     x1 = self._rep.encode_clip(translation, q, skeleton=skeleton).float()
                 cache[clip_id] = {"x1": x1, "texts": texts}
         self._preload_cache = cache

@@ -1,10 +1,12 @@
 "use client";
 
 import { mediaUrl } from "@/lib/api";
+import { useLightbox } from "./Lightbox";
 
 // Renders an MP4 (<video>) or GIF (<img>) clip inside the instrument viewport,
-// picking by file extension.
+// picking by file extension. Clicking the clip blows it up fullscreen.
 export default function MediaViewer({ url, caption, loading, error, status }) {
+  const { open } = useLightbox();
   const full = url ? mediaUrl(url) : null;
   const isVideo = full?.toLowerCase().endsWith(".mp4");
 
@@ -42,24 +44,35 @@ export default function MediaViewer({ url, caption, loading, error, status }) {
               {error}
             </p>
           ) : full ? (
-            isVideo ? (
-              <video
-                key={full}
-                src={full}
-                className="max-h-full max-w-full rounded"
-                controls
-                autoPlay
-                loop
-                muted
-              />
-            ) : (
-              <img
-                key={full}
-                src={full}
-                alt={caption || "motion clip"}
-                className="max-h-full max-w-full rounded"
-              />
-            )
+            <button
+              type="button"
+              onClick={() => open([{ media_url: url, caption }])}
+              title="open fullscreen"
+              className="group relative flex h-full w-full items-center justify-center"
+            >
+              {isVideo ? (
+                // `pointer-events-none`: the click belongs to the button —
+                // scrubbing happens in the fullscreen view.
+                <video
+                  key={full}
+                  src={full}
+                  className="pointer-events-none max-h-full max-w-full rounded"
+                  autoPlay
+                  loop
+                  muted
+                />
+              ) : (
+                <img
+                  key={full}
+                  src={full}
+                  alt={caption || "motion clip"}
+                  className="max-h-full max-w-full rounded"
+                />
+              )}
+              <span className="absolute bottom-2 right-2 rounded border border-[var(--signal)] bg-black/70 px-1.5 py-0.5 text-[9px] text-[var(--signal)] opacity-0 transition group-hover:opacity-100">
+                ⤢ fullscreen
+              </span>
+            </button>
           ) : (
             <div className="text-center">
               <Crosshair />

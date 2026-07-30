@@ -1,0 +1,47 @@
+# Training config for RMG-small (≈50M, dit_small) on a single 24g cluster GPU.
+#
+# A ~2x-base model. Same effective BS 256 (paper Table 7) via micro-BS 32 + 8x
+# grad accum. 200k steps — more than base's 150k for smoothness, but lighter than
+# rmg_mid's 300k since the model is ~2.2x smaller. The job manager auto-resumes
+# across the 24h walltime until the `.complete` marker is written at max_steps.
+#
+# Fits comfortably on a 24g GPU at micro-BS 32; could also run on the 12g
+# partition if needed (set partition=12g at submit, or shrink micro-BS).
+
+preset: rmg_small
+max_steps: 200_000
+# Effective BS stays 256 (paper Table 7), but we use a bigger micro-batch to fill
+# the 24g GPU: at 50M, micro-BS 32 used only ~6.5GB. micro 64 ≈ 11GB and halves
+# the micro-steps per optimizer step (throughput). Push to 128/2 (~21GB) if you
+# want to use more memory and don't hit OOM; drop to 32/8 on a 12g GPU.
+micro_batch_size: 64
+grad_accum: 4                  # effective BS = 256
+
+optimizer:
+  name: AdamW
+  lr: 1.0e-4
+  betas: [0.9, 0.999]
+  weight_decay: 0.0
+  eps: 1.0e-8
+
+scheduler:
+  warmup_ratio: 0.08
+  min_lr_ratio: 0.0
+
+grad_clip: 0.5
+cfg_dropout: 0.1               # paper §4.1
+prior_sigma: 1.0              # wrapped Gaussian σ
+
+ema:
+  decay: 0.9999
+
+precision: bf16               # bf16 | fp16 | fp32
+
+log_every: 100
+ckpt_every: 10_000            # numbered (durable, ~0.8GB each) history every 10k
+latest_every: 500             # cheap resumable latest.pt every 500 steps → a hard
+                              # walltime kill loses ≤500 steps (graceful SIGTERM
+                              # loses 0); decoupled from the heavy numbered cadence
+sample_every: 10_000
+num_sample_steps: 50          # Riemannian Euler steps for periodic samples
+guidance_scale: 6.5           # paper's ω*

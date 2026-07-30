@@ -78,6 +78,27 @@ def _drop_bad_rows(name: str, x: NDArray) -> NDArray:
     return x[~bad]
 
 
+def crop_to_unit_length(
+    feats, rng: np.random.Generator, unit: int = 4, jitter: bool = True
+):
+    """Crop a (T, 263) feature clip to a multiple of `unit` frames, mirroring
+    upstream text-to-motion's eval protocol ("Crop the motions in to times of
+    4, and introduce small variations", data/dataset.py). The Guo movement
+    encoder is a stride-`unit` conv whose output the motion GRU reads in
+    m_length//unit steps — non-multiple lengths misalign the co-embedding and
+    depress R-precision/mm_dist. With `jitter`, ~1/3 of clips lose one extra
+    unit and the crop offset is random (upstream's 'double' coin + random
+    start); without, the crop is deterministic (first m frames)."""
+    L = int(feats.shape[0])
+    m = (L // unit) * unit
+    if jitter and m > unit and rng.random() < (1.0 / 3.0):
+        m -= unit
+    if m <= 0:
+        return feats
+    off = int(rng.integers(0, L - m + 1)) if jitter else 0
+    return feats[off:off + m]
+
+
 def fid(real_features: NDArray, gen_features: NDArray) -> float:
     """Convenience: FID from raw (N, D) feature matrices."""
     real_features = _drop_bad_rows("real", real_features)

@@ -9,6 +9,7 @@ to combining post-projection.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import torch
@@ -48,6 +49,11 @@ class RiemannianEulerSampler:
         dtype: torch.dtype | None = None,
         return_trajectory: bool = False,
         generator: torch.Generator | None = None,
+        fixed_values: Tensor | None = None,
+        fixed_mask: Tensor | None = None,
+        project_fn: Callable[[Tensor], Tensor] | None = None,
+        energy_fn: Callable[[Tensor], Tensor] | None = None,
+        guidance_weight: float = 0.0,
     ) -> Tensor | tuple[Tensor, Tensor]:
         """Generate (B, T, D) samples by integrating the learned velocity from t=0 to t=1.
 
@@ -56,6 +62,21 @@ class RiemannianEulerSampler:
             cond: per-batch conditioning (e.g. text features). None = unconditional.
             guidance_scale: CFG scale ω. None ⇒ uses cfg.guidance_scale.
             num_steps: ODE steps. None ⇒ uses cfg.num_steps.
+            fixed_values / fixed_mask: optional sampling-time constraints. Where
+                `fixed_mask` is True, the state is overwritten with `fixed_values`
+                after every ODE step (inpainting). For RMG these pin whole S^3
+                joint factors to a target quaternion — see `flow.constraints`.
+                Both broadcast against (B, T, D) (e.g. pass (T, D)).
+            project_fn: optional projection applied to the state after every ODE
+                step — pulls each constrained joint's bend angle toward its
+                feasible range (see `flow.constraints.build_bend_projector`).
+                Composes with the inpainting hook (applied after it).
+            energy_fn / guidance_weight: optional euclidean (room/obstacle)
+                guidance. Each step the clean-sample estimate x̂₁ = Exp_x((1−t)·v)
+                is fed to `energy_fn` (FK → world → penalty); its gradient w.r.t.
+                x (through the Exp map) is tangent-projected and subtracted from
+                the velocity, scaled by `guidance_weight`. Soft constraint — see
+                `flow.scene`.
         """
         B, T = shape
         n = num_steps if num_steps is not None else self.cfg.num_steps
@@ -63,8 +84,18 @@ class RiemannianEulerSampler:
         device = device or (cond.device if isinstance(cond, Tensor) else torch.device("cpu"))
         dtype = dtype or (cond.dtype if isinstance(cond, Tensor) else torch.float32)
 
+        # Optional inpainting constraints: move to device/dtype once, then apply
+        # at init and after every step so the model conditions on the pinned
+        # coordinates from the very first integration step.
+        apply_constraint = fixed_mask is not None and fixed_values is not None
+        if apply_constraint:
+            fixed_mask = fixed_mask.to(device=device)
+            fixed_values = fixed_values.to(device=device, dtype=dtype)
+
         # initial state x_0 ~ prior
         x = self.prior.sample((B, T), device=device, dtype=dtype, generator=generator)
+        if apply_constraint:
+            x = torch.where(fixed_mask, fixed_values, x)
 
         # Full ODE integration over [0, 1]. The closed-form CFM target γ̇(t)
         # is finite at both endpoints, so no eps-offset is needed at inference
@@ -91,7 +122,33 @@ class RiemannianEulerSampler:
                 v_amb = model(x, t_batch, cond=cond, drop_cond_mask=drop_mask, mask=mask)
 
             v_t = self.manifold.project_tangent(x, v_amb)
+
+            # Euclidean (room/obstacle) guidance on the clean-sample estimate x̂₁.
+            if energy_fn is not None and guidance_weight != 0.0:
+                with torch.enable_grad():
+                    x_req = x.detach().requires_grad_(True)
+                    x_hat = self.manifold.exp(x_req, (1.0 - t_i) * v_t.detach())
+                    energy = energy_fn(x_hat)
+                    (grad,) = torch.autograd.grad(energy, x_req)
+                g = self.manifold.project_tangent(x, grad)
+                # Steer the velocity along the avoidance direction with a strength
+                # RELATIVE to the model velocity: guidance velocity =
+                # guidance_weight · ‖v_t‖ · ĝ. This is scale-invariant (works
+                # regardless of the model's velocity magnitude — a unit-direction
+                # step would be swamped by a fast "walk forward" field) and has no
+                # divergence cliff. guidance_weight ≈ fraction of the motion
+                # redirected: ~1 ⇒ as strong as the model's own velocity.
+                per = [-1, *([1] * (g.dim() - 1))]
+                gnorm = g.flatten(1).norm(dim=1).view(*per).clamp_min(1e-8)
+                vnorm = v_t.flatten(1).norm(dim=1).view(*per)
+                v_t = v_t - guidance_weight * vnorm * (g / gnorm)
+
             x = self.manifold.exp(x, h * v_t)
+
+            if apply_constraint:
+                x = torch.where(fixed_mask, fixed_values, x)
+            if project_fn is not None:
+                x = project_fn(x)
 
             if traj is not None:
                 traj.append(x)

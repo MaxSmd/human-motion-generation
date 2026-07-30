@@ -90,6 +90,9 @@ class ProductManifold(Manifold):
         ]
         return self._join(out)
 
+    def align_base_point(self, x0: Tensor, x1: Tensor) -> Tensor:
+        return self._apply("align_base_point", x0, x1)
+
     def validate(self, x: Tensor, atol: float = 1e-4) -> Tensor:
         parts = self._split(x)
         ok = self.factors[0].validate(parts[0], atol=atol)

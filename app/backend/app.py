@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from contextlib import asynccontextmanager
 
 from . import cache, config as cfgmod, gt as gtmod
+from .analysis import corpus as corpusmod
 from .cluster import jobs as jobsmod
 from .cluster.routes import router as cluster_router
 from .cluster import ssh as clusterssh
@@ -59,6 +60,27 @@ app.include_router(cluster_router)
 # --------------------------------------------------------------------------- models
 
 
+class JointConstraint(BaseModel):
+    """A bend-angle PIN: hold a joint at `bend_deg` (0° = straight)."""
+    joint: str                     # SMPL joint name, e.g. "L_Elbow"
+    bend_deg: float = 90.0         # target bend (angle between the two bones)
+    strength: float = 1.0          # 0..1 — fraction of the correction (1 = hard)
+    ease_frames: int = 0           # ramp the hold in/out over N frames at edges
+    frame_start: int = 0
+    frame_end: int | None = None   # None / -1 ⇒ to the last frame
+
+
+class RangeConstraint(BaseModel):
+    """A bend-angle LIMIT: keep a joint's bend within [bend_min, bend_max]."""
+    joint: str                     # SMPL joint name, e.g. "L_Knee"
+    bend_min: float = 0.0
+    bend_max: float = 90.0
+    strength: float = 1.0          # 0..1 — fraction of the correction (1 = hard)
+    ease_frames: int = 0
+    frame_start: int = 0
+    frame_end: int | None = None
+
+
 class GenerateRequest(BaseModel):
     text: str
     guidance: float = 6.5
@@ -67,6 +89,21 @@ class GenerateRequest(BaseModel):
     num_frames: int = 100
     checkpoint: str | None = None  # explicit ckpt path; None → server default
     fmt: str = "auto"              # auto | mp4 | gif
+    # Sampling-time constraints (RMG tr/trp representations only). Both are
+    # bend-angle constraints projected each ODE step (pins = fixed bend, ranges
+    # = bend limits) — see flow.constraints.
+    constraints: list[JointConstraint] | None = None  # bend pins
+    ranges: list[RangeConstraint] | None = None        # bend ranges
+    # Euclidean room/scene: free-form dict ({room, objects, spawn, contacts,
+    # foot_skate_weight}) from the RoomEditor; exact spawn placement + soft
+    # room/obstacle/contact/anti-skate guidance.
+    scene: dict | None = None
+    room_guidance: float = 0.0     # 0 ⇒ placement only (no soft guidance)
+    # Spatial (mask-control) trajectory targets — drive joints to world positions
+    # at chosen frames. {mode, blend, blend_frames, guidance_weight, constraints}
+    # where each constraint is {joint, frames+points | positions+mask | path, axes}.
+    # See flow.trajectory for the full wire format.
+    trajectory: dict | None = None
 
 
 # --------------------------------------------------------------------------- health
@@ -110,6 +147,25 @@ def checkpoints() -> list[dict]:
     return out
 
 
+# --------------------------------------------------------------------------- meta
+
+
+@app.get("/meta/joints")
+def meta_joints() -> dict:
+    """SMPL joint names + kinematic parents for the constraint editor. Static
+    (the 22-joint HumanML3D skeleton), so the frontend can build its picker."""
+    from shared.geometry.skeleton import JOINT_NAMES, PARENTS, ROOT_JOINT
+
+    return {
+        "joints": [
+            {"index": i, "name": n, "parent": PARENTS[i]}
+            for i, n in enumerate(JOINT_NAMES)
+        ],
+        "root": ROOT_JOINT,
+        "axes": ["x", "y", "z"],
+    }
+
+
 # --------------------------------------------------------------------------- generate
 
 
@@ -126,9 +182,13 @@ def generate(req: GenerateRequest) -> dict:
             "checkpoints/ down from the cluster into RMG_RUNS_DIR.",
         )
 
+    constraints = [c.model_dump() for c in req.constraints] if req.constraints else None
+    ranges = [r.model_dump() for r in req.ranges] if req.ranges else None
     key = cache.cache_key(
         kind="generate", text=req.text, guidance=req.guidance, num_steps=req.num_steps,
         seed=req.seed, num_frames=req.num_frames, ckpt=ckpt_path, fmt=resolve_format(req.fmt),
+        constraints=constraints, ranges=ranges, scene=req.scene, room_guidance=req.room_guidance,
+        trajectory=req.trajectory,
     )
     hit = cache.find_cached(key)
     if hit:
@@ -138,11 +198,15 @@ def generate(req: GenerateRequest) -> dict:
             "cached": True, "text": req.text,
         }
 
+    stats: dict = {}
     try:
         bundle = st.load_bundle(ckpt_path)
         sample = st.generate(
             bundle, text=req.text, num_frames=req.num_frames,
             guidance=req.guidance, num_steps=req.num_steps, seed=req.seed,
+            constraints=constraints, ranges=ranges,
+            scene=req.scene, room_guidance=req.room_guidance,
+            trajectory=req.trajectory, stats=stats,
         )
         joints = decode_to_joints(sample, st.skeleton(), bundle.representation_name)
     except FileNotFoundError as e:
@@ -158,6 +222,9 @@ def generate(req: GenerateRequest) -> dict:
         "media_url": cache.media_url(media),
         "joints_npy_url": cache.media_url(npy),
         "cached": False, "text": req.text, "step": bundle.step,
+        # Control fidelity, when a trajectory drove the sample: how far each
+        # controlled joint ended up from its target. Absent otherwise.
+        **({"trajectory": stats["trajectory"]} if "trajectory" in stats else {}),
     }
 
 
@@ -210,6 +277,52 @@ def gt_clip(cid: str, fmt: str = "auto") -> dict:
         fps=int(st.default_cfg.data.get("fps", 20)), fmt=fmt,
     )
     return {"media_url": cache.media_url(media), "cid": cid, "caption": caption, "cached": False}
+
+
+# --------------------------------------------------------------------------- caption corpus
+
+
+@app.get("/corpus/phrase")
+def corpus_phrase(q: str = Query(..., min_length=1), examples: int = 4) -> dict:
+    """Score a candidate constraint phrase against the HumanML3D captions.
+
+    The constraint→text ablation needs to know whether a phrase is language the
+    text encoder ever saw; a phrase with no corpus support won't move the prior,
+    so the projection ends up fighting a motion the model doesn't know. First call
+    builds the index (~3s over 29k caption files), then it's cached.
+    """
+    try:
+        return corpusmod.phrase_stats(q, examples=max(0, min(examples, 20)))
+    except FileNotFoundError as e:
+        raise HTTPException(503, str(e)) from e
+
+
+class RankRequest(BaseModel):
+    candidates: list[str]
+    examples: int = 1
+
+
+@app.post("/corpus/rank")
+def corpus_rank(req: RankRequest) -> dict:
+    """Rank candidate phrasings of one motion by caption support, best first.
+
+    Lets the archetype map propose variants and have the corpus choose, rather
+    than hard-coding a phrasing that may or may not be language the model knows.
+    """
+    if not req.candidates:
+        return {"ranked": []}
+    try:
+        # cap generously: a multi-constraint prompt can fire 3+ archetypes,
+        # each offering ~5 variants, and they're ranked in one request
+        return {"ranked": corpusmod.rank_phrases(req.candidates[:32],
+                                                 examples=max(0, min(req.examples, 5)))}
+    except FileNotFoundError as e:
+        raise HTTPException(503, str(e)) from e
+
+
+@app.get("/corpus/status")
+def corpus_status() -> dict:
+    return corpusmod.index_status()
 
 
 # --------------------------------------------------------------------------- training viewer

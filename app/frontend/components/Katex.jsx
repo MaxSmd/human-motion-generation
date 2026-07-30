@@ -14,6 +14,8 @@ export default function Katex({ tex, className = "" }) {
     }
   }, [tex]);
 
-  if (html == null) return <span className={className}>{tex}</span>;
-  return <span className={className} dangerouslySetInnerHTML={{ __html: html }} />;
+  // `data-tex` carries the raw TeX source so exporters (tables → LaTeX) can
+  // recover `$\omega$` from a rendered cell instead of scraping KaTeX spans.
+  if (html == null) return <span className={className} data-tex={tex}>{tex}</span>;
+  return <span className={className} data-tex={tex} dangerouslySetInnerHTML={{ __html: html }} />;
 }

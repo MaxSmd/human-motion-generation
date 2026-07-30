@@ -112,6 +112,9 @@ class DiTConfig:
     ffn_mult: int = 8
     text_dim: int = 1024         # Qwen3-Embedding-0.6B
     time_freq_dim: int = 256
+    time_scale: float = 1.0      # t multiplier before sinusoidal embedding; must
+                                 # match train/eval per checkpoint (see
+                                 # ConditioningFusion). 1.0 = all existing runs.
     max_seq_len: int = 200       # HumanML3D ≤196 frames @ 20 fps
 
 
@@ -142,6 +145,7 @@ class RMGDiT(nn.Module):
             text_dim=cfg.text_dim,
             hidden_dim=cfg.hidden_dim,
             time_freq_dim=cfg.time_freq_dim,
+            time_scale=cfg.time_scale,
         )
 
         self.blocks = nn.ModuleList(
