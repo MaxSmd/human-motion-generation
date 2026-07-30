@@ -41,7 +41,7 @@ from .skeleton import Skeleton, forward_kinematics
 
 @lru_cache(maxsize=1)
 def _load_upstream_process_file(repo_root: str | None = None):
-    """Load upstream `process_file` from the HumanML3D submodule notebook.
+    """Load upstream `process_file` from the HumanML3D repo.
 
     Cached so the (heavy) execs only happen once per process.
     """
@@ -57,14 +57,17 @@ def _load_upstream_process_file(repo_root: str | None = None):
                 "Could not locate the repo root containing external/HumanML3D. "
                 "Pass repo_root explicitly."
             )
+        hml3d = repo_root_path / "external" / "HumanML3D"
     else:
         repo_root_path = Path(repo_root)
-
-    hml3d = repo_root_path / "external" / "HumanML3D"
+        if (repo_root_path / "common" / "skeleton.py").exists():
+            hml3d = repo_root_path
+        else:
+            hml3d = repo_root_path / "external" / "HumanML3D"
     if not (hml3d / "common" / "skeleton.py").exists():
         raise FileNotFoundError(
-            f"HumanML3D submodule not initialized at {hml3d}. Run "
-            f"`git submodule update --init -- external/HumanML3D` first."
+            f"HumanML3D repo not found at {hml3d}. Pass the HumanML3D repo root "
+            f"or a project root containing external/HumanML3D."
         )
 
     sys.path.insert(0, str(hml3d))

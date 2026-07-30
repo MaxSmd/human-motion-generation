@@ -3,7 +3,6 @@
 #SBATCH --partition=data
 #SBATCH --qos=students_normal
 #SBATCH --nodes=1
-#SBATCH --time=08:00:00
 #SBATCH --output=slurm/logs/features-%j.out
 #SBATCH --error=slurm/logs/features-%j.err
 #
@@ -27,8 +26,9 @@ else
     REPO="${REPO:-$(dirname "${SCRIPT_DIR}")}"
 fi
 
-IMAGE="${IMAGE:-${HOME}/rmg.sqsh}"
+IMAGE="${IMAGE:-${HOME}/rmg-momask.sqsh}"
 JOINTS_DIR="${JOINTS_DIR:-/mnt/projects/drl4cvb/human-motion-representation/data/data/joints_cache}"
+HUMANML3D_REPO="${HUMANML3D_REPO:-/mnt/projects/drl4cvb/human-motion-representation/data/HumanML3D}"
 OUT_DIR="${OUT_DIR:-${HOME}/rmg-runs/h3d-canonical}"
 # This cluster forbids --cpus-per-task (CPUs follow GPU count); use whatever
 # the allocation gives us.
@@ -39,6 +39,28 @@ cd "${REPO}"
 
 echo "[features] repo=${REPO}  image=${IMAGE}"
 echo "[features] joints=${JOINTS_DIR}  out=${OUT_DIR}  workers=${WORKERS}"
+echo "[features] humanml3d_repo=${HUMANML3D_REPO}"
+
+if [ ! -f "${IMAGE}" ]; then
+    echo "[features] ERROR: container image not found at ${IMAGE}" >&2
+    exit 1
+fi
+if [ ! -d "${JOINTS_DIR}" ]; then
+    echo "[features] ERROR: joints cache dir not found at ${JOINTS_DIR}" >&2
+    exit 1
+fi
+if [ ! -f "${HUMANML3D_REPO}/index.csv" ]; then
+    echo "[features] ERROR: index.csv not found at ${HUMANML3D_REPO}/index.csv" >&2
+    exit 1
+fi
+if [ ! -f "${HUMANML3D_REPO}/common/skeleton.py" ]; then
+    echo "[features] ERROR: common/skeleton.py not found under ${HUMANML3D_REPO}" >&2
+    exit 1
+fi
+if [ ! -f "${HUMANML3D_REPO}/motion_representation.ipynb" ]; then
+    echo "[features] ERROR: motion_representation.ipynb not found under ${HUMANML3D_REPO}" >&2
+    exit 1
+fi
 
 enroot start \
     --rw \
@@ -48,20 +70,20 @@ enroot start \
     "${IMAGE}" \
     bash -lc "
         set -euo pipefail
-        cd ${REPO}
+        cd '${REPO}'
         pip install -e . --no-deps --quiet
 
         echo
         echo '=== Stage 3: joints + index.csv -> canonical new_joint_vecs ==='
         python -m shared.data.prepare_humanml3d features \\
-            --joints-root ${JOINTS_DIR} \\
-            --humanml3d-repo external/HumanML3D \\
-            --output-dir ${OUT_DIR} \\
-            --workers ${WORKERS}
+            --joints-root '${JOINTS_DIR}' \\
+            --humanml3d-repo '${HUMANML3D_REPO}' \\
+            --output-dir '${OUT_DIR}' \\
+            --workers '${WORKERS}'
 
         echo
         echo '=== outputs ==='
-        ls ${OUT_DIR}/new_joint_vecs | wc -l
+        ls '${OUT_DIR}/new_joint_vecs' | wc -l
 
         echo
         echo '=== golden-reference check (012314.npy survived the share wipe) ==='

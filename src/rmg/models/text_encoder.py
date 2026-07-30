@@ -1,11 +1,12 @@
 """Backward-compatible re-export shim.
 
-The text encoders were lifted to `shared.text` (model-agnostic, reused by
-mardm). This module re-exports them so existing `rmg.models.text_encoder`
-imports keep working unchanged.
+The text encoders live in `shared.text` so rmg, mardm, and MoMask can reuse the
+same model-agnostic implementations. This module keeps older
+`rmg.models.text_encoder` imports working unchanged.
 """
 
 from shared.text.text_encoder import (
+    CLIPTextEncoder,
     Qwen3EmbeddingEncoder,
     RandomTextEncoder,
     TextEncoder,
@@ -13,6 +14,7 @@ from shared.text.text_encoder import (
 
 __all__ = [
     "TextEncoder",
+    "CLIPTextEncoder",
     "Qwen3EmbeddingEncoder",
     "RandomTextEncoder",
 ]
