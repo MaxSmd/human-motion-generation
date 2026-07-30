@@ -20,18 +20,22 @@ src/
     scripts/            entry points: train · evaluate · visualize
     data/               packed-clip reader + manifold encoding (composes shared.data)
     flow/ manifolds/ models/ representation/   (rmg manifold reps; geometry → shared)
-  momask/  mardm/       other models (placeholders)
+  momask/               MoMask: residual VQ-VAE + masked/residual token transformers
+    models/ scripts/ tasks/ training/    (263-D H3D features; shared only, no rmg)
+  mardm/                MARDM + spatial control (guidance, condition regularizer)
+    configs/ control/ models/ representation/ scripts/ tasks/
 
 app/
   backend/              FastAPI: SLURM control plane + in-process rmg inference
   frontend/             Next.js UI
 
 slurm/
-  rmg/                  per-model jobs: train · eval · viz
-  prep_data.sbatch    build_image.sbatch    ensure_eval_assets.sh    (shared)
+  rmg/  momask/  mardm/    per-model jobs (rmg: train · eval · viz)
+  prep_data.sbatch    prep_features.sbatch    build_image.sbatch
+  ensure_eval_assets.sh                                            (shared)
 containers/             enroot image: Dockerfile + requirements.txt
 external/               git submodules: HumanML3D, text-to-motion
-tests/{rmg,shared}/     pytest suite
+tests/{rmg,shared,momask,mardm,app}/   pytest suite
 runs/<model>/{train,eval,viz}/   run outputs (gitignored)
 ```
 

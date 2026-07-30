@@ -14,7 +14,7 @@ if [ -n "${SLURM_SUBMIT_DIR:-}" ]; then
     REPO="${REPO:-${SLURM_SUBMIT_DIR}}"
 else
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
-    REPO="${REPO:-$(dirname "${SCRIPT_DIR}")}"
+    REPO="${REPO:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
 fi
 
 IMAGE="${IMAGE:-${HOME}/rmg-momask.sqsh}"
