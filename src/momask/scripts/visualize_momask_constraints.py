@@ -16,6 +16,7 @@ import textwrap
 from pathlib import Path
 
 import matplotlib
+import numpy as np
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -24,7 +25,13 @@ import torch.nn.functional as F
 from matplotlib.animation import FuncAnimation, PillowWriter
 from torch import Tensor
 
-from momask.models import MaskedMotionTransformer, MotionRVQVAE, ResidualTransformer, TokenTransformerConfig
+from momask.models import (
+    CodebookResidualTransformer,
+    MaskedMotionTransformer,
+    MotionRVQVAE,
+    ResidualTransformer,
+    TokenTransformerConfig,
+)
 from shared.data import H3D263Dataset, collate
 from shared.text import CLIPTextEncoder, RandomTextEncoder, TextEncoder
 from shared.geometry import H3D_FEATURE_DIM, PARENTS, quat_rotate, recover_joints_from_ric
@@ -67,7 +74,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--generation-steps", type=int, default=None)
     p.add_argument("--guidance-scale", type=float, default=4.0)
     p.add_argument("--temperature", type=float, default=1.0)
+    p.add_argument("--topk-filter-thres", type=float, default=1.0)
+    p.add_argument("--sample-tokens", action=argparse.BooleanOptionalAction, default=False)
+    p.add_argument("--remask-kept-tokens", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--anchor-stride", type=int, default=20)
+    p.add_argument("--constraint-variant", choices=["projected", "vq"], default="vq")
+    p.add_argument("--real-h3d-dir", default=None)
+    p.add_argument("--model-input-source", choices=["auto", "packed", "canonical"], default="auto")
     p.add_argument("--auto-sample-moving", type=int, default=0)
     p.add_argument("--min-root-span", type=float, default=0.75)
     p.add_argument("--max-frames", type=int, default=100)
@@ -108,7 +121,7 @@ def build_text_encoder(args: argparse.Namespace, saved_args: dict) -> TextEncode
     raise ValueError(f"unknown text encoder: {kind}")
 
 
-def build_models(ckpt: dict, device: torch.device) -> tuple[MotionRVQVAE, MaskedMotionTransformer, ResidualTransformer]:
+def build_models(ckpt: dict, device: torch.device):
     a = ckpt_args(ckpt)
     vqvae = MotionRVQVAE(
         input_dim=H3D_FEATURE_DIM,
@@ -133,11 +146,19 @@ def build_models(ckpt: dict, device: torch.device) -> tuple[MotionRVQVAE, Masked
         dropout=float(a.get("transformer_dropout", 0.0)),
     )
     masked = MaskedMotionTransformer(cfg).to(device)
-    residual = ResidualTransformer(
-        cfg,
-        num_quantizers=int(a.get("num_quantizers", 3)),
-        separate_level_heads=not bool(a.get("shared_residual_head", False)),
-    ).to(device)
+    if a.get("residual_arch", "simple") == "codebook":
+        residual = CodebookResidualTransformer(
+            cfg,
+            num_quantizers=int(a.get("num_quantizers", 3)),
+            code_dim=int(a.get("vq_latent_dim", 32)),
+            share_weight=bool(a.get("residual_share_weight", False)),
+        ).to(device)
+    else:
+        residual = ResidualTransformer(
+            cfg,
+            num_quantizers=int(a.get("num_quantizers", 3)),
+            separate_level_heads=not bool(a.get("shared_residual_head", False)),
+        ).to(device)
     vqvae.load_state_dict(ckpt["vqvae"])
     masked.load_state_dict(ckpt["masked_transformer"])
     residual.load_state_dict(ckpt["residual_transformer"])
@@ -145,6 +166,20 @@ def build_models(ckpt: dict, device: torch.device) -> tuple[MotionRVQVAE, Masked
     masked.eval()
     residual.eval()
     return vqvae, masked, residual
+
+
+def load_canonical_sample(h3d_dir: str | Path, clip_id: str, max_len: int) -> Tensor:
+    root = Path(h3d_dir)
+    candidates = [clip_id]
+    if clip_id.startswith("M") and len(clip_id) > 1:
+        candidates.append(clip_id[1:])
+    path = next((root / f"{name}.npy" for name in candidates if (root / f"{name}.npy").exists()), None)
+    if path is None:
+        raise FileNotFoundError(f"canonical HumanML3D feature not found for {clip_id} under {root}")
+    arr = torch.from_numpy(np.load(path).astype("float32"))
+    if arr.ndim != 2 or arr.shape[1] != H3D_FEATURE_DIM:
+        raise ValueError(f"{path} must have shape (T, {H3D_FEATURE_DIM}), got {tuple(arr.shape)}")
+    return arr[:max_len]
 
 
 def token_mask_from_frame_mask(mask: Tensor, token_len: int) -> Tensor:
@@ -218,6 +253,9 @@ def generate_full(
     steps: int,
     guidance_scale: float,
     temperature: float,
+    topk_filter_thres: float,
+    sample_tokens: bool,
+    remask_kept_tokens: bool,
 ) -> Tensor:
     x_norm = normalizer.transform(real_x)
     true_tokens = vqvae.encode_to_tokens(x_norm)
@@ -228,10 +266,26 @@ def generate_full(
         steps=steps,
         guidance_scale=guidance_scale,
         temperature=temperature,
+        topk_filter_thres=topk_filter_thres,
+        sample=sample_tokens,
+        remask_kept_tokens=remask_kept_tokens,
         mask=token_mask,
     )
-    tokens = residual.generate_residuals(base, cond=cond, guidance_scale=guidance_scale, mask=token_mask)
+    tokens = residual.generate_residuals(
+        base,
+        cond=cond,
+        guidance_scale=guidance_scale,
+        temperature=temperature,
+        topk_filter_thres=topk_filter_thres,
+        sample=sample_tokens,
+        mask=token_mask,
+    )
     return normalizer.inverse(vqvae.decode_from_tokens(tokens, target_len=real_x.shape[1]))
+
+
+@torch.no_grad()
+def vq_project(vqvae: MotionRVQVAE, normalizer: H3DNormalizer, motion: Tensor, frame_mask: Tensor) -> Tensor:
+    return normalizer.inverse(vqvae(normalizer.transform(motion), mask=frame_mask).recon)
 
 
 def axis_limits(joints_list: list[Tensor], target: Tensor) -> tuple[tuple[float, float], tuple[float, float], tuple[float, float]]:
@@ -395,6 +449,14 @@ def main() -> None:
     normalizer = H3DNormalizer.from_state_dict(ckpt["normalizer"])
     steps = int(args.generation_steps or saved_args.get("generation_steps", 10))
     max_seq_len = int(args.max_seq_len or saved_args.get("max_seq_len", 80))
+    real_h3d_dir = Path(args.real_h3d_dir) if args.real_h3d_dir else None
+    if real_h3d_dir is not None and not real_h3d_dir.exists():
+        raise FileNotFoundError(f"canonical HumanML3D new_joint_vecs dir not found: {real_h3d_dir}")
+    model_input_source = args.model_input_source
+    if model_input_source == "auto":
+        model_input_source = "canonical" if saved_args.get("canonical_h3d_dir") and real_h3d_dir is not None else "packed"
+    if model_input_source == "canonical" and real_h3d_dir is None:
+        raise ValueError("--model-input-source canonical requires --real-h3d-dir")
     text_encoder = build_text_encoder(args, saved_args)
     vqvae, masked, residual = build_models(ckpt, device)
 
@@ -426,6 +488,13 @@ def main() -> None:
     text = batch.texts[0]
     cond = text_encoder.encode([text], device=device)
 
+    if model_input_source == "canonical":
+        canonical = load_canonical_sample(real_h3d_dir, batch.clip_ids[0], max_len=real_x.shape[1])  # type: ignore[arg-type]
+        canonical = canonical[: args.max_frames]
+        real_x = canonical.unsqueeze(0).to(device)
+        length = int(canonical.shape[0])
+        frame_mask = torch.ones(1, length, dtype=torch.bool, device=device)
+
     generated = generate_full(
         vqvae,
         masked,
@@ -437,15 +506,23 @@ def main() -> None:
         steps,
         args.guidance_scale,
         args.temperature,
+        args.topk_filter_thres,
+        args.sample_tokens,
+        args.remask_kept_tokens,
     )[0, :length]
     real = real_x[0, :length]
     target, anchor_mask = interpolate_anchor_trajectory(root_xz(real.unsqueeze(0))[0], length, args.anchor_stride)
     projected = project_root_trajectory(generated, target, length)
+    constrained = (
+        vq_project(vqvae, normalizer, projected.unsqueeze(0), frame_mask)[0, :length]
+        if args.constraint_variant == "vq"
+        else projected
+    )
 
     series = [
-        ("real target", real),
-        ("unconstrained MoMask", generated),
-        ("trajectory constrained", projected),
+        ("ground truth", real),
+        ("generated", generated),
+        (f"constrained ({args.constraint_variant})", constrained),
     ]
     joints_by_name = [(name, recover_joints_from_ric(feat.unsqueeze(0))[0].float().cpu()) for name, feat in series]
     limits = axis_limits([j for _, j in joints_by_name], target.cpu())
@@ -456,7 +533,8 @@ def main() -> None:
     fig = plt.figure(figsize=(18, 10.6))
     constraint_text = (
         f"Constraint: root XZ trajectory must pass through green anchors every "
-        f"{args.anchor_stride} frames; dashed line is the interpolated target path."
+        f"{args.anchor_stride} frames; dashed line is the interpolated target path; "
+        f"shown constrained variant: {args.constraint_variant}."
     )
     title = f"Sample {sample_idx} | Prompt: {text}\n{constraint_text}"
     fig.suptitle("\n".join(textwrap.wrap(title, width=132)), fontsize=15, fontweight="semibold", y=0.98)

@@ -20,14 +20,19 @@ fi
 IMAGE="${IMAGE:-${HOME}/rmg-momask.sqsh}"
 HF_CACHE="${HF_CACHE:-${HOME}/hf-cache}"
 DATA_ROOT="${DATA_ROOT:-/mnt/projects/drl4cvb/human-motion-representation/data/data/humanml3d_packed}"
+REAL_H3D_DIR="${REAL_H3D_DIR:-${HOME}/rmg-runs/h3d-canonical/new_joint_vecs}"
 CKPT="${CKPT:-runs/momask-full-tokens-clip150k/momask_smoke_latest.pt}"
 SAMPLE="${SAMPLE:-0}"
 MAX_SEQ_LEN="${MAX_SEQ_LEN:-80}"
 MIN_SEQ_LEN="${MIN_SEQ_LEN:-40}"
 GENERATION_STEPS="${GENERATION_STEPS:-10}"
-GUIDANCE_SCALE="${GUIDANCE_SCALE:-4.0}"
+GUIDANCE_SCALE="${GUIDANCE_SCALE:-1.0}"
 TEMPERATURE="${TEMPERATURE:-1.0}"
+TOPK_FILTER_THRES="${TOPK_FILTER_THRES:-1.0}"
+SAMPLE_TOKENS="${SAMPLE_TOKENS:-0}"
+REMASK_KEPT_TOKENS="${REMASK_KEPT_TOKENS:-1}"
 ANCHOR_STRIDE="${ANCHOR_STRIDE:-20}"
+CONSTRAINT_VARIANT="${CONSTRAINT_VARIANT:-vq}"
 AUTO_SAMPLE_MOVING="${AUTO_SAMPLE_MOVING:-1}"
 MIN_ROOT_SPAN="${MIN_ROOT_SPAN:-0.75}"
 MAX_FRAMES="${MAX_FRAMES:-80}"
@@ -45,7 +50,26 @@ OUT_DIR="${OUT_DIR:-${RUN_DIR}/constraints/viz}"
 echo "[momask-constraint-viz] host=$(hostname)"
 echo "[momask-constraint-viz] repo=${REPO}"
 echo "[momask-constraint-viz] ckpt=${CKPT}"
-echo "[momask-constraint-viz] sample=${SAMPLE} anchor_stride=${ANCHOR_STRIDE} auto_sample_moving=${AUTO_SAMPLE_MOVING} min_root_span=${MIN_ROOT_SPAN} out_dir=${OUT_DIR}"
+echo "[momask-constraint-viz] real_h3d_dir=${REAL_H3D_DIR:-<packed>}"
+echo "[momask-constraint-viz] sample=${SAMPLE} anchor_stride=${ANCHOR_STRIDE} constraint_variant=${CONSTRAINT_VARIANT} auto_sample_moving=${AUTO_SAMPLE_MOVING} min_root_span=${MIN_ROOT_SPAN} out_dir=${OUT_DIR}"
+echo "[momask-constraint-viz] guidance=${GUIDANCE_SCALE} temp=${TEMPERATURE} sample_tokens=${SAMPLE_TOKENS} topk=${TOPK_FILTER_THRES}"
+
+REAL_H3D_ARG=""
+if [ -n "${REAL_H3D_DIR}" ]; then
+    REAL_H3D_ARG="--real-h3d-dir ${REAL_H3D_DIR}"
+fi
+
+SAMPLING_ARGS=""
+if [ "${SAMPLE_TOKENS}" = "1" ]; then
+    SAMPLING_ARGS="${SAMPLING_ARGS} --sample-tokens"
+else
+    SAMPLING_ARGS="${SAMPLING_ARGS} --no-sample-tokens"
+fi
+if [ "${REMASK_KEPT_TOKENS}" = "1" ]; then
+    SAMPLING_ARGS="${SAMPLING_ARGS} --remask-kept-tokens"
+else
+    SAMPLING_ARGS="${SAMPLING_ARGS} --no-remask-kept-tokens"
+fi
 
 enroot start \
     --root \
@@ -64,6 +88,7 @@ enroot start \
         python -u -m momask.scripts.visualize_momask_constraints \
             --checkpoint '${CKPT}' \
             --data-root '${DATA_ROOT}' \
+            ${REAL_H3D_ARG} \
             --sample ${SAMPLE} \
             --split test \
             --max-seq-len ${MAX_SEQ_LEN} \
@@ -71,7 +96,10 @@ enroot start \
             --generation-steps ${GENERATION_STEPS} \
             --guidance-scale ${GUIDANCE_SCALE} \
             --temperature ${TEMPERATURE} \
+            --topk-filter-thres ${TOPK_FILTER_THRES} \
+            ${SAMPLING_ARGS} \
             --anchor-stride ${ANCHOR_STRIDE} \
+            --constraint-variant ${CONSTRAINT_VARIANT} \
             --auto-sample-moving ${AUTO_SAMPLE_MOVING} \
             --min-root-span ${MIN_ROOT_SPAN} \
             --max-frames ${MAX_FRAMES} \
