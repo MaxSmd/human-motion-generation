@@ -33,6 +33,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from momask.models import (
+    CodebookResidualTransformer,
     MaskedMotionTransformer,
     MotionRVQVAE,
     ResidualTransformer,
@@ -72,6 +73,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--generation-steps", type=int, default=None)
     p.add_argument("--guidance-scale", type=float, default=4.0)
     p.add_argument("--temperature", type=float, default=1.0)
+    p.add_argument("--topk-filter-thres", type=float, default=1.0)
+    p.add_argument("--sample", action=argparse.BooleanOptionalAction, default=False)
+    p.add_argument("--remask-kept-tokens", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--anchor-stride", type=int, default=20, help="Frames between root-XZ trajectory anchors.")
     p.add_argument("--text-encoder", choices=["checkpoint", "random", "clip"], default="checkpoint")
     p.add_argument("--clip-model", default=None)
@@ -80,6 +84,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--evaluator", choices=["real", "random"], default="real")
     p.add_argument("--text-to-motion-repo", default="external/text-to-motion")
     p.add_argument("--humanml3d-repo", default="external/HumanML3D")
+    p.add_argument(
+        "--real-h3d-dir",
+        default=None,
+        help="Optional canonical HumanML3D new_joint_vecs dir for real features, targets, and canonical checkpoints.",
+    )
+    p.add_argument(
+        "--model-input-source",
+        choices=["auto", "packed", "canonical"],
+        default="auto",
+        help="Motion features used for token length/masks and constraint targets.",
+    )
     p.add_argument(
         "--humanml3d-texts-zip",
         default=None,
@@ -132,7 +147,7 @@ def build_text_encoder(args: argparse.Namespace, saved_args: dict) -> TextEncode
     raise ValueError(f"unknown text encoder: {kind}")
 
 
-def build_models(ckpt: dict, device: torch.device) -> tuple[MotionRVQVAE, MaskedMotionTransformer, ResidualTransformer]:
+def build_models(ckpt: dict, device: torch.device):
     a = ckpt_args(ckpt)
     vqvae = MotionRVQVAE(
         input_dim=H3D_FEATURE_DIM,
@@ -157,11 +172,19 @@ def build_models(ckpt: dict, device: torch.device) -> tuple[MotionRVQVAE, Masked
         dropout=float(a.get("transformer_dropout", 0.0)),
     )
     masked = MaskedMotionTransformer(cfg).to(device)
-    residual = ResidualTransformer(
-        cfg,
-        num_quantizers=int(a.get("num_quantizers", 3)),
-        separate_level_heads=not bool(a.get("shared_residual_head", False)),
-    ).to(device)
+    if a.get("residual_arch", "simple") == "codebook":
+        residual = CodebookResidualTransformer(
+            cfg,
+            num_quantizers=int(a.get("num_quantizers", 3)),
+            code_dim=int(a.get("vq_latent_dim", 32)),
+            share_weight=bool(a.get("residual_share_weight", False)),
+        ).to(device)
+    else:
+        residual = ResidualTransformer(
+            cfg,
+            num_quantizers=int(a.get("num_quantizers", 3)),
+            separate_level_heads=not bool(a.get("shared_residual_head", False)),
+        ).to(device)
     vqvae.load_state_dict(ckpt["vqvae"])
     masked.load_state_dict(ckpt["masked_transformer"])
     residual.load_state_dict(ckpt["residual_transformer"])
@@ -254,6 +277,42 @@ def token_mask_from_frame_mask(mask: Tensor, token_len: int) -> Tensor:
     return pooled > 0.5
 
 
+def load_canonical_motion_batch(
+    h3d_dir: str | Path,
+    clip_ids: list[str],
+    max_len: int,
+) -> tuple[Tensor, Tensor, int]:
+    root = Path(h3d_dir)
+    feats: list[Tensor] = []
+    missing = 0
+    for cid in clip_ids:
+        candidates = [cid]
+        if cid.startswith("M") and len(cid) > 1:
+            candidates.append(cid[1:])
+        path = next((root / f"{name}.npy" for name in candidates if (root / f"{name}.npy").exists()), None)
+        if path is None:
+            missing += 1
+            feats.append(torch.zeros(1, H3D_FEATURE_DIM))
+            continue
+        arr = np.load(path).astype(np.float32)
+        if arr.ndim != 2 or arr.shape[1] != H3D_FEATURE_DIM:
+            raise ValueError(f"canonical HumanML3D feature must be (T, {H3D_FEATURE_DIM}), got {arr.shape}: {path}")
+        arr = arr[:max_len]
+        if len(arr) < 1:
+            missing += 1
+            feats.append(torch.zeros(1, H3D_FEATURE_DIM))
+            continue
+        feats.append(torch.from_numpy(arr))
+
+    tmax = max(f.shape[0] for f in feats)
+    out = torch.zeros(len(feats), tmax, H3D_FEATURE_DIM)
+    lengths = torch.zeros(len(feats), dtype=torch.long)
+    for i, feat in enumerate(feats):
+        out[i, : feat.shape[0]] = feat
+        lengths[i] = feat.shape[0]
+    return out, lengths, missing
+
+
 def root_xz(motion: Tensor) -> Tensor:
     return recover_joints_from_ric(motion.float())[:, :, 0, :][:, :, [0, 2]]
 
@@ -343,6 +402,9 @@ def generate_full(
     steps: int,
     guidance_scale: float,
     temperature: float,
+    topk_filter_thres: float,
+    sample: bool,
+    remask_kept_tokens: bool,
 ) -> Tensor:
     x_norm = normalizer.transform(real_x)
     true_tokens = vqvae.encode_to_tokens(x_norm)
@@ -353,9 +415,20 @@ def generate_full(
         steps=steps,
         guidance_scale=guidance_scale,
         temperature=temperature,
+        topk_filter_thres=topk_filter_thres,
+        sample=sample,
+        remask_kept_tokens=remask_kept_tokens,
         mask=token_mask,
     )
-    tokens = residual.generate_residuals(base, cond=cond, guidance_scale=guidance_scale, mask=token_mask)
+    tokens = residual.generate_residuals(
+        base,
+        cond=cond,
+        guidance_scale=guidance_scale,
+        temperature=temperature,
+        topk_filter_thres=topk_filter_thres,
+        sample=sample,
+        mask=token_mask,
+    )
     return normalizer.inverse(vqvae.decode_from_tokens(tokens, target_len=real_x.shape[1]))
 
 
@@ -389,6 +462,14 @@ def main() -> None:
     ckpt = torch_load(require_path(args.checkpoint, "MoMask checkpoint"), map_location=device)
     saved_args = ckpt_args(ckpt)
     normalizer = H3DNormalizer.from_state_dict(ckpt["normalizer"])
+    real_h3d_dir = Path(args.real_h3d_dir) if args.real_h3d_dir else None
+    if real_h3d_dir is not None:
+        require_path(real_h3d_dir, "canonical HumanML3D new_joint_vecs dir")
+    model_input_source = args.model_input_source
+    if model_input_source == "auto":
+        model_input_source = "canonical" if saved_args.get("canonical_h3d_dir") and real_h3d_dir is not None else "packed"
+    if model_input_source == "canonical" and real_h3d_dir is None:
+        raise ValueError("--model-input-source canonical requires --real-h3d-dir")
     steps = int(args.generation_steps or saved_args.get("generation_steps", 10))
     max_seq_len = int(args.max_seq_len or saved_args.get("max_seq_len", 80))
     text_encoder = build_text_encoder(args, saved_args)
@@ -425,7 +506,9 @@ def main() -> None:
     print(
         f"[constraints] ckpt={args.checkpoint} clips={len(ds)} max_clips={args.max_clips} "
         f"steps={steps} guidance={args.guidance_scale} anchor_stride={args.anchor_stride} "
-        f"text_tokens={'vip' if caption_tokens is not None else 'spacy'}",
+        f"text_tokens={'vip' if caption_tokens is not None else 'spacy'} "
+        f"real_features={'canonical' if real_h3d_dir is not None else 'packed'} "
+        f"model_input={model_input_source} sample={args.sample} topk={args.topk_filter_thres}",
         flush=True,
     )
 
@@ -442,32 +525,52 @@ def main() -> None:
         clip_ids = batch.clip_ids[:take]
         cond = text_encoder.encode(texts, device=device)
 
+        eval_real_x = real_x
+        eval_lengths = lengths
+        if real_h3d_dir is not None:
+            eval_real_x, eval_lengths, n_missing_real = load_canonical_motion_batch(
+                real_h3d_dir,
+                clip_ids,
+                max_len=real_x.shape[1],
+            )
+            if n_missing_real:
+                raise FileNotFoundError(
+                    f"{n_missing_real} canonical HumanML3D feature files missing under {real_h3d_dir}"
+                )
+
+        model_real_x = eval_real_x.to(device) if model_input_source == "canonical" else real_x
+        model_lengths = eval_lengths if model_input_source == "canonical" else lengths
+        model_frame_mask = torch.arange(model_real_x.shape[1], device=device).unsqueeze(0) < model_lengths.to(device).unsqueeze(1)
+
         gen = generate_full(
             vqvae=vqvae,
             masked=masked,
             residual=residual,
             normalizer=normalizer,
             cond=cond,
-            real_x=real_x,
-            frame_mask=frame_mask,
+            real_x=model_real_x,
+            frame_mask=model_frame_mask,
             steps=steps,
             guidance_scale=args.guidance_scale,
             temperature=args.temperature,
+            topk_filter_thres=args.topk_filter_thres,
+            sample=args.sample,
+            remask_kept_tokens=args.remask_kept_tokens,
         )
-        real_root = root_xz(real_x)
-        target_root, anchor_mask = interpolate_anchor_trajectory(real_root, lengths.to(device), args.anchor_stride)
-        projected = project_root_trajectory(gen, target_root, lengths.to(device))
-        traj_vq = vq_project(vqvae, normalizer, projected, frame_mask)
+        real_root = root_xz(model_real_x)
+        target_root, anchor_mask = interpolate_anchor_trajectory(real_root, model_lengths.to(device), args.anchor_stride)
+        projected = project_root_trajectory(gen, target_root, model_lengths.to(device))
+        traj_vq = vq_project(vqvae, normalizer, projected, model_frame_mask)
 
         for name, motion in (("unconstrained", gen), ("traj_projected", projected), ("traj_vq", traj_vq)):
-            errs = trajectory_errors(motion, target_root, anchor_mask, lengths.to(device))
+            errs = trajectory_errors(motion, target_root, anchor_mask, model_lengths.to(device))
             for key, value in errs.items():
                 traj_sums[name][key] = traj_sums[name].get(key, 0.0) + value * take
 
-        buckets["real"].append(encode_motion(evaluator, real_x, lengths))
-        buckets["unconstrained"].append(encode_motion(evaluator, gen, lengths))
-        buckets["traj_projected"].append(encode_motion(evaluator, projected, lengths))
-        buckets["traj_vq"].append(encode_motion(evaluator, traj_vq, lengths))
+        buckets["real"].append(encode_motion(evaluator, eval_real_x, eval_lengths))
+        buckets["unconstrained"].append(encode_motion(evaluator, gen, eval_lengths))
+        buckets["traj_projected"].append(encode_motion(evaluator, projected, eval_lengths))
+        buckets["traj_vq"].append(encode_motion(evaluator, traj_vq, eval_lengths))
         text_np, n_missing = encode_text_batch(evaluator, texts, clip_ids, caption_tokens)
         text_embs.append(text_np)
         n_text_fallback += n_missing
@@ -488,7 +591,14 @@ def main() -> None:
             "max_seq_len": max_seq_len,
             "generation_steps": steps,
             "guidance_scale": args.guidance_scale,
+            "temperature": args.temperature,
+            "topk_filter_thres": args.topk_filter_thres,
+            "sample": args.sample,
+            "remask_kept_tokens": args.remask_kept_tokens,
             "anchor_stride": args.anchor_stride,
+            "real_feature_source": "canonical" if real_h3d_dir is not None else "packed",
+            "real_h3d_dir": str(real_h3d_dir) if real_h3d_dir is not None else None,
+            "model_input_source": model_input_source,
             "text_token_source": "vip" if caption_tokens is not None else "spacy",
             "vip_token_fallbacks": int(n_text_fallback),
             "elapsed_sec": time.perf_counter() - t0,
