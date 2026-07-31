@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import random
 import textwrap
 from pathlib import Path
 
@@ -78,13 +79,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sample-tokens", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--remask-kept-tokens", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--anchor-stride", type=int, default=20)
-    p.add_argument("--constraint-variant", choices=["projected", "vq"], default="vq")
+    p.add_argument("--constraint-variant", choices=["projected", "vq", "both"], default="both")
     p.add_argument("--real-h3d-dir", default=None)
     p.add_argument("--model-input-source", choices=["auto", "packed", "canonical"], default="auto")
     p.add_argument("--auto-sample-moving", type=int, default=0)
     p.add_argument("--min-root-span", type=float, default=0.75)
     p.add_argument("--max-frames", type=int, default=100)
     p.add_argument("--fps", type=int, default=20)
+    p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out-dir", default=None)
     p.add_argument("--text-encoder", choices=["checkpoint", "random", "clip"], default="checkpoint")
     p.add_argument("--clip-model", default=None)
@@ -442,6 +444,11 @@ def select_sample(ds: H3D263Dataset, start_idx: int, max_frames: int, min_root_s
 
 def main() -> None:
     args = parse_args()
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
     device = torch.device(args.device)
     ckpt_path = Path(args.checkpoint)
     ckpt = torch_load(ckpt_path, map_location=device)
@@ -513,17 +520,16 @@ def main() -> None:
     real = real_x[0, :length]
     target, anchor_mask = interpolate_anchor_trajectory(root_xz(real.unsqueeze(0))[0], length, args.anchor_stride)
     projected = project_root_trajectory(generated, target, length)
-    constrained = (
-        vq_project(vqvae, normalizer, projected.unsqueeze(0), frame_mask)[0, :length]
-        if args.constraint_variant == "vq"
-        else projected
-    )
+    constrained_vq = vq_project(vqvae, normalizer, projected.unsqueeze(0), frame_mask)[0, :length]
 
     series = [
         ("ground truth", real),
         ("generated", generated),
-        (f"constrained ({args.constraint_variant})", constrained),
     ]
+    if args.constraint_variant in {"projected", "both"}:
+        series.append(("constraint exact", projected))
+    if args.constraint_variant in {"vq", "both"}:
+        series.append(("constraint + VQ", constrained_vq))
     joints_by_name = [(name, recover_joints_from_ric(feat.unsqueeze(0))[0].float().cpu()) for name, feat in series]
     limits = axis_limits([j for _, j in joints_by_name], target.cpu())
 
@@ -534,13 +540,14 @@ def main() -> None:
     constraint_text = (
         f"Constraint: root XZ trajectory must pass through green anchors every "
         f"{args.anchor_stride} frames; dashed line is the interpolated target path; "
-        f"shown constrained variant: {args.constraint_variant}."
+        f"exact projection should hit anchors; VQ projection trades exact control for realism."
     )
-    title = f"Sample {sample_idx} | Prompt: {text}\n{constraint_text}"
+    title = f"Sample {sample_idx} | Seed {args.seed} | Prompt: {text}\n{constraint_text}"
     fig.suptitle("\n".join(textwrap.wrap(title, width=132)), fontsize=15, fontweight="semibold", y=0.98)
-    grid = fig.add_gridspec(2, 3, height_ratios=[2.1, 1.0], hspace=0.22, wspace=0.16)
-    pose_axes = [fig.add_subplot(grid[0, i], projection="3d") for i in range(3)]
-    path_axes = [fig.add_subplot(grid[1, i]) for i in range(3)]
+    n_cols = len(joints_by_name)
+    grid = fig.add_gridspec(2, n_cols, height_ratios=[2.1, 1.0], hspace=0.22, wspace=0.16)
+    pose_axes = [fig.add_subplot(grid[0, i], projection="3d") for i in range(n_cols)]
+    path_axes = [fig.add_subplot(grid[1, i]) for i in range(n_cols)]
     fig.subplots_adjust(top=0.84, left=0.045, right=0.985, bottom=0.075)
 
     def update(i: int):
@@ -554,8 +561,8 @@ def main() -> None:
         return []
 
     update(0)
-    png = out_dir / f"constraint_sample_{args.sample:04d}_frame0.png"
-    gif = out_dir / f"constraint_sample_{args.sample:04d}.gif"
+    png = out_dir / f"constraint_sample_{sample_idx:04d}_seed{args.seed:03d}_frame0.png"
+    gif = out_dir / f"constraint_sample_{sample_idx:04d}_seed{args.seed:03d}.gif"
     fig.savefig(png, dpi=150, bbox_inches="tight")
     anim = FuncAnimation(fig, update, frames=length, interval=1000 / args.fps, blit=False)
     anim.save(gif, writer=PillowWriter(fps=args.fps))

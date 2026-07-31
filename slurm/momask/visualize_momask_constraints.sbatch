@@ -32,11 +32,12 @@ TOPK_FILTER_THRES="${TOPK_FILTER_THRES:-1.0}"
 SAMPLE_TOKENS="${SAMPLE_TOKENS:-0}"
 REMASK_KEPT_TOKENS="${REMASK_KEPT_TOKENS:-1}"
 ANCHOR_STRIDE="${ANCHOR_STRIDE:-20}"
-CONSTRAINT_VARIANT="${CONSTRAINT_VARIANT:-vq}"
+CONSTRAINT_VARIANT="${CONSTRAINT_VARIANT:-both}"
 AUTO_SAMPLE_MOVING="${AUTO_SAMPLE_MOVING:-1}"
 MIN_ROOT_SPAN="${MIN_ROOT_SPAN:-0.75}"
 MAX_FRAMES="${MAX_FRAMES:-80}"
 FPS="${FPS:-20}"
+SEED="${SEED:-0}"
 TEXT_ENCODER="${TEXT_ENCODER:-checkpoint}"
 CLIP_MODEL="${CLIP_MODEL:-}"
 CLIP_CACHE_DIR="${CLIP_CACHE_DIR:-${HF_CACHE}}"
@@ -52,7 +53,7 @@ echo "[momask-constraint-viz] repo=${REPO}"
 echo "[momask-constraint-viz] ckpt=${CKPT}"
 echo "[momask-constraint-viz] real_h3d_dir=${REAL_H3D_DIR:-<packed>}"
 echo "[momask-constraint-viz] sample=${SAMPLE} anchor_stride=${ANCHOR_STRIDE} constraint_variant=${CONSTRAINT_VARIANT} auto_sample_moving=${AUTO_SAMPLE_MOVING} min_root_span=${MIN_ROOT_SPAN} out_dir=${OUT_DIR}"
-echo "[momask-constraint-viz] guidance=${GUIDANCE_SCALE} temp=${TEMPERATURE} sample_tokens=${SAMPLE_TOKENS} topk=${TOPK_FILTER_THRES}"
+echo "[momask-constraint-viz] guidance=${GUIDANCE_SCALE} temp=${TEMPERATURE} sample_tokens=${SAMPLE_TOKENS} topk=${TOPK_FILTER_THRES} seed=${SEED}"
 
 REAL_H3D_ARG=""
 if [ -n "${REAL_H3D_DIR}" ]; then
@@ -104,6 +105,7 @@ enroot start \
             --min-root-span ${MIN_ROOT_SPAN} \
             --max-frames ${MAX_FRAMES} \
             --fps ${FPS} \
+            --seed ${SEED} \
             --text-encoder '${TEXT_ENCODER}' \
             --clip-model '${CLIP_MODEL}' \
             --clip-cache-dir '${CLIP_CACHE_DIR}' \
