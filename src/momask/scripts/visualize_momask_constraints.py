@@ -3,9 +3,9 @@
 The GIF compares:
   real motion | unconstrained generation | trajectory-projected generation
 
-The target trajectory is drawn as a dashed black line and anchor points are
-drawn in green. This script generates a fresh sample from a checkpoint, so run
-it through Slurm rather than on the head node.
+The target trajectory is drawn as a dashed black line with ordered anchor
+markers. This script generates a fresh sample from a checkpoint, so run it
+through Slurm rather than on the head node.
 """
 
 from __future__ import annotations
@@ -311,6 +311,22 @@ def root_error(joints_or_frame: Tensor, target: Tensor, frame: int) -> float:
     return float((root - target[frame].cpu()).norm())
 
 
+def anchor_style(anchor_mask: Tensor) -> tuple[np.ndarray, np.ndarray]:
+    anchor_frames = torch.nonzero(anchor_mask, as_tuple=False).flatten().cpu().numpy()
+    if len(anchor_frames) == 0:
+        return anchor_frames, np.zeros((0, 4), dtype=np.float32)
+    colors = plt.cm.viridis(np.linspace(0.12, 0.92, len(anchor_frames)))
+    return anchor_frames, colors
+
+
+def anchor_label(order: int, frame_idx: int, num_anchors: int) -> str:
+    if order == 0:
+        return f"start\nf{frame_idx}"
+    if order == num_anchors - 1:
+        return f"end\nf{frame_idx}"
+    return f"f{frame_idx}"
+
+
 def draw_pose_frame(ax, joints_seq: Tensor, target: Tensor, anchor_mask: Tensor, title: str, limits, frame: int) -> None:
     ax.cla()
     joints = joints_seq[frame]
@@ -343,16 +359,28 @@ def draw_pose_frame(ax, joints_seq: Tensor, target: Tensor, anchor_mask: Tensor,
         label="target root path",
     )
     anchors = target[anchor_mask]
+    anchor_frames, anchor_colors = anchor_style(anchor_mask)
     ax.scatter(
         anchors[:, 0].cpu(),
         anchors[:, 1].cpu(),
         torch.zeros(anchors.shape[0]),
-        color="#16a34a",
+        color=anchor_colors,
         edgecolor="white",
-        linewidth=0.6,
-        s=58,
-        label="anchors",
+        linewidth=0.8,
+        s=74,
+        label="ordered anchors",
     )
+    for order, (frame_idx, anchor) in enumerate(zip(anchor_frames, anchors)):
+        if order in {0, len(anchor_frames) - 1} or len(anchor_frames) <= 6:
+            ax.text(
+                float(anchor[0]),
+                float(anchor[1]),
+                0.05,
+                anchor_label(order, int(frame_idx), len(anchor_frames)).replace("\n", " "),
+                color="#111827",
+                fontsize=8,
+                weight="bold",
+            )
     err = root_error(joints_seq, target, min(frame, target.shape[0] - 1))
     ax.set_title(f"{title} | frame {frame}\nroot-target error: {err:.3f} m", pad=14)
     ax.set_xlabel("X position (m)", labelpad=8)
@@ -380,6 +408,7 @@ def draw_path_frame(ax, joints_seq: Tensor, target: Tensor, anchor_mask: Tensor,
     ax.cla()
     root_path = root_xz_from_joints(joints_seq)
     anchors = target[anchor_mask]
+    anchor_frames, anchor_colors = anchor_style(anchor_mask)
     ax.plot(
         target[:, 0].cpu(),
         target[:, 1].cpu(),
@@ -391,13 +420,45 @@ def draw_path_frame(ax, joints_seq: Tensor, target: Tensor, anchor_mask: Tensor,
     ax.scatter(
         anchors[:, 0].cpu(),
         anchors[:, 1].cpu(),
-        color="#16a34a",
+        color=anchor_colors,
         edgecolor="white",
-        linewidth=0.8,
-        s=72,
+        linewidth=1.0,
+        s=88,
         zorder=4,
-        label="fixed anchors",
+        label="ordered anchors",
     )
+    if anchors.shape[0] > 1:
+        anchor_np = anchors.cpu().numpy()
+        for left, right in zip(anchor_np[:-1], anchor_np[1:]):
+            dx = float(right[0] - left[0])
+            dy = float(right[1] - left[1])
+            ax.annotate(
+                "",
+                xy=(float(left[0] + dx * 0.72), float(left[1] + dy * 0.72)),
+                xytext=(float(left[0] + dx * 0.28), float(left[1] + dy * 0.28)),
+                arrowprops={
+                    "arrowstyle": "->",
+                    "color": "#16a34a",
+                    "lw": 1.8,
+                    "alpha": 0.85,
+                    "shrinkA": 0,
+                    "shrinkB": 0,
+                },
+                zorder=3,
+            )
+        for order, (frame_idx, anchor) in enumerate(zip(anchor_frames, anchor_np)):
+            offset_y = 8 if order % 2 == 0 else -15
+            ax.annotate(
+                anchor_label(order, int(frame_idx), len(anchor_frames)),
+                xy=(float(anchor[0]), float(anchor[1])),
+                xytext=(8, offset_y),
+                textcoords="offset points",
+                fontsize=8,
+                weight="bold",
+                color="#111827",
+                bbox={"boxstyle": "round,pad=0.18", "fc": "white", "ec": "#16a34a", "alpha": 0.9},
+                zorder=6,
+            )
     ax.plot(root_path[:, 0], root_path[:, 1], color="#9ca3af", linewidth=1.3, alpha=0.45, label="full root path")
     ax.plot(root_path[: frame + 1, 0], root_path[: frame + 1, 1], color="#2563eb", linewidth=3.0, label="root trail")
     ax.scatter(
@@ -538,8 +599,8 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     fig = plt.figure(figsize=(18, 10.6))
     constraint_text = (
-        f"Constraint: root XZ trajectory must pass through green anchors every "
-        f"{args.anchor_stride} frames; dashed line is the interpolated target path; "
+        f"Constraint: root XZ trajectory must pass through ordered anchors every "
+        f"{args.anchor_stride} frames; labels show anchor frame/time order; dashed line is the interpolated target path; "
         f"exact projection should hit anchors; VQ projection trades exact control for realism."
     )
     title = f"Sample {sample_idx} | Seed {args.seed} | Prompt: {text}\n{constraint_text}"
