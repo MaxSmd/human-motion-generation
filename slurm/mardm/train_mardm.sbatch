@@ -86,9 +86,9 @@ enroot start \
         set -euo pipefail
         cd ${REPO}
         pip install -e . --no-deps --quiet
-        [ -f '${MARDM_STATS}' ] || python -m mardm.scripts.compute_mardm_stats \\
+        [ -f '${MARDM_STATS}' ] || python -m mardm.scripts.compute_stats \\
             --data-root '${DATA_ROOT}' --out '${MARDM_STATS}' ${CANON_STATS_FLAG}
-        python -m mardm.scripts.train_mardm \\
+        python -m mardm.scripts.train \\
             --config-name=${CONFIG_NAME} \\
             ae_checkpoint='${AE_CKPT}' \\
             text_encoder.type=qwen3 \\

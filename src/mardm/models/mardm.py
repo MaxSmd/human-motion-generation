@@ -22,7 +22,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from ..training.masking import (
+from ..masking import (
     cosine_schedule,
     eval_decorator,
     get_mask_subset_prob,
@@ -191,8 +191,8 @@ class MARDM(nn.Module):
                 control_residuals: list[Tensor] | None = None) -> Tensor:
         """`control_residuals`: optional per-block additive residuals (one
         (B, L, latent_dim) tensor per MARTransformer block, in original token
-        order) from `mardm.control.regularizer`. None (default) is the exact
-        base computation — no new parameters, checkpoints load unchanged."""
+        order). None (default) is the exact base computation — no new
+        parameters, checkpoints load unchanged."""
         cond = self.mask_cond(cond, force_mask=force_mask)
         x = self.input_process(latents)          # (L, B, latent_dim)
         cond = self.cond_emb(cond)               # (B, latent_dim)

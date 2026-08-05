@@ -11,7 +11,7 @@
 #
 # Layer-2 control evaluation: FID / R-precision / Diversity of GUIDED samples
 # vs the real test distribution, plus Traj/Loc/Avg control error, with a
-# same-seed unguided baseline. Guo evaluator harness as in evaluate_mardm.
+# same-seed unguided baseline. Guo evaluator harness as in evaluate.
 #
 # Usage:
 #     AE_CKPT=.../mardm-ae-canon/checkpoints/latest.pt \
@@ -68,7 +68,7 @@ enroot start \
         cd ${REPO}
         pip install -e . --no-deps --quiet
         python -m spacy download en_core_web_sm --quiet || true
-        python -u -m mardm.scripts.evaluate_mardm_control \\
+        python -u -m mardm.scripts.evaluate_control \\
             --config-name=${CONFIG_NAME} \\
             ae_checkpoint='${AE_CKPT}' \\
             text_encoder.type=qwen3 \\

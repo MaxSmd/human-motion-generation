@@ -15,17 +15,13 @@ from .losses import (
     latents_to_joints,
     motion_metrics,
 )
-from .regularizer import ControlMARDM, control_forward_loss, control_signal_features
 from .root_edit import root_edit_essential
 
 __all__ = [
-    "ControlMARDM",
     "ControlSignal",
     "GuidanceConfig",
-    "control_forward_loss",
     "control_loss",
     "control_metrics",
-    "control_signal_features",
     "dynamics_loss",
     "foot_skate_loss",
     "generate_guided",

@@ -10,7 +10,7 @@
 #SBATCH --error=slurm/logs/mardm-vrf-%j.err
 #
 # Diagnose the eval 263-D feature space (isolation + per-block diff). See
-# mardm/scripts/verify_h3d_features.py. Needs the Guo evaluator (external/
+# mardm/scripts/verify_features.py. Needs the Guo evaluator (external/
 # text-to-motion) and HumanML3D new_joint_vecs (pass VECS=...).
 #
 # Submit:
@@ -54,7 +54,7 @@ enroot start \
         cd ${REPO}
         pip install -e . --no-deps --quiet
         python -m spacy download en_core_web_sm --quiet || true
-        python -u -m mardm.scripts.verify_h3d_features \\
+        python -u -m mardm.scripts.verify_features \\
             --config-name=${CONFIG_NAME} \\
             ae_checkpoint='${AE_CKPT}' \\
             +eval.checkpoint='${GEN_CKPT}' \\

@@ -1,7 +1,7 @@
 """Visualize + score a MARDM checkpoint on the clips it trained on.
 
 This is the *overfit / memorization* check, not the distributional eval
-(`evaluate_mardm.py`). For each clip in the deterministic train subset the model
+(`evaluate.py`). For each clip in the deterministic train subset the model
 saw, it:
 
   1. renders the ground-truth motion  -> `real-<cid>.gif`
@@ -16,7 +16,7 @@ no `external/HumanML3D` needed). A near-zero MPJPE + visually matching GIFs mean
 the model memorized the subset — the thing an overfit smoke is supposed to show.
 
 Run (cluster):
-    python -m mardm.scripts.visualize_mardm \\
+    python -m mardm.scripts.visualize \\
         ae_checkpoint=runs/mardm-overfit-ae-XXXX/checkpoints/latest.pt \\
         +viz.checkpoint=runs/mardm-overfit-gen-XXXX/checkpoints/latest.pt \\
         text_encoder.type=qwen3 subset_frac=0.003 \\

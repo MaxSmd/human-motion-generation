@@ -8,7 +8,7 @@ to this file), where <stem> is derived from the eval run directory
 (e.g. ~/rmg-runs/mardm-eval-10132/eval/results.json -> mardm_10132).
 
 Usage:
-    python -m mardm.notebooks.eval_table ~/rmg-runs/mardm-eval-10132/eval/results.json
+    python -m mardm.scripts.eval_table ~/rmg-runs/mardm-eval-10132/eval/results.json
 """
 
 from __future__ import annotations

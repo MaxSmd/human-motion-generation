@@ -67,7 +67,7 @@ in the configs and remains useful for cheap end-to-end checks.
   encoder constant across RMG/MARDM/MoMask, removing a confound from the
   comparison. `timm`'s MLP is likewise replaced by a plain GELU MLP.
 - **z-normalization, not manifold normalization.** MARDM standardizes the
-  essential dims with a train-split mean/std (`mardm.scripts.compute_mardm_stats`),
+  essential dims with a train-split mean/std (`mardm.scripts.compute_stats`),
   unlike RMG's manifold structure.
 - **Unit-variance AE latents for the SiT head — intentional deviation from
   upstream.** Upstream MARDM feeds the *raw* AE latents straight into the SiT
@@ -96,20 +96,21 @@ in the configs and remains useful for cheap end-to-end checks.
 
 ```
 src/mardm/
+    generation.py  text → sampled motion → 263-D
+    masking.py     cosine schedule + BERT-style sub-masking
     models/        autoencoder.py · mardm.py · diffmlps.py
     transport/     vendored SiT (linear-path velocity flow matching)
     representation/essential.py — 67-D encode, stats, essential→263 bridge
     data/          dataset.py — EssentialDataset (wraps shared's loader)
-    training/      masking.py — cosine schedule + BERT-style sub-masking
-    tasks/         generation.py — text → sampled motion → 263-D
-    configs/       ae.yaml · gen.yaml · gen_m.yaml   (mardm_mini + paper-M)
-    scripts/       compute_mardm_stats.py · train_mardm_ae.py ·
-                   train_mardm.py · evaluate_mardm.py · diagnose_*.py
-    notebooks/     eval_table.py · training_curves.ipynb
-    reports/       tables/ · figures/
+    control/       guidance.py · losses.py · root_edit.py — inference-time joint control
+    configs/       ae.yaml · gen.yaml · gen_m.yaml · control_sweep*.yaml
+    scripts/       compute_stats.py · train_ae.py · train.py · evaluate.py ·
+                   evaluate_control.py · generate_control.py ·
+                   visualize.py · verify_features.py · eval_table.py
+    reports/       results/ · tables/ · gifs/
 slurm/mardm/       train_mardm_ae.sbatch · train_mardm.sbatch ·
                    evaluate_mardm.sbatch · overfit_mardm.sbatch
-tests/mardm/       test_mardm_{representation,data,models}.py
+tests/mardm/       test_mardm_{representation,data,models,control}.py
 ```
 
 ## How to run
@@ -121,15 +122,15 @@ tests/mardm/       test_mardm_{representation,data,models}.py
 python scripts/build_synthetic_dataset.py --output-dir /tmp/synth \
     --num-train 16 --num-val 4 --num-test 4 --seq-len 80
 # 2. Essential mean/std
-python -m mardm.scripts.compute_mardm_stats --data-root /tmp/synth --out /tmp/synth/stats.pt
+python -m mardm.scripts.compute_stats --data-root /tmp/synth --out /tmp/synth/stats.pt
 # 3. AE (stage 1)
-python -m mardm.scripts.train_mardm_ae data.root=/tmp/synth stats_path=/tmp/synth/stats.pt \
+python -m mardm.scripts.train_ae data.root=/tmp/synth stats_path=/tmp/synth/stats.pt \
     ae.width=32 ae.output_emb_width=16 ae.depth=2 \
     train.max_steps=20 train.micro_batch_size=4 train.grad_accum=1 train.precision=fp32 \
     data.num_workers=0 logging.use_wandb=false logging.use_tensorboard=false \
     run_name=ae-smoke output_dir=/tmp/mardm_ae_smoke
 # 4. Generation branch (stage 2) — random text encoder, frozen AE from step 3
-python -m mardm.scripts.train_mardm data.root=/tmp/synth stats_path=/tmp/synth/stats.pt \
+python -m mardm.scripts.train data.root=/tmp/synth stats_path=/tmp/synth/stats.pt \
     ae_checkpoint=/tmp/mardm_ae_smoke/checkpoints/latest.pt \
     ae.width=32 ae.output_emb_width=16 ae.depth=2 \
     text_encoder.type=random text_encoder.text_dim=64 \
@@ -184,9 +185,9 @@ Equivalent for a single stage via CLI:
 
 ```bash
 # AE only, 0.5% subset:
-python -m mardm.scripts.train_mardm_ae subset_frac=0.005 ...
+python -m mardm.scripts.train_ae subset_frac=0.005 ...
 # Gen only, same subset (needs an AE checkpoint):
-python -m mardm.scripts.train_mardm subset_frac=0.005 \
+python -m mardm.scripts.train subset_frac=0.005 \
     model.cond_drop_prob=0 model.dropout=0 ae_checkpoint=...
 ```
 

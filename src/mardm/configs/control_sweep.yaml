@@ -1,6 +1,6 @@
 # Runtime-lever sweep for spatial-control guidance (no training, inference
 # knobs only). Each entry overrides fields of the base GuidanceConfig built
-# from ctrl.* and becomes one eval arm in evaluate_mardm_control
+# from ctrl.* and becomes one eval arm in evaluate_control
 # (+ctrl.sweep_file=src/mardm/configs/control_sweep.yaml). The unguided
 # baseline arm comes from ctrl.baseline=true.
 #

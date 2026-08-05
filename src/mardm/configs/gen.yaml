@@ -3,9 +3,9 @@
 #
 # Requires a trained stage-1 AE checkpoint whose `ae:` block matches the one
 # below (architecture must agree to load the weights):
-#   python -m mardm.scripts.train_mardm ae_checkpoint=runs/mardm-ae-XXXX/checkpoints/latest.pt
+#   python -m mardm.scripts.train ae_checkpoint=runs/mardm-ae-XXXX/checkpoints/latest.pt
 #
-# Local smoke (random text encoder, CPU): see mardm/scripts/train_mardm.py docstring.
+# Local smoke (random text encoder, CPU): see mardm/scripts/train.py docstring.
 
 defaults:
   - /data: local_submodule

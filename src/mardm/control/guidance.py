@@ -40,7 +40,7 @@ import torch
 from torch import Tensor
 
 from ..models import AE, MARDM
-from ..training.masking import cosine_schedule, lengths_to_mask
+from ..masking import cosine_schedule, lengths_to_mask
 from .losses import (
     ControlSignal,
     control_loss,
@@ -214,26 +214,13 @@ def _optimize_z(ae: AE, z: Tensor, sample_fn, context: Tensor, flat_mask: Tensor
 
 
 def _compute_z(mardm: MARDM, latents: Tensor, cond: Tensor, padding_mask: Tensor,
-               flat_mask: Tensor, cond_scale: float,
-               regularizer=None, control_feats: Tensor | None = None) -> Tensor:
-    """Transformer condition for the masked tokens, uncond half stacked under CFG.
-
-    With a trained `regularizer` (phase 2, `mardm.control.regularizer`), its
-    residuals are injected into BOTH CFG branches — the spatial signal is
-    caption-independent.
-    """
+               flat_mask: Tensor, cond_scale: float) -> Tensor:
+    """Transformer condition for the masked tokens, uncond half stacked under CFG."""
     b, l, _ = latents.shape
     with torch.no_grad():
-        res = (regularizer.residuals(latents, cond, padding_mask, control_feats)
-               if regularizer is not None else None)
-        z = mardm.forward(latents, cond, padding_mask,
-                          control_residuals=res).reshape(b * l, -1)[flat_mask]
+        z = mardm.forward(latents, cond, padding_mask).reshape(b * l, -1)[flat_mask]
         if cond_scale != 1.0:
-            res_u = (regularizer.residuals(latents, cond, padding_mask, control_feats,
-                                           force_mask=True)
-                     if regularizer is not None else None)
-            z_uncond = mardm.forward(latents, cond, padding_mask, force_mask=True,
-                                     control_residuals=res_u)
+            z_uncond = mardm.forward(latents, cond, padding_mask, force_mask=True)
             z = torch.cat([z, z_uncond.reshape(b * l, -1)[flat_mask]], dim=0)
     return z
 
@@ -241,13 +228,11 @@ def _compute_z(mardm: MARDM, latents: Tensor, cond: Tensor, padding_mask: Tensor
 def _guided_commit(mardm: MARDM, ae: AE, latents: Tensor, is_mask: Tensor, cond: Tensor,
                    padding_mask: Tensor, cond_scale: float, control: ControlSignal,
                    mean: Tensor, std: Tensor, g: GuidanceConfig, inner_iters: int,
-                   tag: str, regularizer=None, control_feats: Tensor | None = None,
-                   reference: Tensor | None = None) -> Tensor:
+                   tag: str, reference: Tensor | None = None) -> Tensor:
     """One masked-prediction step: optimize z for the masked tokens, commit samples."""
     b, l, d = latents.shape
     flat_mask = is_mask.reshape(b * l)
-    z = _compute_z(mardm, latents, cond, padding_mask, flat_mask, cond_scale,
-                   regularizer=regularizer, control_feats=control_feats)
+    z = _compute_z(mardm, latents, cond, padding_mask, flat_mask, cond_scale)
     # Fixed noise per step so the inner optimization is deterministic.
     noise = torch.randn(int(flat_mask.sum()), d, device=latents.device)
 
@@ -268,7 +253,6 @@ def _guided_commit(mardm: MARDM, ae: AE, latents: Tensor, is_mask: Tensor, cond:
 def _repair_round(mardm: MARDM, ae: AE, latents: Tensor, eligible: Tensor, cond: Tensor,
                   padding_mask: Tensor, cond_scale: float, control: ControlSignal,
                   mean: Tensor, std: Tensor, g: GuidanceConfig, tag: str,
-                  regularizer=None, control_feats: Tensor | None = None,
                   reference: Tensor | None = None) -> Tensor:
     """One remask-and-repredict restore round over the `eligible` tokens.
 
@@ -282,8 +266,7 @@ def _repair_round(mardm: MARDM, ae: AE, latents: Tensor, eligible: Tensor, cond:
     flat_elig = eligible.reshape(b * l)
     if not bool(flat_elig.any()):
         return latents
-    z_prior = _compute_z(mardm, latents, cond, padding_mask, flat_elig, cond_scale,
-                         regularizer=regularizer, control_feats=control_feats)
+    z_prior = _compute_z(mardm, latents, cond, padding_mask, flat_elig, cond_scale)
     with torch.no_grad():
         noise_r = torch.randn(int(flat_elig.sum()), d, device=latents.device)
         x_prior = _sample_tokens(mardm, z_prior, noise_r, cond_scale, g.ode_steps_final)
@@ -305,14 +288,12 @@ def _repair_round(mardm: MARDM, ae: AE, latents: Tensor, eligible: Tensor, cond:
     latents = torch.where(is_mask.unsqueeze(-1), mardm.mask_latent.detach().repeat(b, l, 1), latents)
     return _guided_commit(mardm, ae, latents, is_mask, cond, padding_mask,
                           cond_scale, control, mean, std, g, g.repair_iters,
-                          tag=tag, regularizer=regularizer, control_feats=control_feats,
-                          reference=reference)
+                          tag=tag, reference=reference)
 
 
 def _uturn_round(mardm: MARDM, ae: AE, latents: Tensor, valid: Tensor, cond: Tensor,
                  padding_mask: Tensor, cond_scale: float, control: ControlSignal,
                  mean: Tensor, std: Tensor, g: GuidanceConfig, tag: str,
-                 regularizer=None, control_feats: Tensor | None = None,
                  reference: Tensor | None = None) -> Tensor:
     """One RePaint-style U-turn: renoise to `uturn_t`, re-integrate to t=1.
 
@@ -326,8 +307,7 @@ def _uturn_round(mardm: MARDM, ae: AE, latents: Tensor, valid: Tensor, cond: Ten
     if not bool(flat_valid.any()):
         return latents
     cs = g.uturn_cond_scale if g.uturn_cond_scale > 0 else cond_scale
-    z = _compute_z(mardm, latents, cond, padding_mask, flat_valid, cs,
-                   regularizer=regularizer, control_feats=control_feats)
+    z = _compute_z(mardm, latents, cond, padding_mask, flat_valid, cs)
     x1 = latents.reshape(b * l, d)[flat_valid].detach()
     with torch.no_grad():
         x_t = (1.0 - g.uturn_t) * torch.randn_like(x1) + g.uturn_t * x1
@@ -375,16 +355,11 @@ def generate_guided(
     timesteps: int,
     cond_scale: float,
     guidance: GuidanceConfig | None = None,
-    regularizer=None,
 ) -> Tensor:
     """Masked-AR sampling with per-step z-optimization against `control`.
 
     cond: (B, text_dim); m_lens: (B,) latent lengths; control targets/mask are
     at decoded-frame resolution (see `mardm.control.losses`).
-    `regularizer`: optional trained `ControlMARDM` (phase 2) — its residuals
-    are injected into every transformer pass (both CFG branches); combine with
-    `inner_iters=0` for regularizer-only sampling, or > 0 for the full
-    MaskControl-style regularizer + optimization stack.
     Returns latents (B, ae_dim, L) for AE.decode, like `MARDM.generate`.
     """
     g = guidance or GuidanceConfig()
@@ -409,15 +384,9 @@ def generate_guided(
         with torch.random.fork_rng(devices=[device] if device.type == "cuda" else []):
             ref_latents = generate_guided(
                 mardm, ae, cond, m_lens, control, mean, std, timesteps=timesteps,
-                cond_scale=cond_scale, guidance=plain, regularizer=regularizer)
+                cond_scale=cond_scale, guidance=plain)
         with torch.no_grad():
             reference = latents_to_joints(ref_latents.permute(0, 2, 1), ae, mean, std)
-
-    control_feats = None
-    if regularizer is not None:
-        from .regularizer import control_signal_features
-        control_feats = control_signal_features(
-            control, l, regularizer.frames_per_latent).to(device)
 
     latents = torch.where(
         padding_mask.unsqueeze(-1),
@@ -437,7 +406,6 @@ def generate_guided(
                                  cond_scale, control, mean, std, g,
                                  _iters_for_step(g, step, timesteps),
                                  tag=f"step {step + 1}/{timesteps}",
-                                 regularizer=regularizer, control_feats=control_feats,
                                  reference=reference)
         masked_rand_schedule = masked_rand_schedule.masked_fill(~is_mask, 1e5)
 
@@ -450,7 +418,6 @@ def generate_guided(
             latents = _repair_round(mardm, ae, latents, committed, cond, padding_mask,
                                     cond_scale, control, mean, std, g,
                                     tag=f"inline repair @step {step + 1}/{timesteps}",
-                                    regularizer=regularizer, control_feats=control_feats,
                                     reference=reference)
 
     # Re-prediction repair: remask the tokens the UNGUIDED prior most disagrees
@@ -461,7 +428,6 @@ def generate_guided(
         latents = _repair_round(mardm, ae, latents, ~padding_mask, cond, padding_mask,
                                 cond_scale, control, mean, std, g,
                                 tag=f"repair {rnd + 1}/{g.repair_rounds}",
-                                regularizer=regularizer, control_feats=control_feats,
                                 reference=reference)
 
     # U-turn resampling: same intent as repair, but on the transport path.
@@ -469,7 +435,6 @@ def generate_guided(
         latents = _uturn_round(mardm, ae, latents, ~padding_mask, cond, padding_mask,
                                cond_scale, control, mean, std, g,
                                tag=f"uturn {rnd + 1}/{g.uturn_rounds}",
-                               regularizer=regularizer, control_feats=control_feats,
                                reference=reference)
 
     if g.post_iters > 0 and control.num_constraints > 0:

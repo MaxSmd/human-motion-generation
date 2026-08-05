@@ -6,7 +6,7 @@ the *frozen* AE's latents, conditioned on text features. Per step: encode text
 m_lens // downsample)`.
 
 Usage (local smoke, CPU, random text encoder + the tiny AE smoke checkpoint):
-    python -m mardm.scripts.train_mardm data.root=/tmp/synth stats_path=/tmp/synth/stats.pt \\
+    python -m mardm.scripts.train data.root=/tmp/synth stats_path=/tmp/synth/stats.pt \\
         ae_checkpoint=/tmp/mardm_ae_smoke/checkpoints/latest.pt \\
         ae.width=32 ae.output_emb_width=16 ae.depth=2 \\
         text_encoder.type=random text_encoder.text_dim=64 \\
@@ -16,7 +16,7 @@ Usage (local smoke, CPU, random text encoder + the tiny AE smoke checkpoint):
         data.num_workers=0 logging.use_wandb=false logging.use_tensorboard=false
 
 Usage (cluster):
-    python -m mardm.scripts.train_mardm ae_checkpoint=runs/mardm-ae-XXXX/checkpoints/latest.pt \\
+    python -m mardm.scripts.train ae_checkpoint=runs/mardm-ae-XXXX/checkpoints/latest.pt \\
         +data=cluster_mounted text_encoder.type=qwen3
 """
 
@@ -55,7 +55,7 @@ def _load_stats(stats_path: str | Path) -> tuple[torch.Tensor, torch.Tensor]:
     p = Path(stats_path)
     if not p.exists():
         raise FileNotFoundError(
-            f"essential mean/std not found at {p}. Run `python -m mardm.scripts.compute_mardm_stats` first."
+            f"essential mean/std not found at {p}. Run `python -m mardm.scripts.compute_stats` first."
         )
     blob = torch.load(p, weights_only=True)
     return blob["mean"], blob["std"]

@@ -16,7 +16,7 @@ Two questions, one run:
 
 Run (cluster, in-container, paths match the eval you ran):
 
-    python -m mardm.scripts.verify_h3d_features --config-name=gen_m \
+    python -m mardm.scripts.verify_features --config-name=gen_m \
         ae_checkpoint=$AE_CKPT +eval.checkpoint=$GEN_CKPT \
         +verify.h3d_vecs=external/HumanML3D/HumanML3D/new_joint_vecs \
         +verify.n_clips=128

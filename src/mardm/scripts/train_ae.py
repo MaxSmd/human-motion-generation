@@ -5,13 +5,13 @@ Trains the 1D-ResNet AE to reconstruct the z-normalized 67-D essential feature
 branch (stage 2) then diffuses over this AE's frozen latents.
 
 Usage (local smoke, CPU):
-    python -m mardm.scripts.compute_mardm_stats --data-root /tmp/synth --out /tmp/synth/stats.pt
-    python -m mardm.scripts.train_mardm_ae data.root=/tmp/synth stats_path=/tmp/synth/stats.pt \\
+    python -m mardm.scripts.compute_stats --data-root /tmp/synth --out /tmp/synth/stats.pt
+    python -m mardm.scripts.train_ae data.root=/tmp/synth stats_path=/tmp/synth/stats.pt \\
         train.max_steps=20 train.micro_batch_size=4 train.grad_accum=1 \\
         train.precision=fp32 logging.use_wandb=false logging.use_tensorboard=false
 
 Usage (cluster):
-    python -m mardm.scripts.train_mardm_ae +data=cluster_mounted
+    python -m mardm.scripts.train_ae +data=cluster_mounted
 """
 
 from __future__ import annotations
@@ -50,7 +50,7 @@ def _load_stats(stats_path: str | Path) -> tuple[torch.Tensor, torch.Tensor]:
     if not p.exists():
         raise FileNotFoundError(
             f"essential mean/std not found at {p}. Run "
-            "`python -m mardm.scripts.compute_mardm_stats --data-root <packed> --out <stats_path>` first."
+            "`python -m mardm.scripts.compute_stats --data-root <packed> --out <stats_path>` first."
         )
     blob = torch.load(p, weights_only=True)
     return blob["mean"], blob["std"]

@@ -5,7 +5,7 @@ Layer-2 control evaluation (phase 1, zero training): samples the test split with
 (OmniControl protocol) — and reports, per run:
 
   * realism vs the real test distribution: FID, R@1/2/3, MM-Dist, Diversity
-    (same Guo-evaluator harness as `evaluate_mardm`);
+    (same Guo-evaluator harness as `evaluate`);
   * control accuracy: Traj. err / Loc. err (@0.5 m) / Avg. err over the
     constrained cells.
 
@@ -20,7 +20,7 @@ waypoints come from the dataset's x1 (set `data.canonical_dir` so they match
 the training distribution).
 
 Run (cluster):
-    python -m mardm.scripts.evaluate_mardm_control \\
+    python -m mardm.scripts.evaluate_control \\
         ae_checkpoint=.../mardm-ae-canon/checkpoints/latest.pt \\
         +ctrl.checkpoint=.../mardm-gen-m-canon/checkpoints/latest.pt \\
         text_encoder.type=qwen3 +ctrl.evaluator=real \\
@@ -42,7 +42,6 @@ from omegaconf import DictConfig, OmegaConf
 from tqdm import tqdm
 
 from mardm.control import (
-    ControlMARDM,
     ControlSignal,
     GuidanceConfig,
     generate_guided,
@@ -52,7 +51,7 @@ from mardm.control import (
 from mardm.data import EssentialDataset
 from mardm.models import AE, MARDM, AEConfig, MARDMConfig
 from mardm.representation import denormalize, essential_to_h3d
-from mardm.scripts.evaluate_mardm import (
+from mardm.scripts.evaluate import (
     _build_text_encoder,
     _load_caption_tokens,
     _load_frozen_ae,
@@ -88,24 +87,6 @@ def _load_mardm(cfg: DictConfig, ckpt: str | Path, use_ema: bool, ae: AE,
         print(f"[ctrl-eval] loaded MARDM live weights from step {state.step}", flush=True)
     mardm.eval()
     return mardm
-
-
-def _load_regularizer(ckpt: str | Path, mardm: MARDM, ae: AE, device: torch.device,
-                      use_ema: bool) -> ControlMARDM:
-    reg = ControlMARDM(mardm, frames_per_latent=ae.downsample_rate).to(device)
-    state = load_checkpoint(Path(ckpt), map_location=device)
-    reg.load_state_dict(state.model)
-    if use_ema and state.ema is not None:
-        ema = EMA(reg, decay=0.0)
-        ema.load_state_dict(state.ema)
-        ema.copy_to(reg)
-        print(f"[ctrl-eval] loaded regularizer EMA weights from step {state.step}", flush=True)
-    else:
-        print(f"[ctrl-eval] loaded regularizer live weights from step {state.step}", flush=True)
-    reg.eval()
-    for p in reg.parameters():
-        p.requires_grad_(False)
-    return reg
 
 
 def main_impl(cfg: DictConfig) -> None:
@@ -149,38 +130,31 @@ def main_impl(cfg: DictConfig) -> None:
         repair_rounds=int(cfg.ctrl.repair_rounds), repair_frac=float(cfg.ctrl.repair_frac),
         repair_iters=int(cfg.ctrl.repair_iters),
     )
-    regularizer = None
-    if cfg.ctrl.regularizer_checkpoint:
-        regularizer = _load_regularizer(cfg.ctrl.regularizer_checkpoint, mardm, ae,
-                                        device, bool(cfg.ctrl.regularizer_use_ema))
     baseline_cfg = GuidanceConfig(inner_iters=0, post_iters=0,
                                   ode_steps_final=gcfg.ode_steps_final)
-    # (name, guidance config, regularizer) per run.
-    runs_spec: list[tuple[str, GuidanceConfig, ControlMARDM | None]] = []
+    # (name, guidance config) per run.
+    runs_spec: list[tuple[str, GuidanceConfig]] = []
     if bool(cfg.ctrl.baseline):
-        runs_spec.append(("unguided", baseline_cfg, None))
-    if regularizer is not None:
-        runs_spec.append(("reg_only", baseline_cfg, regularizer))
+        runs_spec.append(("unguided", baseline_cfg))
     # Sweep mode: each entry overrides fields of the base GuidanceConfig and
-    # becomes its own arm (runtime levers only — no regularizer). Without a
-    # sweep, the single "guided" arm uses the base config as before.
+    # becomes its own arm. Without a sweep, the single "guided" arm uses the
+    # base config as before.
     sweep = cfg.ctrl.sweep
     if not sweep and cfg.ctrl.sweep_file:
         sweep = OmegaConf.load(cfg.ctrl.sweep_file)
     if sweep:
         for i, entry in enumerate(OmegaConf.to_container(sweep, resolve=True)):
             name = entry.pop("name", f"arm{i}")
-            runs_spec.append((name, replace(gcfg, **entry), None))
+            runs_spec.append((name, replace(gcfg, **entry)))
     else:
-        runs_spec.append(("guided", gcfg, regularizer))
-    run_names = [n for n, _, _ in runs_spec]
+        runs_spec.append(("guided", gcfg))
+    run_names = [n for n, _ in runs_spec]
     joint_ids = [int(j) for j in cfg.ctrl.joints]
     thresh = float(cfg.ctrl.threshold)
     use_upstream = bool(cfg.ctrl.use_upstream_features)
     print(f"[ctrl-eval] {n_total} clips (bs={bs}); joints={joint_ids} "
           f"keyframes={int(cfg.ctrl.num_keyframes)}; inner_iters={gcfg.inner_iters} "
-          f"lr={gcfg.lr} cfg_w={float(cfg.ctrl.guidance)} "
-          f"regularizer={'yes' if regularizer else 'no'} runs={run_names}", flush=True)
+          f"lr={gcfg.lr} cfg_w={float(cfg.ctrl.guidance)} runs={run_names}", flush=True)
 
     real_emb, text_emb = [], []
     gen_emb: dict[str, list] = {name: [] for name in run_names}
@@ -248,7 +222,7 @@ def main_impl(cfg: DictConfig) -> None:
 
         cond = text_encoder.encode(texts, device=device)
         m_lens = latent_lens.to(device)
-        for name, run_cfg, run_reg in runs_spec:
+        for name, run_cfg in runs_spec:
             set_seed(int(cfg.ctrl.seed) * 7919 + start)      # identical noise across runs
             if device.type == "cuda":
                 torch.cuda.synchronize()
@@ -256,7 +230,7 @@ def main_impl(cfg: DictConfig) -> None:
             latents = generate_guided(
                 mardm, ae, cond, m_lens, control, mean, std,
                 timesteps=int(cfg.ctrl.timesteps), cond_scale=float(cfg.ctrl.guidance),
-                guidance=run_cfg, regularizer=run_reg,
+                guidance=run_cfg,
             )
             with torch.no_grad():
                 essential = ae.decode(latents)               # (B, t_max, 67) normalized
@@ -316,7 +290,7 @@ def main_impl(cfg: DictConfig) -> None:
         "diversity_real": diversity(real_np, diversity_times=int(cfg.ctrl.diversity_times), rng=rng),
         "mm_dist_real": mm_distance(text_np, real_np),
     }
-    for name, run_cfg, _ in runs_spec:
+    for name, run_cfg in runs_spec:
         gen_np = np.concatenate(gen_emb[name], 0)
         dists = torch.cat(cell_dists[name])
         results[name] = {
@@ -375,8 +349,6 @@ def main(cfg: DictConfig) -> None:
         "repair_rounds": 0,                    # re-prediction repair passes
         "repair_frac": 0.5,
         "repair_iters": 10,
-        "regularizer_checkpoint": "",          # trained ControlMARDM (phase 2); adds reg_only run
-        "regularizer_use_ema": True,
         "baseline": True,                      # also run unguided with same seeds
         "sweep": [],                           # list of {name, <GuidanceConfig overrides>} arms
         "sweep_file": "",                      # YAML file with the same list (sbatch-friendly)

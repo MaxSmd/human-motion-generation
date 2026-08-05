@@ -61,7 +61,7 @@ enroot start \
         set -euo pipefail
         cd ${REPO}
         pip install -e . --no-deps --quiet
-        python -u -m mardm.scripts.visualize_mardm \\
+        python -u -m mardm.scripts.visualize \\
             --config-name=${CONFIG_NAME} \\
             ae_checkpoint='${AE_CKPT}' \\
             text_encoder.type=qwen3 \\
