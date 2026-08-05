@@ -49,6 +49,11 @@ CLIP_MODEL="${CLIP_MODEL:-ViT-B/32}"
 CLIP_CACHE_DIR="${CLIP_CACHE_DIR:-${HF_CACHE}}"
 CLIP_BACKEND="${CLIP_BACKEND:-auto}"
 TOKEN_LR="${TOKEN_LR:-1e-4}"
+TRANSFORMER_HIDDEN_DIM="${TRANSFORMER_HIDDEN_DIM:-512}"
+TRANSFORMER_DEPTH="${TRANSFORMER_DEPTH:-8}"
+TRANSFORMER_HEADS="${TRANSFORMER_HEADS:-8}"
+TRANSFORMER_FFN_DIM="${TRANSFORMER_FFN_DIM:-2048}"
+TRANSFORMER_DROPOUT="${TRANSFORMER_DROPOUT:-0.0}"
 BASE_COND_DROP="${BASE_COND_DROP:-0.1}"
 RESIDUAL_COND_DROP="${RESIDUAL_COND_DROP:-0.2}"
 RESIDUAL_ARCH="${RESIDUAL_ARCH:-simple}"
@@ -85,6 +90,7 @@ echo "[momask-tokens] masked_ckpt=${MASKED_CKPT:-<none>}"
 echo "[momask-tokens] output_dir=${OUTPUT_DIR}"
 echo "[momask-tokens] token_steps=${TOKEN_STEPS} max_clips=${MAX_CLIPS} batch_size=${BATCH_SIZE} token_batch_size=${TOKEN_BATCH_SIZE} max_seq_len=${MAX_SEQ_LEN}"
 echo "[momask-tokens] text_encoder=${TEXT_ENCODER} clip_model=${CLIP_MODEL} clip_backend=${CLIP_BACKEND}"
+echo "[momask-tokens] transformer hidden=${TRANSFORMER_HIDDEN_DIM} depth=${TRANSFORMER_DEPTH} heads=${TRANSFORMER_HEADS} ffn=${TRANSFORMER_FFN_DIM} dropout=${TRANSFORMER_DROPOUT}"
 echo "[momask-tokens] lr=${TOKEN_LR} residual_arch=${RESIDUAL_ARCH} residual_share_weight=${RESIDUAL_SHARE_WEIGHT} freeze_masked=${FREEZE_MASKED} base_full_mask_prob=${BASE_FULL_MASK_PROB} generation_steps=${GENERATION_STEPS}"
 
 RESIDUAL_SHARE_ARG=""
@@ -128,11 +134,11 @@ enroot start \
             --token-steps ${TOKEN_STEPS} \\
             --lr ${TOKEN_LR} \\
             --text-dim 64 \\
-            --transformer-hidden-dim 512 \\
-            --transformer-depth 8 \\
-            --transformer-heads 8 \\
-            --transformer-ffn-dim 2048 \\
-            --transformer-dropout 0.0 \\
+            --transformer-hidden-dim ${TRANSFORMER_HIDDEN_DIM} \\
+            --transformer-depth ${TRANSFORMER_DEPTH} \\
+            --transformer-heads ${TRANSFORMER_HEADS} \\
+            --transformer-ffn-dim ${TRANSFORMER_FFN_DIM} \\
+            --transformer-dropout ${TRANSFORMER_DROPOUT} \\
             --base-cond-drop ${BASE_COND_DROP} \\
             --residual-cond-drop ${RESIDUAL_COND_DROP} \\
             --residual-arch ${RESIDUAL_ARCH} \\
