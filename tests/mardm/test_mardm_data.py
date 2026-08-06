@@ -2,7 +2,7 @@
 
 Builds a tiny synthetic packed dataset with non-degenerate skeleton offsets (so
 the 67-D essential features are meaningful) and exercises the data path the way
-`mardm.scripts.train_mardm_ae` does.
+`mardm.scripts.train_ae` does.
 """
 
 from __future__ import annotations

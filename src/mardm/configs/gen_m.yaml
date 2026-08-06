@@ -10,7 +10,7 @@
 #   sbatch --export=ALL,AE_CKPT=/path/to/mardm-ae-XXXX/checkpoints/latest.pt \
 #       slurm/mardm/train_mardm.sbatch +experiment=gen_m
 # or directly:
-#   python -m mardm.scripts.train_mardm --config-name=gen_m \
+#   python -m mardm.scripts.train --config-name=gen_m \
 #       ae_checkpoint=runs/mardm-ae-10104/checkpoints/latest.pt
 
 defaults:

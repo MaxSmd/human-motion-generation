@@ -2,11 +2,11 @@
 # MARDM AutoEncoder (stage 1) — scaled-down "mini" config.
 #
 # Compose with a data layout (defaults to the in-repo submodule):
-#   python -m mardm.scripts.train_mardm_ae
-#   python -m mardm.scripts.train_mardm_ae +data=cluster_mounted
+#   python -m mardm.scripts.train_ae
+#   python -m mardm.scripts.train_ae +data=cluster_mounted
 #
 # Local smoke (CPU, tiny):
-#   python -m mardm.scripts.train_mardm_ae data.root=/tmp/synth \
+#   python -m mardm.scripts.train_ae data.root=/tmp/synth \
 #       train.max_steps=20 train.micro_batch_size=4 train.grad_accum=1 \
 #       train.precision=fp32 logging.use_wandb=false logging.use_tensorboard=false
 
@@ -19,7 +19,7 @@ output_dir: ${oc.env:RMG_RUNS_DIR,${hydra:runtime.cwd}/runs}/${run_name}
 seed: 0
 deterministic: false
 
-# Train-split essential mean/std (run scripts/compute_mardm_stats.py first).
+# Train-split essential mean/std (run scripts/compute_stats.py first).
 stats_path: ${oc.env:MARDM_STATS,${hydra:runtime.cwd}/external/data/mardm_essential_stats.pt}
 
 # Deterministic dataset subset (overfit smoke / debugging). subset_frac takes

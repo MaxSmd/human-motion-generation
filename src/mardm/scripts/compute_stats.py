@@ -2,9 +2,9 @@
 
 MARDM standardizes the essential dims (no manifold normalization), so both the
 AutoEncoder and the generation branch need a fixed per-dim mean/std computed
-once over the training split. Run this before `mardm.scripts.train_mardm_ae`:
+once over the training split. Run this before `mardm.scripts.train_ae`:
 
-    python -m mardm.scripts.compute_mardm_stats \\
+    python -m mardm.scripts.compute_stats \\
         --data-root external/data/humanml3d_packed \\
         --out external/data/mardm_essential_stats.pt
 

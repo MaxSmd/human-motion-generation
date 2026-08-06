@@ -16,7 +16,7 @@ Joint trajectories land next to the metrics as `.npy` (T, 22, 3) plus a
 also writes GIFs.
 
 Run (cluster):
-    python -m mardm.scripts.guided_generate_mardm +data=cluster_mounted \\
+    python -m mardm.scripts.generate_control +data=cluster_mounted \\
         ae_checkpoint=runs/mardm-ae-XXXX/checkpoints/latest.pt \\
         +guid.checkpoint=runs/mardm-gen-YYYY/checkpoints/latest.pt \\
         text_encoder.type=qwen3 +guid.num_clips=16 +guid.verbose=true
@@ -36,7 +36,6 @@ import torch
 from omegaconf import DictConfig, OmegaConf
 
 from mardm.control import (
-    ControlMARDM,
     ControlSignal,
     GuidanceConfig,
     control_metrics,
@@ -100,24 +99,6 @@ def _load_mardm(cfg: DictConfig, ckpt: str | Path, ae: AE, device: torch.device)
     return mardm
 
 
-def _load_regularizer(cfg: DictConfig, ckpt: str | Path, mardm: MARDM, ae: AE,
-                      device: torch.device, use_ema: bool) -> ControlMARDM:
-    reg = ControlMARDM(mardm, frames_per_latent=ae.downsample_rate).to(device)
-    state = load_checkpoint(Path(ckpt), map_location=device)
-    reg.load_state_dict(state.model)
-    if use_ema and state.ema is not None:
-        ema = EMA(reg, decay=0.0)
-        ema.load_state_dict(state.ema)
-        ema.copy_to(reg)
-        print(f"[guided] loaded regularizer EMA weights from step {state.step}", flush=True)
-    else:
-        print(f"[guided] loaded regularizer live weights from step {state.step}", flush=True)
-    reg.eval()
-    for p in reg.parameters():
-        p.requires_grad_(False)
-    return reg
-
-
 def main_impl(cfg: DictConfig) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     out_dir = Path(cfg.output_dir) / "guided"
@@ -174,21 +155,13 @@ def main_impl(cfg: DictConfig) -> None:
         inner_iters=0, post_iters=0, ode_steps_final=gcfg.ode_steps_final)
     joint_ids = [int(j) for j in cfg.guid.joints]
 
-    regularizer = None
-    if cfg.guid.regularizer_checkpoint:
-        regularizer = _load_regularizer(cfg, cfg.guid.regularizer_checkpoint, mardm, ae,
-                                        device, bool(cfg.guid.regularizer_use_ema))
-    # (name, guidance config, regularizer) — unguided baseline, optional
-    # regularizer-only ablation, then the full stack.
-    runs_spec: list[tuple[str, GuidanceConfig, ControlMARDM | None]] = [
-        ("unguided", baseline_cfg, None)]
-    if regularizer is not None:
-        runs_spec.append(("reg_only", baseline_cfg, regularizer))
-    runs_spec.append(("guided", gcfg, regularizer))
+    # (name, guidance config) — unguided baseline, then the full guided stack.
+    runs_spec: list[tuple[str, GuidanceConfig]] = [
+        ("unguided", baseline_cfg), ("guided", gcfg)]
     print(f"[guided] controlling joints {joint_ids} at {int(cfg.guid.num_keyframes)} keyframes; "
           f"inner_iters={gcfg.inner_iters} lr={gcfg.lr} post_iters={gcfg.post_iters} "
-          f"repair_rounds={gcfg.repair_rounds} regularizer={'yes' if regularizer else 'no'} "
-          f"runs={[n for n, _, _ in runs_spec]}", flush=True)
+          f"repair_rounds={gcfg.repair_rounds} "
+          f"runs={[n for n, _ in runs_spec]}", flush=True)
 
     per_clip: dict[str, dict] = {}
     for idx in render_indices:
@@ -211,12 +184,12 @@ def main_impl(cfg: DictConfig) -> None:
         m_lens = torch.tensor([latent_len], device=device)
         runs: dict[str, dict] = {}
         joints_by_arm: dict[str, np.ndarray] = {}
-        for name, run_cfg, run_reg in runs_spec:
+        for name, run_cfg in runs_spec:
             set_seed(int(cfg.guid.seed) + idx)               # identical noise draws
             latents = generate_guided(
                 mardm, ae, cond, m_lens, control, mean, std,
                 timesteps=int(cfg.guid.timesteps), cond_scale=float(cfg.guid.guidance),
-                guidance=run_cfg, regularizer=run_reg,
+                guidance=run_cfg,
             )
             with torch.no_grad():
                 if run_cfg.root_edit:
@@ -240,9 +213,9 @@ def main_impl(cfg: DictConfig) -> None:
             # One synchronized triptych per clip: Ground truth | Unguided |
             # best Guided arm, with the text prompt as the figure title and the
             # control waypoints overlaid on every panel.
-            from mardm.scripts.visualize_mardm import _render_compare
+            from mardm.scripts.visualize import _render_compare
             waypoints = control.targets[0][control.mask[0]].numpy()   # (K, 3) targets
-            best = next(n for n, _, _ in runs_spec if n not in ("unguided", "reg_only"))
+            best = next(n for n, _ in runs_spec if n != "unguided")
             panels = [(gt_joints.numpy().astype(np.float32), "Ground truth")]
             if "unguided" in joints_by_arm:
                 panels.append((joints_by_arm["unguided"], "Unguided"))
@@ -258,10 +231,10 @@ def main_impl(cfg: DictConfig) -> None:
         per_clip[cid] = {"caption": caption, "length": int(L), **{
             f"{name}_{k}": v for name, m in runs.items() for k, v in m.items()}}
         print(f"[guided] {cid}  L={L:3d}  avg_err " +
-              " -> ".join(f"{runs[n]['avg_err']:.3f}m" for n, _, _ in runs_spec) +
+              " -> ".join(f"{runs[n]['avg_err']:.3f}m" for n, _ in runs_spec) +
               f"  cap={caption[:44]!r}", flush=True)
 
-    run_names = [n for n, _, _ in runs_spec]
+    run_names = [n for n, _ in runs_spec]
     summary = {"per_clip": per_clip, "n_clips": len(per_clip), "runs": run_names,
                "joints": joint_ids, "num_keyframes": int(cfg.guid.num_keyframes),
                "guidance_config": gcfg.__dict__}
@@ -284,7 +257,7 @@ def main(cfg: DictConfig) -> None:
         "num_clips": 8,
         "clip_ids": [],            # explicit clip ids to render (overrides num_clips)
         "guided_label": "",        # panel label for the guided arm in compare GIFs
-        "guidance": 2.0,           # CFG scale (see evaluate_mardm defaults)
+        "guidance": 2.0,           # CFG scale (see evaluate defaults)
         "timesteps": 18,           # masked-AR sampling iterations
         "use_ema": True,
         "seed": 0,
@@ -305,8 +278,6 @@ def main(cfg: DictConfig) -> None:
         "repair_iters": 10,        # light-guidance inner steps during repair
         "repair_every": 0,         # interleaved repair every N AR steps (0=off)
         "extra": {},               # any other GuidanceConfig field, e.g. +guid.extra.dyn_weight=1.0
-        "regularizer_checkpoint": "",  # trained ControlMARDM (phase 2); adds reg_only run
-        "regularizer_use_ema": True,
         "render": False,           # also write GIFs (needs matplotlib)
         "fps": 20,
         "verbose": False,          # print inner-loop loss trajectory

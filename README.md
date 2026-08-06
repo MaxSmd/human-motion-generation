@@ -9,8 +9,8 @@ one Guo evaluator, one container, and one web + cluster control plane:
   along geodesics instead of denoising a flat vector. Adds sampling-time
   **constraints** (joint-angle limits, pelvis waypoints, scene collision) that
   project exactly onto the manifold rather than being penalised into place.
-- **MARDM** — masked autoregressive diffusion, plus a spatial-control layer
-  (guidance, a trained condition regularizer, and a closed-form root edit).
+- **MARDM** — masked autoregressive diffusion, plus an inference-time
+  spatial-control layer (z-optimization guidance and a closed-form root edit).
 - **MoMask** — residual VQ-VAE tokenizer with masked and residual token
   transformers.
 

@@ -14,6 +14,7 @@ decoded frame. Control signals must be built at that resolution.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import torch
@@ -95,7 +96,8 @@ def control_loss(joints: Tensor, signal: ControlSignal) -> Tensor:
 
 
 def dynamics_loss(joints: Tensor, reference: Tensor, signal: ControlSignal,
-                  *, root_relative: bool = True) -> Tensor:
+                  *, root_relative: bool = True,
+                  exclude: list[int] | tuple[int, ...] | None = None) -> Tensor:
     """Anchor the velocity profile to an unguided reference sample.
 
     ‖Δ_t J_g − Δ_t J_u‖² averaged over frames and over joints that are NEVER
@@ -119,6 +121,9 @@ def dynamics_loss(joints: Tensor, reference: Tensor, signal: ControlSignal,
         return joints.sum() * 0.0
     dg, du = g[:, 1:] - g[:, :-1], u[:, 1:] - u[:, :-1]
     free = ~signal.mask.any(dim=1).any(dim=0)                # (J,) never constrained
+    if exclude:                                              # joints an angle objective drives
+        free = free.clone()                                 # must not also be anchored here
+        free[list(exclude)] = False
     if not free.any():
         return joints.sum() * 0.0
     return (dg[:, :, free] - du[:, :, free]).pow(2).sum(-1).mean()
@@ -143,6 +148,69 @@ def foot_skate_loss(joints: Tensor, *, height: float = 0.05) -> Tensor:
     speed = torch.linalg.vector_norm(horiz, dim=-1)          # (B, T-1, 4)
     gate = (1.0 - feet[:, :-1, :, 1] / height).clamp(min=0.0, max=1.0)
     return (speed * gate).mean()
+
+
+# --------------------------------------------------------------------------- bend
+
+def _bend_angle(joints: Tensor, triplet: list[int] | tuple[int, ...]) -> Tensor:
+    """Interior bend angle (radians) at the middle joint of `triplet` = (a, b, c).
+
+    RMG's bend definition (flow.constraints), evaluated on decoded positions
+    instead of quaternions: the angle between the incoming bone a->b and the
+    outgoing bone b->c. 0 = straight (collinear bones), larger = more flexed.
+    For the knee, triplet = (hip, knee, ankle). joints (B, T, J, 3) -> (B, T).
+    """
+    a, b, c = int(triplet[0]), int(triplet[1]), int(triplet[2])
+    u = joints[:, :, b] - joints[:, :, a]                    # incoming bone
+    w = joints[:, :, c] - joints[:, :, b]                    # outgoing bone
+    denom = (torch.linalg.vector_norm(u, dim=-1)
+             * torch.linalg.vector_norm(w, dim=-1)).clamp_min(1e-8)
+    cos = ((u * w).sum(-1) / denom).clamp(-1.0, 1.0)
+    return torch.arccos(cos)                                 # (B, T)
+
+
+def bend_loss(joints: Tensor, triplet: list[int] | tuple[int, ...], max_deg: float,
+              window: tuple[int, int] | None = None) -> Tensor:
+    """Soft one-sided limit keeping the bend at `triplet` <= `max_deg`. Differentiable.
+
+    ReLU(bend - max)^2 averaged over frames — the soft counterpart of RMG's hard
+    per-step quaternion clamp, here as an objective on decoded joint positions
+    (we have no rotation coordinate to project). `window` = (start, end) restricts
+    the penalty to a half-open frame range; None = whole clip.
+    """
+    bend = _bend_angle(joints, triplet)                      # (B, T)
+    if window is not None:
+        bend = bend[:, int(window[0]):int(window[1])]
+    if bend.numel() == 0:
+        return joints.sum() * 0.0
+    return (bend - math.radians(max_deg)).clamp_min(0.0).pow(2).mean()
+
+
+@torch.no_grad()
+def bend_metrics(joints: Tensor, triplet: list[int] | tuple[int, ...], lengths: Tensor,
+                 max_deg: float, window: tuple[int, int] | None = None) -> dict[str, float]:
+    """Joint-angle satisfaction diagnostics over valid frames.
+
+    mean_bend_deg / max_bend_deg: bend-angle stats (deg, 0 = straight)
+    violation_frac: fraction of valid frames whose bend exceeds `max_deg`
+    """
+    bend = torch.rad2deg(_bend_angle(joints, triplet))       # (B, T)
+    _, t = bend.shape
+    idx = torch.arange(t, device=bend.device)
+    valid = idx.unsqueeze(0) < lengths.to(bend.device).unsqueeze(1)
+    if window is not None:
+        w = torch.zeros_like(valid)
+        w[:, int(window[0]):int(window[1])] = True
+        valid = valid & w
+    if not bool(valid.any()):
+        return {"mean_bend_deg": 0.0, "max_bend_deg": 0.0, "violation_frac": 0.0}
+    n = valid.sum().clamp(min=1)
+    masked = torch.where(valid, bend, torch.zeros_like(bend))
+    return {
+        "mean_bend_deg": float(masked.sum() / n),
+        "max_bend_deg": float(bend[valid].max()),
+        "violation_frac": float(((bend > max_deg) & valid).sum() / n),
+    }
 
 
 @torch.no_grad()

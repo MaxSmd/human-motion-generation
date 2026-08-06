@@ -1,24 +1,25 @@
 #!/bin/bash
-#SBATCH --job-name=mardm-guided
+#SBATCH --job-name=mardm-knee
 #SBATCH --partition=12g
 #SBATCH --nodelist=frankfurt,hamburg,kassel,leipzig
 #SBATCH --qos=students_normal
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
-#SBATCH --time=04:00:00
-#SBATCH --output=slurm/logs/mardm-guided-%j.out
-#SBATCH --error=slurm/logs/mardm-guided-%j.err
+#SBATCH --time=03:00:00
+#SBATCH --output=slurm/logs/mardm-knee-%j.out
+#SBATCH --error=slurm/logs/mardm-knee-%j.err
 #
-# Layer-1 control check: guided vs unguided sampling on a handful of clips,
-# reporting Traj/Loc/Avg control error + joint trajectories (+ optional GIFs).
-# Zero-training guidance on an existing checkpoint (mardm.control, phase 1).
+# Joint-angle control check: can inference-time guidance stop a knee from
+# bending? Samples unconstrained vs bend-limited on leg-heavy prompts, reports
+# bend satisfaction + realism, and writes side-by-side GIFs. Zero training.
 #
 # Usage:
 #     AE_CKPT=.../mardm-ae-canon/checkpoints/latest.pt \
 #     GEN_CKPT=.../mardm-gen-m-canon/checkpoints/latest.pt \
 #     MARDM_STATS=.../mardm_essential_stats_canonical.pt \
 #     CANONICAL_DIR=.../h3d-canonical/new_joint_vecs \
-#     sbatch slurm/mardm/guided_generate.sbatch
+#     SIDE=left \
+#     sbatch slurm/mardm/evaluate_knee.sbatch
 
 set -euo pipefail
 mkdir -p slurm/logs
@@ -38,10 +39,14 @@ HF_CACHE="${HF_CACHE:-${HOME}/hf-cache}"
 DATA_ROOT="${RMG_DATA_ROOT:-${REPO}/external/data/humanml3d_packed}"
 MARDM_STATS="${MARDM_STATS:-${RUNS_ROOT}/mardm_essential_stats.pt}"
 CANONICAL_DIR="${CANONICAL_DIR:-}"
+SIDE="${SIDE:-left}"
+MAX_DEG="${MAX_DEG:-10}"
+WEIGHT="${WEIGHT:-1.0}"
+DYN_WEIGHT="${DYN_WEIGHT:-1.0}"
+SKATE_WEIGHT="${SKATE_WEIGHT:-1.0}"
 GUIDANCE="${GUIDANCE:-3.0}"
-NUM_CLIPS="${NUM_CLIPS:-16}"
 INNER_ITERS="${INNER_ITERS:-30}"
-RUN_NAME="${RUN_NAME:-mardm-guided-${SLURM_JOB_ID:-local}}"
+RUN_NAME="${RUN_NAME:-mardm-knee-${SLURM_JOB_ID:-local}}"
 OVERRIDES="${OVERRIDES:-}"
 
 CANON_FLAG=""
@@ -61,17 +66,21 @@ enroot start \
         set -euo pipefail
         cd ${REPO}
         pip install -e . --no-deps --quiet
-        python -u -m mardm.scripts.generate_control \\
+        python -u -m mardm.scripts.evaluate_knee \\
             --config-name=${CONFIG_NAME} \\
             ae_checkpoint='${AE_CKPT}' \\
             text_encoder.type=qwen3 \\
             ${CANON_FLAG} \\
-            +guid.checkpoint='${GEN_CKPT}' \\
-            +guid.guidance='${GUIDANCE}' \\
-            +guid.num_clips='${NUM_CLIPS}' \\
-            +guid.inner_iters='${INNER_ITERS}' \\
-            +guid.verbose=true \\
-            +guid.render=true \\
+            +knee.checkpoint='${GEN_CKPT}' \\
+            +knee.side='${SIDE}' \\
+            +knee.max_deg='${MAX_DEG}' \\
+            +knee.weight='${WEIGHT}' \\
+            +knee.dyn_weight='${DYN_WEIGHT}' \\
+            +knee.skate_weight='${SKATE_WEIGHT}' \\
+            +knee.guidance='${GUIDANCE}' \\
+            +knee.inner_iters='${INNER_ITERS}' \\
+            +knee.render=true \\
+            +knee.verbose=true \\
             run_name='${RUN_NAME}' \\
             ${OVERRIDES}
     "

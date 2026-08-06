@@ -83,11 +83,11 @@ enroot start \
         cd ${REPO}
         pip install -e . --no-deps --quiet
 
-        [ -f '${MARDM_STATS}' ] || python -m mardm.scripts.compute_mardm_stats \\
+        [ -f '${MARDM_STATS}' ] || python -m mardm.scripts.compute_stats \\
             --data-root '${DATA_ROOT}' --out '${MARDM_STATS}'
 
         echo '=== overfit stage 1: AE on ${SUBSET_FRAC} of train split (${AE_STEPS} steps) ==='
-        python -u -m mardm.scripts.train_mardm_ae \\
+        python -u -m mardm.scripts.train_ae \\
             run_name='${AE_RUN}' \\
             subset_frac=${SUBSET_FRAC} \\
             data.preload=true \\
@@ -99,7 +99,7 @@ enroot start \
             train.log_every=50
 
         echo '=== overfit stage 2: gen on the same subset (${GEN_STEPS} steps) ==='
-        python -u -m mardm.scripts.train_mardm \\
+        python -u -m mardm.scripts.train \\
             run_name='${GEN_RUN}' \\
             ae_checkpoint='${AE_OUT}/checkpoints/latest.pt' \\
             text_encoder.type=qwen3 \\

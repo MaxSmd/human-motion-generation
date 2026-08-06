@@ -2,8 +2,8 @@
 
 Orchestrates the trained generation branch + frozen AE + text encoder into the
 sampling pipeline, plus the eval bridge to 263-D. Kept separate from the model
-(`mardm.models`) and training (`mardm.scripts.train_mardm`) per the repo's
-models / training / tasks split; `mardm.scripts.evaluate_mardm` is a thin wrapper.
+(`mardm.models`) and training (`mardm.scripts.train`); `mardm.scripts.evaluate`
+is a thin wrapper over this.
 """
 
 from __future__ import annotations
@@ -15,8 +15,8 @@ from torch import Tensor
 
 from shared.geometry import Skeleton
 
-from ..models import AE, MARDM
-from ..representation import essential_to_h3d
+from .models import AE, MARDM
+from .representation import essential_to_h3d
 
 
 @torch.no_grad()

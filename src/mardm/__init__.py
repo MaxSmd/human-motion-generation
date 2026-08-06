@@ -6,8 +6,8 @@ Suggested top-level entry points (mirror `rmg`'s shape so cross-method tooling
 stays uniform):
 
     from mardm.models     import MARDMModel
-    from mardm.training   import MARDMTrainerCfg
-    from mardm.tasks      import generation as mardm_generation
+    from mardm.masking    import cosine_schedule, lengths_to_mask
+    from mardm.generation import generate_h3d_features, sample_latents
 
 Shared, model-agnostic code lives in `shared` (don't duplicate it):
 

@@ -10,7 +10,7 @@ MARDM generation task):
      Diversity, MultiModality. Optionally sweep classifier-free guidance.
 
 Run (cluster):
-    python -m mardm.scripts.evaluate_mardm +data=cluster_mounted \\
+    python -m mardm.scripts.evaluate +data=cluster_mounted \\
         ae_checkpoint=runs/mardm-ae-XXXX/checkpoints/latest.pt \\
         eval.checkpoint=runs/mardm-gen-YYYY/checkpoints/latest.pt \\
         eval.evaluator=real text_encoder.type=qwen3
@@ -32,7 +32,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from mardm.models import AE, MARDM, AEConfig, MARDMConfig
-from mardm.tasks import generate_h3d_features
+from mardm.generation import generate_h3d_features
 from shared.data import HumanML3DDataset, collate
 from shared.eval import (
     RandomGuoEvaluator,
@@ -403,7 +403,7 @@ def main(cfg: DictConfig) -> None:
         with open(out_dir / "results.json", "w") as f:
             json.dump({str(k): v for k, v in all_results.items()}, f, indent=2, default=float)
 
-    print(f"\n[evaluate_mardm] done — {len(all_results)} guidance level(s) saved.", flush=True)
+    print(f"\n[evaluate] done — {len(all_results)} guidance level(s) saved.", flush=True)
 
 
 if __name__ == "__main__":
