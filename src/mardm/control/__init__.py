@@ -8,6 +8,8 @@ checkpoint — `guidance.generate_guided` + the differentiable control loss in
 from .guidance import GuidanceConfig, generate_guided
 from .losses import (
     ControlSignal,
+    bend_loss,
+    bend_metrics,
     control_loss,
     control_metrics,
     dynamics_loss,
@@ -20,6 +22,8 @@ from .root_edit import root_edit_essential
 __all__ = [
     "ControlSignal",
     "GuidanceConfig",
+    "bend_loss",
+    "bend_metrics",
     "control_loss",
     "control_metrics",
     "dynamics_loss",

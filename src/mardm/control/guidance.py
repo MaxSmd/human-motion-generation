@@ -43,11 +43,23 @@ from ..models import AE, MARDM
 from ..masking import cosine_schedule, lengths_to_mask
 from .losses import (
     ControlSignal,
+    bend_loss,
     control_loss,
     dynamics_loss,
     foot_skate_loss,
     latents_to_joints,
 )
+
+
+def _guidance_active(control: ControlSignal, g: "GuidanceConfig") -> bool:
+    """Whether any objective wants the guidance loop to run.
+
+    Positional waypoints (`control`) OR an active bend (angle) constraint. Kept
+    as one predicate so every gate that used to test `control.num_constraints`
+    also honours a ControlSignal-free bend-only run.
+    """
+    return control.num_constraints > 0 or (
+        g.bend_weight > 0 and g.bend_triplet is not None)
 
 
 @dataclass
@@ -99,6 +111,18 @@ class GuidanceConfig:
     dyn_root_relative: bool = True
     skate_weight: float = 0.0
     skate_height: float = 0.05
+    # Joint-angle limit (RMG's bend constraint as a soft objective). `bend_triplet`
+    # = (a, b, c) joint indices; the bend at b (angle between bones a->b and b->c,
+    # 0 = straight) is penalized above `bend_max_deg` with weight `bend_weight`.
+    # For a knee: (hip, knee, ankle) — e.g. left (1, 4, 7), right (2, 5, 8).
+    # `bend_window` = (start, end) limits it to a frame range (None = whole clip).
+    # Unlike a positional waypoint this needs no ControlSignal; it activates the
+    # guidance on its own (see `_guidance_active`). The bend joints are excluded
+    # from the dynamics anchor so the limb is free to straighten.
+    bend_triplet: tuple[int, int, int] | list[int] | None = None
+    bend_max_deg: float = 10.0
+    bend_weight: float = 0.0
+    bend_window: tuple[int, int] | None = None
     # Hard trust region: after every Adam step, project z back onto
     # ‖z − z₀‖₂ ≤ trust_radius·‖z₀‖₂ per token. Unlike `prox_weight` this
     # bounds the drift outright instead of trading it off against control
@@ -178,6 +202,7 @@ def _optimize_z(ae: AE, z: Tensor, sample_fn, context: Tensor, flat_mask: Tensor
     b, l, d = shape
     z0 = z.detach().clone()
     z_opt = z.detach().clone().requires_grad_(True)
+    last_good = z0.clone()                       # last finite iterate to fall back on
     optimizer = torch.optim.Adam([z_opt], lr=g.lr)
     for it in range(iters):
         x = sample_fn(z_opt)
@@ -195,9 +220,18 @@ def _optimize_z(ae: AE, z: Tensor, sample_fn, context: Tensor, flat_mask: Tensor
             loss = loss + g.prox_weight * (z_opt - z0).pow(2).mean()
         if g.dyn_weight > 0 and reference is not None:
             loss = loss + g.dyn_weight * dynamics_loss(
-                joints, reference, control, root_relative=g.dyn_root_relative)
+                joints, reference, control, root_relative=g.dyn_root_relative,
+                exclude=g.bend_triplet)
         if g.skate_weight > 0:
             loss = loss + g.skate_weight * foot_skate_loss(joints, height=g.skate_height)
+        if g.bend_weight > 0 and g.bend_triplet is not None:
+            loss = loss + g.bend_weight * bend_loss(
+                joints, g.bend_triplet, g.bend_max_deg, g.bend_window)
+        if not torch.isfinite(loss):                 # divergence (e.g. an infeasible
+            if g.verbose:                            # constraint pushing z off-manifold):
+                print(f"[guidance] {tag} non-finite loss at it {it + 1}/{iters} — "
+                      f"reverting to last finite z", flush=True)
+            break                                    # keep the last finite iterate
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
@@ -207,10 +241,11 @@ def _optimize_z(ae: AE, z: Tensor, sample_fn, context: Tensor, flat_mask: Tensor
                 radius = g.trust_radius * z0.norm(dim=-1, keepdim=True)
                 scale = (radius / delta.norm(dim=-1, keepdim=True).clamp(min=1e-12)).clamp(max=1.0)
                 z_opt.copy_(z0 + delta * scale)
+        last_good = z_opt.detach().clone()
         if g.verbose and (it == 0 or it == iters - 1):
             print(f"[guidance] {tag} it {it + 1}/{iters} "
                   f"L_s={float(ctrl_err.detach()):.4f} L={float(loss.detach()):.4f}", flush=True)
-    return z_opt.detach()
+    return last_good
 
 
 def _compute_z(mardm: MARDM, latents: Tensor, cond: Tensor, padding_mask: Tensor,
@@ -236,7 +271,7 @@ def _guided_commit(mardm: MARDM, ae: AE, latents: Tensor, is_mask: Tensor, cond:
     # Fixed noise per step so the inner optimization is deterministic.
     noise = torch.randn(int(flat_mask.sum()), d, device=latents.device)
 
-    if inner_iters > 0 and control.num_constraints > 0:
+    if inner_iters > 0 and _guidance_active(control, g):
         z = _optimize_z(
             ae, z,
             lambda zz: _sample_tokens(mardm, zz, noise, cond_scale, g.ode_steps_guidance),
@@ -378,9 +413,9 @@ def generate_guided(
     # pass below draws exactly the noise it would have drawn without this pass
     # — arms with and without `dyn_weight` stay noise-matched.
     reference = None
-    if g.dyn_weight > 0 and control.num_constraints > 0:
+    if g.dyn_weight > 0 and _guidance_active(control, g):
         plain = replace(g, inner_iters=0, post_iters=0, repair_rounds=0, repair_every=0,
-                        uturn_rounds=0, dyn_weight=0.0, skate_weight=0.0)
+                        uturn_rounds=0, dyn_weight=0.0, skate_weight=0.0, bend_weight=0.0)
         with torch.random.fork_rng(devices=[device] if device.type == "cuda" else []):
             ref_latents = generate_guided(
                 mardm, ae, cond, m_lens, control, mean, std, timesteps=timesteps,
