@@ -13,6 +13,7 @@ path and the three model stages can learn something on a very small subset:
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import random
 from itertools import cycle
@@ -20,6 +21,7 @@ from pathlib import Path
 
 import torch
 import torch.nn.functional as F
+import numpy as np
 from torch.utils.data import DataLoader, Subset
 
 from momask.models import (
@@ -52,6 +54,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--split", default="train", choices=["train", "val", "test"])
     p.add_argument("--max-clips", type=int, default=8)
     p.add_argument("--batch-size", type=int, default=2)
+    p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--max-seq-len", type=int, default=80)
     p.add_argument("--min-seq-len", type=int, default=20)
     p.add_argument("--vq-steps", type=int, default=30)
@@ -84,6 +87,8 @@ def parse_args() -> argparse.Namespace:
         help="Train only the residual transformer after loading/freezing the masked transformer.",
     )
     p.add_argument("--lr", type=float, default=3e-4)
+    p.add_argument("--adam-beta1", type=float, default=0.9)
+    p.add_argument("--adam-beta2", type=float, default=0.999)
     p.add_argument("--weight-decay", type=float, default=0.0)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -107,6 +112,8 @@ def parse_args() -> argparse.Namespace:
         default=5.0,
         help="Official MoMask feature bias for root channels and foot contacts.",
     )
+    p.add_argument("--h3d-mean", default=None, help="Optional HumanML3D Mean.npy for MoMask normalization.")
+    p.add_argument("--h3d-std", default=None, help="Optional HumanML3D Std.npy for MoMask normalization.")
 
     # Small by default, but now scalable enough to test real capacity changes.
     p.add_argument("--vq-hidden-dim", type=int, default=64)
@@ -117,11 +124,21 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--downsample", type=int, default=1)
     p.add_argument("--quantize-dropout", type=float, default=0.2)
     p.add_argument("--vq-commitment-weight", type=float, default=0.25)
+    p.add_argument("--vq-recon-loss", choices=["l1", "smooth_l1"], default="l1")
+    p.add_argument("--vq-use-ema", action="store_true", help="Use EMA-reset codebooks, as in the official MoMask RVQ.")
+    p.add_argument("--vq-ema-decay", type=float, default=0.99)
+    p.add_argument("--vq-codebook-sample-temp", type=float, default=0.0)
     p.add_argument(
         "--vq-velocity-weight",
         type=float,
         default=0.0,
         help="Weight for matching frame-to-frame feature velocities in the VQ-VAE loss.",
+    )
+    p.add_argument(
+        "--vq-explicit-weight",
+        type=float,
+        default=0.0,
+        help="Weight for the official MoMask auxiliary local-pose reconstruction loss over channels 4:67.",
     )
 
     p.add_argument("--text-dim", type=int, default=64)
@@ -193,6 +210,15 @@ class H3DNormalizer:
         std[259:263] /= feat_bias
         return cls(mean, std)
 
+    @classmethod
+    def from_files(cls, mean_path: str | Path, std_path: str | Path, feat_bias: float) -> "H3DNormalizer":
+        mean = torch.from_numpy(np.load(mean_path)).float()
+        std = torch.from_numpy(np.load(std_path)).float()
+        std = std.clone()
+        std[0:4] /= feat_bias
+        std[259:263] /= feat_bias
+        return cls(mean, std)
+
     def transform(self, x: torch.Tensor) -> torch.Tensor:
         mean = self.mean.to(device=x.device, dtype=x.dtype)
         std = self.std.to(device=x.device, dtype=x.dtype)
@@ -232,6 +258,11 @@ def restore_model_args(args: argparse.Namespace, ckpt: dict) -> None:
         "vq_commitment_weight",
         "quantize_dropout",
         "vq_velocity_weight",
+        "vq_explicit_weight",
+        "vq_recon_loss",
+        "vq_use_ema",
+        "vq_ema_decay",
+        "vq_codebook_sample_temp",
         "no_momask_normalize",
         "feat_bias",
     )
@@ -310,7 +341,7 @@ def evaluate_vq(
     normalizer: H3DNormalizer,
 ) -> dict[str, float]:
     vqvae.eval()
-    maes, raw_maes, losses, velocity_losses, ppls = [], [], [], [], []
+    maes, raw_maes, losses, velocity_losses, explicit_losses, ppls = [], [], [], [], [], []
     real_drifts, recon_drifts, real_spans, recon_spans = [], [], [], []
     for i, batch in enumerate(loader):
         if i >= max_batches:
@@ -324,6 +355,7 @@ def evaluate_vq(
         raw_maes.append(float(masked_mae(raw_recon, raw_x, mask)))
         losses.append(float(out.loss))
         velocity_losses.append(float(out.velocity_loss))
+        explicit_losses.append(float(out.explicit_loss))
         ppls.append(float(out.perplexity))
         real_root = root_trajectory_metrics(raw_x.cpu(), mask.cpu())
         recon_root = root_trajectory_metrics(raw_recon.detach().cpu(), mask.cpu())
@@ -337,6 +369,7 @@ def evaluate_vq(
         "recon_mae": sum(maes) / max(len(maes), 1),
         "raw_recon_mae": sum(raw_maes) / max(len(raw_maes), 1),
         "velocity_loss": sum(velocity_losses) / max(len(velocity_losses), 1),
+        "explicit_loss": sum(explicit_losses) / max(len(explicit_losses), 1),
         "perplexity": sum(ppls) / max(len(ppls), 1),
         "real_end_drift": sum(real_drifts) / max(len(real_drifts), 1),
         "recon_end_drift": sum(recon_drifts) / max(len(recon_drifts), 1),
@@ -543,9 +576,18 @@ def main() -> None:
         normalizer = (
             H3DNormalizer.identity()
             if args.no_momask_normalize
+            else H3DNormalizer.from_files(args.h3d_mean, args.h3d_std, feat_bias=args.feat_bias)
+            if args.h3d_mean and args.h3d_std
             else H3DNormalizer.from_dataset(small, feat_bias=args.feat_bias)
         )
-    loader = DataLoader(small, batch_size=args.batch_size, shuffle=True, collate_fn=collate, num_workers=0)
+    loader = DataLoader(
+        small,
+        batch_size=args.batch_size,
+        shuffle=True,
+        collate_fn=collate,
+        num_workers=args.num_workers,
+        pin_memory=device.type == "cuda",
+    )
     batches = cycle(loader)
 
     print(f"[momask-smoke] data_root={args.data_root}")
@@ -556,6 +598,9 @@ def main() -> None:
         "[momask-smoke] momask_normalize="
         f"{not args.no_momask_normalize} feat_bias={args.feat_bias:.2f}"
     )
+    if args.h3d_mean and args.h3d_std and not args.no_momask_normalize:
+        print(f"[momask-smoke] h3d_mean={args.h3d_mean}")
+        print(f"[momask-smoke] h3d_std={args.h3d_std}")
     if args.load_vq_checkpoint:
         print(f"[momask-smoke] load_vq_checkpoint={args.load_vq_checkpoint}")
     if args.load_token_checkpoint:
@@ -572,21 +617,35 @@ def main() -> None:
         commitment_weight=args.vq_commitment_weight,
         quantize_dropout_prob=args.quantize_dropout,
         velocity_loss_weight=args.vq_velocity_weight,
+        explicit_loss_weight=args.vq_explicit_weight,
+        recon_loss=args.vq_recon_loss,
+        use_ema_quantizer=args.vq_use_ema,
+        ema_decay=args.vq_ema_decay,
+        codebook_sample_temp=args.vq_codebook_sample_temp,
     ).to(device)
-    vq_opt = torch.optim.AdamW(vqvae.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    vq_opt = torch.optim.AdamW(
+        vqvae.parameters(),
+        lr=args.lr,
+        betas=(args.adam_beta1, args.adam_beta2),
+        weight_decay=args.weight_decay,
+    )
+    start_vq_step = 0
     if loaded_vq_ckpt is not None:
         vqvae.load_state_dict(loaded_vq_ckpt["vqvae"])
         if "vq_optimizer" in loaded_vq_ckpt and args.vq_steps > 0:
             vq_opt.load_state_dict(loaded_vq_ckpt["vq_optimizer"])
+        start_vq_step = int(loaded_vq_ckpt.get("step", 0)) if args.vq_steps > 0 else 0
         print(
             "[momask-smoke] restored VQ "
             f"quantizers={args.num_quantizers} codebook={args.codebook_size} "
-            f"hidden={args.vq_hidden_dim} latent={args.vq_latent_dim}",
+            f"hidden={args.vq_hidden_dim} latent={args.vq_latent_dim} "
+            f"downsample={args.downsample} ema={args.vq_use_ema} "
+            f"step={start_vq_step} target_steps={args.vq_steps}",
             flush=True,
         )
 
     first_recon = None
-    for step in range(1, args.vq_steps + 1):
+    for step in range(start_vq_step + 1, args.vq_steps + 1):
         batch = next(batches)
         x = normalizer.transform(batch.x1.to(device))
         mask = batch.mask.to(device)
@@ -602,6 +661,7 @@ def main() -> None:
                 f"[vq {step:04d}] loss={out.loss.item():.5f} "
                 f"recon_mae={out.recon_loss.item():.5f} "
                 f"vel={out.velocity_loss.item():.5f} "
+                f"explicit={out.explicit_loss.item():.5f} "
                 f"vq={out.vq_loss.item():.5f} ppl={out.perplexity.item():.2f}",
                 flush=True,
             )
@@ -624,6 +684,7 @@ def main() -> None:
         f"eval_recon_mae={vq_eval['recon_mae']:.5f} "
         f"eval_raw_recon_mae={vq_eval['raw_recon_mae']:.5f} "
         f"eval_vel={vq_eval['velocity_loss']:.5f} "
+        f"eval_explicit={vq_eval['explicit_loss']:.5f} "
         f"eval_loss={vq_eval['loss']:.5f} eval_ppl={vq_eval['perplexity']:.2f}"
     )
     print(
@@ -635,6 +696,7 @@ def main() -> None:
 
     if args.vq_only:
         ckpt = {
+            "step": args.vq_steps,
             "args": vars(args),
             "normalizer": normalizer.state_dict(),
             "vqvae": vqvae.state_dict(),
@@ -681,7 +743,7 @@ def main() -> None:
         depth=args.transformer_depth,
         num_heads=args.transformer_heads,
         ffn_dim=args.transformer_ffn_dim,
-        max_seq_len=args.max_seq_len,
+        max_seq_len=math.ceil(args.max_seq_len / args.downsample),
         dropout=args.transformer_dropout,
     )
     masked_model = MaskedMotionTransformer(cfg).to(device)
@@ -727,6 +789,7 @@ def main() -> None:
     token_opt = torch.optim.AdamW(
         token_params,
         lr=args.lr,
+        betas=(args.adam_beta1, args.adam_beta2),
         weight_decay=args.weight_decay,
     )
     if optimizer_state is not None:

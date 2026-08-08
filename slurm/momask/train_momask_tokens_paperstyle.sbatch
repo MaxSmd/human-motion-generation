@@ -18,7 +18,7 @@
 
 set -euo pipefail
 
-export VQ_CKPT="${VQ_CKPT:-runs/momask-canonical-vq-150k/momask_vq_latest.pt}"
+export VQ_CKPT="${VQ_CKPT:-runs/momask-canonical-vq-paper512-win64-150k/momask_vq_latest.pt}"
 export CANONICAL_H3D_DIR="${CANONICAL_H3D_DIR:-${HOME}/rmg-runs/h3d-canonical/new_joint_vecs}"
 export RUN_NAME="${RUN_NAME:-momask-canonical-tokens-paper384-len196-clip200k}"
 export TOKEN_STEPS="${TOKEN_STEPS:-200000}"
@@ -30,7 +30,7 @@ export TEXT_ENCODER="${TEXT_ENCODER:-clip}"
 export CLIP_BACKEND="${CLIP_BACKEND:-transformers}"
 export RESIDUAL_ARCH="${RESIDUAL_ARCH:-codebook}"
 export RESIDUAL_SHARE_WEIGHT="${RESIDUAL_SHARE_WEIGHT:-1}"
-export LIVE_TOKEN_CROPS="${LIVE_TOKEN_CROPS:-1}"
+export LIVE_TOKEN_CROPS="${LIVE_TOKEN_CROPS:-0}"
 
 export TRANSFORMER_HIDDEN_DIM="${TRANSFORMER_HIDDEN_DIM:-384}"
 export TRANSFORMER_DEPTH="${TRANSFORMER_DEPTH:-8}"

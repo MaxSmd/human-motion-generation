@@ -330,10 +330,14 @@ class CodebookResidualTransformer(_TransformerBackbone):
         self.pad_id = cfg.vocab_size
         n_residual = num_quantizers - 1
         if share_weight:
-            shared = nn.Parameter(torch.empty(n_residual, cfg.vocab_size + 1, code_dim))
-            nn.init.normal_(shared, mean=0.0, std=0.02)
-            self.token_embed_weight = shared
-            self.output_proj_weight = shared
+            if n_residual < 2:
+                raise ValueError("share_weight requires at least 3 quantizers")
+            self.embed_proj_shared_weight = nn.Parameter(torch.empty(n_residual - 1, cfg.vocab_size + 1, code_dim))
+            self.token_embed_weight_ = nn.Parameter(torch.empty(1, cfg.vocab_size + 1, code_dim))
+            self.output_proj_weight_ = nn.Parameter(torch.empty(1, cfg.vocab_size + 1, code_dim))
+            nn.init.normal_(self.embed_proj_shared_weight, mean=0.0, std=0.02)
+            nn.init.normal_(self.token_embed_weight_, mean=0.0, std=0.02)
+            nn.init.normal_(self.output_proj_weight_, mean=0.0, std=0.02)
             self.output_proj_bias = None
         else:
             self.token_embed_weight = nn.Parameter(torch.empty(n_residual, cfg.vocab_size + 1, code_dim))
@@ -350,14 +354,25 @@ class CodebookResidualTransformer(_TransformerBackbone):
         )
         self.quant_embed = nn.Embedding(num_quantizers, cfg.hidden_dim)
 
+    def _token_embed_weight(self) -> Tensor:
+        if self.share_weight:
+            return torch.cat([self.token_embed_weight_, self.embed_proj_shared_weight], dim=0)
+        return self.token_embed_weight
+
+    def _output_proj_weight(self) -> Tensor:
+        if self.share_weight:
+            return torch.cat([self.embed_proj_shared_weight, self.output_proj_weight_], dim=0)
+        return self.output_proj_weight
+
     def _history_codes(self, prev_tokens: Tensor, target_level: int) -> Tensor:
         B, L, T = prev_tokens.shape
         if L != target_level:
             raise ValueError(f"expected {target_level} previous levels, got {L}")
         safe_tokens = prev_tokens.clamp(0, self.pad_id)
-        out = torch.zeros(B, T, self.code_dim, device=prev_tokens.device, dtype=self.token_embed_weight.dtype)
+        token_embed_weight = self._token_embed_weight()
+        out = torch.zeros(B, T, self.code_dim, device=prev_tokens.device, dtype=token_embed_weight.dtype)
         for level in range(target_level):
-            out = out + F.embedding(safe_tokens[:, level], self.token_embed_weight[level])
+            out = out + F.embedding(safe_tokens[:, level], token_embed_weight[level])
         return out
 
     def _encode_codes(
@@ -388,7 +403,7 @@ class CodebookResidualTransformer(_TransformerBackbone):
     def _project_logits(self, h: Tensor, target_level: int) -> Tensor:
         idx = target_level - 1
         code = self.output_proj(h)
-        weight = self.output_proj_weight[idx, : self.cfg.vocab_size]
+        weight = self._output_proj_weight()[idx, : self.cfg.vocab_size]
         logits = code @ weight.t()
         if self.output_proj_bias is not None:
             logits = logits + self.output_proj_bias[idx, : self.cfg.vocab_size]

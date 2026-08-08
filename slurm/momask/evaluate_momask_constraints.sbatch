@@ -33,7 +33,7 @@ REAL_H3D_DIR="${REAL_H3D_DIR:-${HOME}/rmg-runs/h3d-canonical/new_joint_vecs}"
 CKPT="${CKPT:-runs/momask-full-tokens-clip150k/momask_smoke_latest.pt}"
 MAX_CLIPS="${MAX_CLIPS:-256}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
-MAX_SEQ_LEN="${MAX_SEQ_LEN:-80}"
+MAX_SEQ_LEN="${MAX_SEQ_LEN:-}"
 MIN_SEQ_LEN="${MIN_SEQ_LEN:-40}"
 GENERATION_STEPS="${GENERATION_STEPS:-10}"
 GUIDANCE_SCALE="${GUIDANCE_SCALE:-1.0}"
@@ -62,7 +62,7 @@ echo "[momask-constraints] humanml3d_repo=${HUMANML3D_REPO}"
 echo "[momask-constraints] humanml3d_texts_zip=${HUMANML3D_TEXTS_ZIP:-<auto>}"
 echo "[momask-constraints] real_h3d_dir=${REAL_H3D_DIR:-<packed>}"
 echo "[momask-constraints] ckpt=${CKPT}"
-echo "[momask-constraints] max_clips=${MAX_CLIPS} batch_size=${BATCH_SIZE}"
+echo "[momask-constraints] max_clips=${MAX_CLIPS} batch_size=${BATCH_SIZE} max_seq_len=${MAX_SEQ_LEN:-checkpoint-default}"
 echo "[momask-constraints] steps=${GENERATION_STEPS} guidance=${GUIDANCE_SCALE} anchor_stride=${ANCHOR_STRIDE}"
 echo "[momask-constraints] sample=${SAMPLE} topk_filter_thres=${TOPK_FILTER_THRES} remask_kept_tokens=${REMASK_KEPT_TOKENS}"
 echo "[momask-constraints] output=${OUTPUT}"
@@ -75,6 +75,10 @@ fi
 REAL_H3D_ARG=""
 if [ -n "${REAL_H3D_DIR}" ]; then
     REAL_H3D_ARG="--real-h3d-dir ${REAL_H3D_DIR}"
+fi
+MAX_SEQ_LEN_ARG=""
+if [ -n "${MAX_SEQ_LEN}" ]; then
+    MAX_SEQ_LEN_ARG="--max-seq-len ${MAX_SEQ_LEN}"
 fi
 
 SAMPLING_ARGS=""
@@ -113,7 +117,7 @@ enroot start \
             --split test \
             --max-clips ${MAX_CLIPS} \
             --batch-size ${BATCH_SIZE} \
-            --max-seq-len ${MAX_SEQ_LEN} \
+            ${MAX_SEQ_LEN_ARG} \
             --min-seq-len ${MIN_SEQ_LEN} \
             --generation-steps ${GENERATION_STEPS} \
             --guidance-scale ${GUIDANCE_SCALE} \

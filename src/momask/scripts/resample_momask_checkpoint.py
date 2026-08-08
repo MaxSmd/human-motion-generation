@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import math
 from pathlib import Path
 
 import torch
 
 from momask.models import (
+    CodebookResidualTransformer,
     MaskedMotionTransformer,
     MotionRVQVAE,
     ResidualTransformer,
@@ -35,8 +37,13 @@ def _build_models(args: dict, device: torch.device):
         codebook_size=int(args["codebook_size"]),
         downsample=int(args["downsample"]),
         num_res_blocks=int(args["vq_res_blocks"]),
+        commitment_weight=float(args.get("vq_commitment_weight", 0.25)),
         quantize_dropout_prob=float(args["quantize_dropout"]),
         velocity_loss_weight=float(args.get("vq_velocity_weight", 0.0)),
+        explicit_loss_weight=float(args.get("vq_explicit_weight", 0.0)),
+        use_ema_quantizer=bool(args.get("vq_use_ema", False)),
+        ema_decay=float(args.get("vq_ema_decay", 0.99)),
+        codebook_sample_temp=float(args.get("vq_codebook_sample_temp", 0.0)),
     ).to(device)
     cfg = TokenTransformerConfig(
         vocab_size=int(args["codebook_size"]),
@@ -45,15 +52,23 @@ def _build_models(args: dict, device: torch.device):
         depth=int(args["transformer_depth"]),
         num_heads=int(args["transformer_heads"]),
         ffn_dim=int(args["transformer_ffn_dim"]),
-        max_seq_len=int(args["max_seq_len"]),
+        max_seq_len=math.ceil(int(args["max_seq_len"]) / int(args.get("downsample", 1))),
         dropout=float(args["transformer_dropout"]),
     )
     masked_model = MaskedMotionTransformer(cfg).to(device)
-    residual_model = ResidualTransformer(
-        cfg,
-        num_quantizers=int(args["num_quantizers"]),
-        separate_level_heads=not bool(args.get("shared_residual_head", False)),
-    ).to(device)
+    if args.get("residual_arch", "simple") == "codebook":
+        residual_model = CodebookResidualTransformer(
+            cfg,
+            num_quantizers=int(args["num_quantizers"]),
+            code_dim=int(args["vq_latent_dim"]),
+            share_weight=bool(args.get("residual_share_weight", False)),
+        ).to(device)
+    else:
+        residual_model = ResidualTransformer(
+            cfg,
+            num_quantizers=int(args["num_quantizers"]),
+            separate_level_heads=not bool(args.get("shared_residual_head", False)),
+        ).to(device)
     return vqvae, masked_model, residual_model
 
 

@@ -29,6 +29,7 @@ class RVQVAEOutput:
     loss: Tensor
     recon_loss: Tensor
     velocity_loss: Tensor
+    explicit_loss: Tensor
     vq_loss: Tensor
     perplexity: Tensor
 
@@ -48,6 +49,9 @@ class ResidualVectorQuantizer(nn.Module):
         dim: int = 512,
         commitment_weight: float = 0.25,
         quantize_dropout_prob: float = 0.0,
+        use_ema: bool = False,
+        ema_decay: float = 0.99,
+        sample_codebook_temp: float = 0.0,
     ) -> None:
         super().__init__()
         if num_quantizers < 1:
@@ -57,9 +61,18 @@ class ResidualVectorQuantizer(nn.Module):
         self.dim = dim
         self.commitment_weight = commitment_weight
         self.quantize_dropout_prob = quantize_dropout_prob
+        self.use_ema = use_ema
+        self.ema_decay = ema_decay
+        self.sample_codebook_temp = sample_codebook_temp
         self.codebooks = nn.ModuleList([nn.Embedding(codebook_size, dim) for _ in range(num_quantizers)])
         for emb in self.codebooks:
             nn.init.uniform_(emb.weight, -1.0 / codebook_size, 1.0 / codebook_size)
+            if use_ema:
+                emb.weight.requires_grad_(False)
+        if use_ema:
+            self.register_buffer("ema_sum", torch.zeros(num_quantizers, codebook_size, dim))
+            self.register_buffer("ema_count", torch.zeros(num_quantizers, codebook_size))
+            self.register_buffer("ema_initialized", torch.zeros(num_quantizers, dtype=torch.bool))
 
     def _nearest_indices(self, residual: Tensor, codebook: nn.Embedding) -> Tensor:
         flat = residual.reshape(-1, self.dim)
@@ -69,7 +82,50 @@ class ResidualVectorQuantizer(nn.Module):
             - 2.0 * flat @ weight.t()
             + weight.pow(2).sum(dim=1).unsqueeze(0)
         )
-        return dist.argmin(dim=1).reshape(residual.shape[:-1])
+        if self.training and self.sample_codebook_temp > 0.0:
+            noise = torch.zeros_like(dist).uniform_(0, 1)
+            gumbel = -torch.log(-torch.log(noise.clamp_min(1e-20)).clamp_min(1e-20))
+            idx = ((-dist / self.sample_codebook_temp) + gumbel).argmax(dim=1)
+        else:
+            idx = dist.argmin(dim=1)
+        return idx.reshape(residual.shape[:-1])
+
+    def _tile_codes(self, flat: Tensor) -> Tensor:
+        if flat.shape[0] < self.codebook_size:
+            n_repeats = (self.codebook_size + flat.shape[0] - 1) // flat.shape[0]
+            tiled = flat.repeat(n_repeats, 1)
+            tiled = tiled + torch.randn_like(tiled) * (0.01 / (self.dim ** 0.5))
+        else:
+            tiled = flat
+        perm = torch.randperm(tiled.shape[0], device=flat.device)
+        return tiled[perm[: self.codebook_size]].detach()
+
+    @torch.no_grad()
+    def _maybe_init_ema(self, level: int, residual: Tensor) -> None:
+        if not self.use_ema or bool(self.ema_initialized[level]):
+            return
+        flat = residual.reshape(-1, self.dim)
+        codes = self._tile_codes(flat)
+        self.codebooks[level].weight.data.copy_(codes)
+        self.ema_sum[level].copy_(codes)
+        self.ema_count[level].fill_(1.0)
+        self.ema_initialized[level] = True
+
+    @torch.no_grad()
+    def _update_ema(self, level: int, residual: Tensor, idx: Tensor) -> None:
+        if not self.use_ema or not self.training:
+            return
+        flat = residual.reshape(-1, self.dim)
+        flat_idx = idx.reshape(-1)
+        one_hot = F.one_hot(flat_idx, self.codebook_size).to(flat.dtype)
+        code_sum = one_hot.t() @ flat
+        code_count = one_hot.sum(dim=0)
+        self.ema_sum[level].mul_(self.ema_decay).add_(code_sum, alpha=1.0 - self.ema_decay)
+        self.ema_count[level].mul_(self.ema_decay).add_(code_count, alpha=1.0 - self.ema_decay)
+        code_update = self.ema_sum[level] / self.ema_count[level].clamp_min(1e-5).unsqueeze(1)
+        random_codes = self._tile_codes(flat)
+        usage = (self.ema_count[level] >= 1.0).unsqueeze(1)
+        self.codebooks[level].weight.data.copy_(torch.where(usage, code_update, random_codes))
 
     def encode(self, z: Tensor) -> Tensor:
         residual = z
@@ -107,6 +163,7 @@ class ResidualVectorQuantizer(nn.Module):
         one_hot_counts = []
 
         for level, codebook in enumerate(self.codebooks):
+            self._maybe_init_ema(level, residual)
             idx = self._nearest_indices(residual, codebook)
             q = codebook(idx)
             all_indices.append(idx)
@@ -114,10 +171,14 @@ class ResidualVectorQuantizer(nn.Module):
 
             if level < active:
                 quantized_sum = quantized_sum + q
-                losses.append(
-                    F.mse_loss(q, residual.detach())
-                    + self.commitment_weight * F.mse_loss(residual, q.detach())
-                )
+                if self.use_ema:
+                    losses.append(self.commitment_weight * F.mse_loss(residual, q.detach()))
+                    self._update_ema(level, residual, idx)
+                else:
+                    losses.append(
+                        F.mse_loss(q, residual.detach())
+                        + self.commitment_weight * F.mse_loss(residual, q.detach())
+                    )
                 residual = residual - q.detach()
             else:
                 residual = residual.detach()
@@ -158,6 +219,11 @@ class MotionRVQVAE(nn.Module):
         commitment_weight: float = 0.25,
         quantize_dropout_prob: float = 0.2,
         velocity_loss_weight: float = 0.0,
+        explicit_loss_weight: float = 0.0,
+        recon_loss: str = "l1",
+        use_ema_quantizer: bool = False,
+        ema_decay: float = 0.99,
+        codebook_sample_temp: float = 0.0,
     ) -> None:
         super().__init__()
         if downsample < 1 or downsample & (downsample - 1):
@@ -169,6 +235,10 @@ class MotionRVQVAE(nn.Module):
         self.latent_dim = latent_dim
         self.downsample = downsample
         self.velocity_loss_weight = velocity_loss_weight
+        self.explicit_loss_weight = explicit_loss_weight
+        if recon_loss not in ("l1", "smooth_l1"):
+            raise ValueError("recon_loss must be 'l1' or 'smooth_l1'")
+        self.recon_loss = recon_loss
 
         enc = [nn.Conv1d(input_dim, hidden_dim, kernel_size=3, padding=1), nn.GELU()]
         stride = downsample
@@ -194,6 +264,9 @@ class MotionRVQVAE(nn.Module):
             dim=latent_dim,
             commitment_weight=commitment_weight,
             quantize_dropout_prob=quantize_dropout_prob,
+            use_ema=use_ema_quantizer,
+            ema_decay=ema_decay,
+            sample_codebook_temp=codebook_sample_temp,
         )
 
     def encode_latents(self, x: Tensor) -> Tensor:
@@ -220,7 +293,10 @@ class MotionRVQVAE(nn.Module):
         z = self.encode_latents(x)
         vq = self.quantizer(z)
         recon = self.decode_latents(vq.quantized, target_len=x.shape[1])
-        err = (recon - x).abs()
+        if self.recon_loss == "smooth_l1":
+            err = F.smooth_l1_loss(recon, x, reduction="none")
+        else:
+            err = (recon - x).abs()
         if mask is not None:
             err = err * mask.to(err.dtype).unsqueeze(-1)
             recon_loss = err.sum() / (mask.sum().clamp_min(1).to(err.dtype) * x.shape[-1])
@@ -239,13 +315,33 @@ class MotionRVQVAE(nn.Module):
         else:
             velocity_loss = recon_loss.new_tensor(0.0)
 
-        loss = recon_loss + self.velocity_loss_weight * velocity_loss + vq.loss
+        if x.shape[-1] >= 67:
+            if self.recon_loss == "smooth_l1":
+                explicit_err = F.smooth_l1_loss(recon[..., 4:67], x[..., 4:67], reduction="none")
+            else:
+                explicit_err = (recon[..., 4:67] - x[..., 4:67]).abs()
+            if mask is not None:
+                explicit_loss = (explicit_err * mask.to(explicit_err.dtype).unsqueeze(-1)).sum() / (
+                    mask.sum().clamp_min(1).to(explicit_err.dtype) * explicit_err.shape[-1]
+                )
+            else:
+                explicit_loss = explicit_err.mean()
+        else:
+            explicit_loss = recon_loss.new_tensor(0.0)
+
+        loss = (
+            recon_loss
+            + self.velocity_loss_weight * velocity_loss
+            + self.explicit_loss_weight * explicit_loss
+            + vq.loss
+        )
         return RVQVAEOutput(
             recon=recon,
             tokens=vq.indices,
             loss=loss,
             recon_loss=recon_loss,
             velocity_loss=velocity_loss,
+            explicit_loss=explicit_loss,
             vq_loss=vq.loss,
             perplexity=vq.perplexity,
         )

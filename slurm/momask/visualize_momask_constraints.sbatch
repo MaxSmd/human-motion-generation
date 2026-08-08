@@ -23,7 +23,7 @@ DATA_ROOT="${DATA_ROOT:-/mnt/projects/drl4cvb/human-motion-representation/data/d
 REAL_H3D_DIR="${REAL_H3D_DIR:-${HOME}/rmg-runs/h3d-canonical/new_joint_vecs}"
 CKPT="${CKPT:-runs/momask-full-tokens-clip150k/momask_smoke_latest.pt}"
 SAMPLE="${SAMPLE:-0}"
-MAX_SEQ_LEN="${MAX_SEQ_LEN:-80}"
+MAX_SEQ_LEN="${MAX_SEQ_LEN:-}"
 MIN_SEQ_LEN="${MIN_SEQ_LEN:-40}"
 GENERATION_STEPS="${GENERATION_STEPS:-10}"
 GUIDANCE_SCALE="${GUIDANCE_SCALE:-1.0}"
@@ -52,12 +52,16 @@ echo "[momask-constraint-viz] host=$(hostname)"
 echo "[momask-constraint-viz] repo=${REPO}"
 echo "[momask-constraint-viz] ckpt=${CKPT}"
 echo "[momask-constraint-viz] real_h3d_dir=${REAL_H3D_DIR:-<packed>}"
-echo "[momask-constraint-viz] sample=${SAMPLE} anchor_stride=${ANCHOR_STRIDE} constraint_variant=${CONSTRAINT_VARIANT} auto_sample_moving=${AUTO_SAMPLE_MOVING} min_root_span=${MIN_ROOT_SPAN} out_dir=${OUT_DIR}"
+echo "[momask-constraint-viz] sample=${SAMPLE} max_seq_len=${MAX_SEQ_LEN:-checkpoint-default} anchor_stride=${ANCHOR_STRIDE} constraint_variant=${CONSTRAINT_VARIANT} auto_sample_moving=${AUTO_SAMPLE_MOVING} min_root_span=${MIN_ROOT_SPAN} out_dir=${OUT_DIR}"
 echo "[momask-constraint-viz] guidance=${GUIDANCE_SCALE} temp=${TEMPERATURE} sample_tokens=${SAMPLE_TOKENS} topk=${TOPK_FILTER_THRES} seed=${SEED}"
 
 REAL_H3D_ARG=""
 if [ -n "${REAL_H3D_DIR}" ]; then
     REAL_H3D_ARG="--real-h3d-dir ${REAL_H3D_DIR}"
+fi
+MAX_SEQ_LEN_ARG=""
+if [ -n "${MAX_SEQ_LEN}" ]; then
+    MAX_SEQ_LEN_ARG="--max-seq-len ${MAX_SEQ_LEN}"
 fi
 
 SAMPLING_ARGS=""
@@ -92,7 +96,7 @@ enroot start \
             ${REAL_H3D_ARG} \
             --sample ${SAMPLE} \
             --split test \
-            --max-seq-len ${MAX_SEQ_LEN} \
+            ${MAX_SEQ_LEN_ARG} \
             --min-seq-len ${MIN_SEQ_LEN} \
             --generation-steps ${GENERATION_STEPS} \
             --guidance-scale ${GUIDANCE_SCALE} \

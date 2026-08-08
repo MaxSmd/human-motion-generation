@@ -32,7 +32,7 @@ REAL_H3D_DIR="${REAL_H3D_DIR:-${HOME}/rmg-runs/h3d-canonical/new_joint_vecs}"
 CKPT="${CKPT:-runs/momask-full-tokens-12858/momask_smoke_latest.pt}"
 MAX_CLIPS="${MAX_CLIPS:-512}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
-MAX_SEQ_LEN="${MAX_SEQ_LEN:-80}"
+MAX_SEQ_LEN="${MAX_SEQ_LEN:-}"
 MIN_SEQ_LEN="${MIN_SEQ_LEN:-40}"
 VARIANTS="${VARIANTS:-full,base}"
 GUIDANCE_SCALE="${GUIDANCE_SCALE:-1.0}"
@@ -62,6 +62,7 @@ echo "[momask-eval] humanml3d_texts_zip=${HUMANML3D_TEXTS_ZIP:-<auto>}"
 echo "[momask-eval] real_h3d_dir=${REAL_H3D_DIR:-<packed>}"
 echo "[momask-eval] ckpt=${CKPT}"
 echo "[momask-eval] max_clips=${MAX_CLIPS} batch_size=${BATCH_SIZE} variants=${VARIANTS}"
+echo "[momask-eval] max_seq_len=${MAX_SEQ_LEN:-checkpoint-default}"
 echo "[momask-eval] generation_steps=${GENERATION_STEPS:-checkpoint-default}"
 echo "[momask-eval] sample=${SAMPLE} topk_filter_thres=${TOPK_FILTER_THRES} remask_kept_tokens=${REMASK_KEPT_TOKENS}"
 echo "[momask-eval] text_encoder=${TEXT_ENCODER} clip_model=${CLIP_MODEL:-checkpoint-default} clip_backend=${CLIP_BACKEND}"
@@ -86,6 +87,10 @@ fi
 REAL_H3D_ARG=""
 if [ -n "${REAL_H3D_DIR}" ]; then
     REAL_H3D_ARG="--real-h3d-dir ${REAL_H3D_DIR}"
+fi
+MAX_SEQ_LEN_ARG=""
+if [ -n "${MAX_SEQ_LEN}" ]; then
+    MAX_SEQ_LEN_ARG="--max-seq-len ${MAX_SEQ_LEN}"
 fi
 
 SAMPLING_ARGS=""
@@ -124,7 +129,7 @@ enroot start \
             --split test \
             --max-clips ${MAX_CLIPS} \
             --batch-size ${BATCH_SIZE} \
-            --max-seq-len ${MAX_SEQ_LEN} \
+            ${MAX_SEQ_LEN_ARG} \
             --min-seq-len ${MIN_SEQ_LEN} \
             --variants '${VARIANTS}' \
             ${GENERATION_ARGS} \

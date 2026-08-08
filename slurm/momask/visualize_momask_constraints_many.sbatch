@@ -24,7 +24,7 @@ REAL_H3D_DIR="${REAL_H3D_DIR:-${HOME}/rmg-runs/h3d-canonical/new_joint_vecs}"
 CKPT="${CKPT:-runs/momask-canonical-tokens-clip200k/checkpoints/tokens_step_0145000.pt}"
 SAMPLES="${SAMPLES:-0 500 1000 1500 2000}"
 SEEDS="${SEEDS:-0 1 2}"
-MAX_SEQ_LEN="${MAX_SEQ_LEN:-80}"
+MAX_SEQ_LEN="${MAX_SEQ_LEN:-}"
 MIN_SEQ_LEN="${MIN_SEQ_LEN:-40}"
 GENERATION_STEPS="${GENERATION_STEPS:-10}"
 GUIDANCE_SCALE="${GUIDANCE_SCALE:-1.0}"
@@ -54,11 +54,16 @@ echo "[momask-constraint-viz-many] repo=${REPO}"
 echo "[momask-constraint-viz-many] ckpt=${CKPT}"
 echo "[momask-constraint-viz-many] samples=${SAMPLES}"
 echo "[momask-constraint-viz-many] seeds=${SEEDS}"
+echo "[momask-constraint-viz-many] max_seq_len=${MAX_SEQ_LEN:-checkpoint-default}"
 echo "[momask-constraint-viz-many] out_dir=${OUT_DIR}"
 
 REAL_H3D_ARG=""
 if [ -n "${REAL_H3D_DIR}" ]; then
     REAL_H3D_ARG="--real-h3d-dir ${REAL_H3D_DIR}"
+fi
+MAX_SEQ_LEN_ARG=""
+if [ -n "${MAX_SEQ_LEN}" ]; then
+    MAX_SEQ_LEN_ARG="--max-seq-len ${MAX_SEQ_LEN}"
 fi
 
 SAMPLING_ARGS=""
@@ -97,7 +102,7 @@ enroot start \
                     ${REAL_H3D_ARG} \
                     --sample \"\${sample}\" \
                     --split test \
-                    --max-seq-len ${MAX_SEQ_LEN} \
+                    ${MAX_SEQ_LEN_ARG} \
                     --min-seq-len ${MIN_SEQ_LEN} \
                     --generation-steps ${GENERATION_STEPS} \
                     --guidance-scale ${GUIDANCE_SCALE} \

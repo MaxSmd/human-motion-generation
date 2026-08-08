@@ -160,6 +160,10 @@ def build_models(ckpt: dict, device: torch.device):
         commitment_weight=float(a.get("vq_commitment_weight", 0.25)),
         quantize_dropout_prob=float(a.get("quantize_dropout", 0.2)),
         velocity_loss_weight=float(a.get("vq_velocity_weight", 0.0)),
+        explicit_loss_weight=float(a.get("vq_explicit_weight", 0.0)),
+        use_ema_quantizer=bool(a.get("vq_use_ema", False)),
+        ema_decay=float(a.get("vq_ema_decay", 0.99)),
+        codebook_sample_temp=float(a.get("vq_codebook_sample_temp", 0.0)),
     ).to(device)
     cfg = TokenTransformerConfig(
         vocab_size=int(a.get("codebook_size", 64)),
