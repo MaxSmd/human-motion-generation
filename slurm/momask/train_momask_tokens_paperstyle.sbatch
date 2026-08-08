@@ -20,20 +20,22 @@ set -euo pipefail
 
 export VQ_CKPT="${VQ_CKPT:-runs/momask-canonical-vq-150k/momask_vq_latest.pt}"
 export CANONICAL_H3D_DIR="${CANONICAL_H3D_DIR:-${HOME}/rmg-runs/h3d-canonical/new_joint_vecs}"
-export RUN_NAME="${RUN_NAME:-momask-canonical-tokens-paper384-clip200k}"
+export RUN_NAME="${RUN_NAME:-momask-canonical-tokens-paper384-len196-clip200k}"
 export TOKEN_STEPS="${TOKEN_STEPS:-200000}"
-export MAX_SEQ_LEN="${MAX_SEQ_LEN:-80}"
+export MAX_SEQ_LEN="${MAX_SEQ_LEN:-196}"
 export TOKEN_BATCH_SIZE="${TOKEN_BATCH_SIZE:-128}"
 export SAVE_EVERY="${SAVE_EVERY:-5000}"
 export LOG_EVERY="${LOG_EVERY:-1000}"
 export TEXT_ENCODER="${TEXT_ENCODER:-clip}"
 export CLIP_BACKEND="${CLIP_BACKEND:-transformers}"
 export RESIDUAL_ARCH="${RESIDUAL_ARCH:-codebook}"
+export RESIDUAL_SHARE_WEIGHT="${RESIDUAL_SHARE_WEIGHT:-1}"
+export LIVE_TOKEN_CROPS="${LIVE_TOKEN_CROPS:-1}"
 
 export TRANSFORMER_HIDDEN_DIM="${TRANSFORMER_HIDDEN_DIM:-384}"
 export TRANSFORMER_DEPTH="${TRANSFORMER_DEPTH:-8}"
 export TRANSFORMER_HEADS="${TRANSFORMER_HEADS:-6}"
 export TRANSFORMER_FFN_DIM="${TRANSFORMER_FFN_DIM:-1024}"
-export TRANSFORMER_DROPOUT="${TRANSFORMER_DROPOUT:-0.0}"
+export TRANSFORMER_DROPOUT="${TRANSFORMER_DROPOUT:-0.2}"
 
 bash slurm/momask/train_momask_tokens_full.sbatch
