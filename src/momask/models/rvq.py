@@ -13,6 +13,8 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from momask.data_utils import token_mask_from_frame_mask
+
 
 @dataclass
 class RVQOutput:
@@ -100,11 +102,17 @@ class ResidualVectorQuantizer(nn.Module):
         perm = torch.randperm(tiled.shape[0], device=flat.device)
         return tiled[perm[: self.codebook_size]].detach()
 
+    @staticmethod
+    def _valid_values(x: Tensor, mask: Tensor | None) -> Tensor:
+        return x.reshape(-1, x.shape[-1]) if mask is None else x[mask]
+
     @torch.no_grad()
-    def _maybe_init_ema(self, level: int, residual: Tensor) -> None:
+    def _maybe_init_ema(self, level: int, residual: Tensor, mask: Tensor | None = None) -> None:
         if not self.use_ema or bool(self.ema_initialized[level]):
             return
-        flat = residual.reshape(-1, self.dim)
+        flat = self._valid_values(residual, mask)
+        if flat.shape[0] == 0:
+            raise ValueError("RVQ received a batch with no valid latent positions")
         codes = self._tile_codes(flat)
         self.codebooks[level].weight.data.copy_(codes)
         self.ema_sum[level].copy_(codes)
@@ -112,11 +120,17 @@ class ResidualVectorQuantizer(nn.Module):
         self.ema_initialized[level] = True
 
     @torch.no_grad()
-    def _update_ema(self, level: int, residual: Tensor, idx: Tensor) -> None:
+    def _update_ema(
+        self,
+        level: int,
+        residual: Tensor,
+        idx: Tensor,
+        mask: Tensor | None = None,
+    ) -> None:
         if not self.use_ema or not self.training:
             return
-        flat = residual.reshape(-1, self.dim)
-        flat_idx = idx.reshape(-1)
+        flat = self._valid_values(residual, mask)
+        flat_idx = idx.reshape(-1) if mask is None else idx[mask]
         one_hot = F.one_hot(flat_idx, self.codebook_size).to(flat.dtype)
         code_sum = one_hot.t() @ flat
         code_count = one_hot.sum(dim=0)
@@ -148,9 +162,15 @@ class ResidualVectorQuantizer(nn.Module):
             out = out + self.codebooks[level](indices[:, level])
         return out
 
-    def forward(self, z: Tensor) -> RVQOutput:
+    def forward(self, z: Tensor, mask: Tensor | None = None) -> RVQOutput:
         if z.shape[-1] != self.dim:
             raise ValueError(f"last dim {z.shape[-1]} != quantizer dim {self.dim}")
+        if mask is not None:
+            if mask.shape != z.shape[:2]:
+                raise ValueError(f"latent mask must be {tuple(z.shape[:2])}, got {tuple(mask.shape)}")
+            mask = mask.bool()
+            if not bool(mask.any()):
+                raise ValueError("RVQ received a batch with no valid latent positions")
 
         active = self.num_quantizers
         if self.training and self.quantize_dropout_prob > 0.0 and torch.rand(()) < self.quantize_dropout_prob:
@@ -163,32 +183,44 @@ class ResidualVectorQuantizer(nn.Module):
         one_hot_counts = []
 
         for level, codebook in enumerate(self.codebooks):
-            self._maybe_init_ema(level, residual)
+            self._maybe_init_ema(level, residual, mask)
             idx = self._nearest_indices(residual, codebook)
             q = codebook(idx)
+            if mask is not None:
+                idx = idx.masked_fill(~mask, 0)
             all_indices.append(idx)
-            one_hot_counts.append(F.one_hot(idx, self.codebook_size).float().sum(dim=tuple(range(idx.dim()))))
+            valid_idx = idx.reshape(-1) if mask is None else idx[mask]
+            one_hot_counts.append(F.one_hot(valid_idx, self.codebook_size).float().sum(dim=0))
 
             if level < active:
                 quantized_sum = quantized_sum + q
+                residual_valid = self._valid_values(residual, mask)
+                q_valid = self._valid_values(q, mask)
                 if self.use_ema:
-                    losses.append(self.commitment_weight * F.mse_loss(residual, q.detach()))
-                    self._update_ema(level, residual, idx)
+                    losses.append(self.commitment_weight * F.mse_loss(residual_valid, q_valid.detach()))
+                    self._update_ema(level, residual, idx, mask)
                 else:
                     losses.append(
-                        F.mse_loss(q, residual.detach())
-                        + self.commitment_weight * F.mse_loss(residual, q.detach())
+                        F.mse_loss(q_valid, residual_valid.detach())
+                        + self.commitment_weight * F.mse_loss(residual_valid, q_valid.detach())
                     )
                 residual = residual - q.detach()
             else:
                 residual = residual.detach()
 
         quantized = z + (quantized_sum - z).detach()
+        if mask is not None:
+            quantized = quantized.masked_fill(~mask.unsqueeze(-1), 0.0)
         loss = torch.stack(losses).mean() if losses else z.new_tensor(0.0)
         avg_probs = torch.stack(one_hot_counts).sum(dim=0)
         avg_probs = avg_probs / avg_probs.sum().clamp_min(1.0)
         perplexity = torch.exp(-(avg_probs * avg_probs.clamp_min(1e-12).log()).sum())
-        return RVQOutput(quantized=quantized, indices=torch.stack(all_indices, dim=1), loss=loss, perplexity=perplexity)
+        return RVQOutput(
+            quantized=quantized,
+            indices=torch.stack(all_indices, dim=1),
+            loss=loss,
+            perplexity=perplexity,
+        )
 
 
 class _ResBlock(nn.Module):
@@ -202,6 +234,28 @@ class _ResBlock(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         return x + self.net(x)
+
+
+class _PaperResConv1DBlock(nn.Module):
+    """Dilated residual block used by the official MoMask RVQ."""
+
+    def __init__(self, dim: int, dilation: int, dropout: float = 0.2) -> None:
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.ReLU(),
+            nn.Conv1d(dim, dim, kernel_size=3, padding=dilation, dilation=dilation),
+            nn.ReLU(),
+            nn.Conv1d(dim, dim, kernel_size=1),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, x: Tensor) -> Tensor:
+        return x + self.net(x)
+
+
+def _paper_resnet(dim: int, depth: int, dilation_growth: int = 3) -> nn.Sequential:
+    dilations = [dilation_growth ** level for level in range(depth)][::-1]
+    return nn.Sequential(*[_PaperResConv1DBlock(dim, dilation) for dilation in dilations])
 
 
 class MotionRVQVAE(nn.Module):
@@ -224,6 +278,7 @@ class MotionRVQVAE(nn.Module):
         use_ema_quantizer: bool = False,
         ema_decay: float = 0.99,
         codebook_sample_temp: float = 0.0,
+        architecture: str = "simple",
     ) -> None:
         super().__init__()
         if downsample < 1 or downsample & (downsample - 1):
@@ -236,26 +291,61 @@ class MotionRVQVAE(nn.Module):
         self.downsample = downsample
         self.velocity_loss_weight = velocity_loss_weight
         self.explicit_loss_weight = explicit_loss_weight
+        if architecture not in ("simple", "paper"):
+            raise ValueError("architecture must be 'simple' or 'paper'")
+        self.architecture = architecture
         if recon_loss not in ("l1", "smooth_l1"):
             raise ValueError("recon_loss must be 'l1' or 'smooth_l1'")
         self.recon_loss = recon_loss
 
-        enc = [nn.Conv1d(input_dim, hidden_dim, kernel_size=3, padding=1), nn.GELU()]
-        stride = downsample
-        while stride > 1:
-            enc += [nn.Conv1d(hidden_dim, hidden_dim, kernel_size=4, stride=2, padding=1), nn.GELU()]
-            stride //= 2
-        enc += [_ResBlock(hidden_dim) for _ in range(num_res_blocks)]
-        enc += [nn.Conv1d(hidden_dim, latent_dim, kernel_size=3, padding=1)]
-        self.encoder = nn.Sequential(*enc)
+        if architecture == "paper":
+            enc: list[nn.Module] = [nn.Conv1d(input_dim, hidden_dim, kernel_size=3, padding=1), nn.ReLU()]
+            stride = downsample
+            while stride > 1:
+                enc.append(
+                    nn.Sequential(
+                        nn.Conv1d(hidden_dim, hidden_dim, kernel_size=4, stride=2, padding=1),
+                        _paper_resnet(hidden_dim, num_res_blocks),
+                    )
+                )
+                stride //= 2
+            enc.append(nn.Conv1d(hidden_dim, latent_dim, kernel_size=3, padding=1))
 
-        dec = [nn.Conv1d(latent_dim, hidden_dim, kernel_size=3, padding=1), nn.GELU()]
-        dec += [_ResBlock(hidden_dim) for _ in range(num_res_blocks)]
-        stride = downsample
-        while stride > 1:
-            dec += [nn.ConvTranspose1d(hidden_dim, hidden_dim, kernel_size=4, stride=2, padding=1), nn.GELU()]
-            stride //= 2
-        dec += [nn.Conv1d(hidden_dim, input_dim, kernel_size=3, padding=1)]
+            dec: list[nn.Module] = [nn.Conv1d(latent_dim, hidden_dim, kernel_size=3, padding=1), nn.ReLU()]
+            stride = downsample
+            while stride > 1:
+                dec.append(
+                    nn.Sequential(
+                        _paper_resnet(hidden_dim, num_res_blocks),
+                        nn.Upsample(scale_factor=2, mode="nearest"),
+                        nn.Conv1d(hidden_dim, hidden_dim, kernel_size=3, padding=1),
+                    )
+                )
+                stride //= 2
+            dec.extend(
+                [
+                    nn.Conv1d(hidden_dim, hidden_dim, kernel_size=3, padding=1),
+                    nn.ReLU(),
+                    nn.Conv1d(hidden_dim, input_dim, kernel_size=3, padding=1),
+                ]
+            )
+        else:
+            enc = [nn.Conv1d(input_dim, hidden_dim, kernel_size=3, padding=1), nn.GELU()]
+            stride = downsample
+            while stride > 1:
+                enc += [nn.Conv1d(hidden_dim, hidden_dim, kernel_size=4, stride=2, padding=1), nn.GELU()]
+                stride //= 2
+            enc += [_ResBlock(hidden_dim) for _ in range(num_res_blocks)]
+            enc += [nn.Conv1d(hidden_dim, latent_dim, kernel_size=3, padding=1)]
+
+            dec = [nn.Conv1d(latent_dim, hidden_dim, kernel_size=3, padding=1), nn.GELU()]
+            dec += [_ResBlock(hidden_dim) for _ in range(num_res_blocks)]
+            stride = downsample
+            while stride > 1:
+                dec += [nn.ConvTranspose1d(hidden_dim, hidden_dim, kernel_size=4, stride=2, padding=1), nn.GELU()]
+                stride //= 2
+            dec += [nn.Conv1d(hidden_dim, input_dim, kernel_size=3, padding=1)]
+        self.encoder = nn.Sequential(*enc)
         self.decoder = nn.Sequential(*dec)
 
         self.quantizer = ResidualVectorQuantizer(
@@ -286,12 +376,28 @@ class MotionRVQVAE(nn.Module):
     def encode_to_tokens(self, x: Tensor) -> Tensor:
         return self.quantizer.encode(self.encode_latents(x))
 
-    def decode_from_tokens(self, tokens: Tensor, target_len: int | None = None) -> Tensor:
-        return self.decode_latents(self.quantizer.decode(tokens), target_len=target_len)
+    def decode_from_tokens(
+        self,
+        tokens: Tensor,
+        target_len: int | None = None,
+        token_mask: Tensor | None = None,
+    ) -> Tensor:
+        latents = self.quantizer.decode(tokens)
+        if token_mask is not None:
+            if token_mask.shape != latents.shape[:2]:
+                raise ValueError(
+                    f"token mask must be {tuple(latents.shape[:2])}, got {tuple(token_mask.shape)}"
+                )
+            latents = latents.masked_fill(~token_mask.bool().unsqueeze(-1), 0.0)
+        return self.decode_latents(latents, target_len=target_len)
 
     def forward(self, x: Tensor, mask: Tensor | None = None) -> RVQVAEOutput:
         z = self.encode_latents(x)
-        vq = self.quantizer(z)
+        latent_mask = None
+        if mask is not None:
+            latent_mask = token_mask_from_frame_mask(mask, z.shape[1], self.downsample)
+            z = z.masked_fill(~latent_mask.unsqueeze(-1), 0.0)
+        vq = self.quantizer(z, mask=latent_mask)
         recon = self.decode_latents(vq.quantized, target_len=x.shape[1])
         if self.recon_loss == "smooth_l1":
             err = F.smooth_l1_loss(recon, x, reduction="none")

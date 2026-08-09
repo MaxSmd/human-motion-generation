@@ -16,13 +16,12 @@ import argparse
 import math
 import os
 import random
-from itertools import cycle
 from pathlib import Path
 
 import torch
 import torch.nn.functional as F
 import numpy as np
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Dataset, Subset
 
 from momask.models import (
     CodebookResidualTransformer,
@@ -31,7 +30,8 @@ from momask.models import (
     ResidualTransformer,
     TokenTransformerConfig,
 )
-from shared.data import CanonicalHumanML3DDataset, H3D263Dataset, collate
+from momask.data_utils import normalize_motion, token_mask_from_frame_mask
+from shared.data import CanonicalHumanML3DDataset, CanonicalHumanML3DWindowDataset, H3D263Dataset, collate
 from shared.text import CLIPTextEncoder, RandomTextEncoder, TextEncoder
 from shared.geometry import H3D_FEATURE_DIM, recover_joints_from_ric
 
@@ -67,6 +67,18 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--vq-only", action="store_true", help="Train/evaluate only the VQ-VAE tokenizer, then save.")
     p.add_argument(
+        "--vq-window-dataset",
+        action="store_true",
+        help="For canonical VQ-only training, index fixed windows instead of one random crop per clip.",
+    )
+    p.add_argument("--vq-window-stride", type=int, default=1)
+    p.add_argument(
+        "--vq-window-preload",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Preload canonical motions once instead of opening one NumPy file per RVQ window.",
+    )
+    p.add_argument(
         "--load-vq-checkpoint",
         default=None,
         help="Load a pretrained VQ-VAE checkpoint and train/evaluate token transformers from it.",
@@ -90,6 +102,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--adam-beta1", type=float, default=0.9)
     p.add_argument("--adam-beta2", type=float, default=0.999)
     p.add_argument("--weight-decay", type=float, default=0.0)
+    p.add_argument("--warmup-steps", type=int, default=0)
+    p.add_argument("--lr-milestones", type=int, nargs="*", default=[])
+    p.add_argument("--lr-gamma", type=float, default=0.1)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--log-every", type=int, default=10)
@@ -128,6 +143,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--vq-use-ema", action="store_true", help="Use EMA-reset codebooks, as in the official MoMask RVQ.")
     p.add_argument("--vq-ema-decay", type=float, default=0.99)
     p.add_argument("--vq-codebook-sample-temp", type=float, default=0.0)
+    p.add_argument("--vq-arch", choices=["simple", "paper"], default="simple")
     p.add_argument(
         "--vq-velocity-weight",
         type=float,
@@ -190,7 +206,7 @@ class H3DNormalizer:
         return cls(torch.zeros(H3D_FEATURE_DIM), torch.ones(H3D_FEATURE_DIM))
 
     @classmethod
-    def from_dataset(cls, ds: Subset, feat_bias: float) -> "H3DNormalizer":
+    def from_dataset(cls, ds: Dataset, feat_bias: float) -> "H3DNormalizer":
         if feat_bias <= 0:
             raise ValueError("--feat-bias must be positive")
         count = 0
@@ -263,6 +279,7 @@ def restore_model_args(args: argparse.Namespace, ckpt: dict) -> None:
         "vq_use_ema",
         "vq_ema_decay",
         "vq_codebook_sample_temp",
+        "vq_arch",
         "no_momask_normalize",
         "feat_bias",
     )
@@ -279,6 +296,7 @@ def restore_model_args(args: argparse.Namespace, ckpt: dict) -> None:
         "shared_residual_head",
         "residual_arch",
         "residual_share_weight",
+        "max_seq_len",
     )
     restore_names = vq_names + (transformer_names if "masked_transformer" in ckpt else ())
     for name in restore_names:
@@ -307,13 +325,6 @@ def masked_mae(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> 
     return err.sum() / (mask.sum().clamp_min(1).to(pred.dtype) * pred.shape[-1])
 
 
-def token_mask_from_frame_mask(mask: torch.Tensor, token_len: int) -> torch.Tensor:
-    if mask.shape[1] == token_len:
-        return mask
-    pooled = F.adaptive_max_pool1d(mask.float().unsqueeze(1), token_len).squeeze(1)
-    return pooled > 0.5
-
-
 @torch.no_grad()
 def root_trajectory_metrics(motion: torch.Tensor, mask: torch.Tensor) -> dict[str, float]:
     joints = recover_joints_from_ric(motion.float())
@@ -340,15 +351,16 @@ def evaluate_vq(
     max_batches: int,
     normalizer: H3DNormalizer,
 ) -> dict[str, float]:
+    was_training = vqvae.training
     vqvae.eval()
     maes, raw_maes, losses, velocity_losses, explicit_losses, ppls = [], [], [], [], [], []
     real_drifts, recon_drifts, real_spans, recon_spans = [], [], [], []
     for i, batch in enumerate(loader):
         if i >= max_batches:
             break
-        raw_x = batch.x1.to(device)
-        x = normalizer.transform(raw_x)
         mask = batch.mask.to(device)
+        raw_x = batch.x1.to(device)
+        x = normalize_motion(raw_x, mask, normalizer)
         out = vqvae(x, mask=mask)
         maes.append(float(masked_mae(out.recon, x, mask)))
         raw_recon = normalizer.inverse(out.recon)
@@ -363,7 +375,8 @@ def evaluate_vq(
         recon_drifts.append(recon_root["end_drift"])
         real_spans.append(real_root["xz_span"])
         recon_spans.append(recon_root["xz_span"])
-    vqvae.train()
+    if was_training:
+        vqvae.train()
     return {
         "loss": sum(losses) / max(len(losses), 1),
         "recon_mae": sum(maes) / max(len(maes), 1),
@@ -415,7 +428,12 @@ def evaluate_tokens(
             mask=token_mask,
         )
         generated_base_accs.append(float((generated_base[token_mask] == tok[:, 0][token_mask]).float().mean()))
-        generated_tokens = residual_model.generate_residuals(generated_base, cond=cond, guidance_scale=1.0, mask=token_mask)
+        generated_tokens = residual_model.generate_residuals(
+            generated_base,
+            cond=cond,
+            guidance_scale=1.0,
+            mask=token_mask,
+        )
         teacher_residual_tokens = residual_model.generate_residuals(
             tok[:, 0],
             cond=cond,
@@ -469,10 +487,10 @@ def cache_token_batches(
     vqvae.eval()
     cached = []
     for batch in loader:
-        x = normalizer.transform(batch.x1.to(device))
         frame_mask = batch.mask.to(device)
+        x = normalize_motion(batch.x1.to(device), frame_mask, normalizer)
         tokens = vqvae.encode_to_tokens(x).cpu()
-        token_mask = token_mask_from_frame_mask(frame_mask, tokens.shape[-1]).cpu()
+        token_mask = token_mask_from_frame_mask(frame_mask, tokens.shape[-1], vqvae.downsample).cpu()
         cond = text_encoder.encode(batch.texts, device=device).cpu()
         cached.append({
             "tokens": tokens,
@@ -492,10 +510,27 @@ def cycle_cached(cached_batches: list[dict[str, torch.Tensor | list[str]]]):
 def stack_token_cache(
     cached_batches: list[dict[str, torch.Tensor | list[str]]],
     device: torch.device,
+    max_token_len: int,
 ) -> dict[str, torch.Tensor]:
+    if max_token_len <= 0:
+        raise ValueError("max_token_len must be positive")
+    tokens = []
+    masks = []
+    for batch in cached_batches:
+        batch_tokens = batch["tokens"]  # type: ignore[assignment]
+        batch_mask = batch["token_mask"]  # type: ignore[assignment]
+        if not isinstance(batch_tokens, torch.Tensor) or not isinstance(batch_mask, torch.Tensor):
+            raise TypeError("cached token batches must contain tensors")
+        if batch_tokens.shape[-1] > max_token_len:
+            raise ValueError(
+                f"cached token length {batch_tokens.shape[-1]} exceeds configured maximum {max_token_len}"
+            )
+        pad = max_token_len - batch_tokens.shape[-1]
+        tokens.append(F.pad(batch_tokens, (0, pad), value=0))
+        masks.append(F.pad(batch_mask, (0, pad), value=False))
     return {
-        "tokens": torch.cat([batch["tokens"] for batch in cached_batches], dim=0).to(device),  # type: ignore[list-item]
-        "token_mask": torch.cat([batch["token_mask"] for batch in cached_batches], dim=0).to(device),  # type: ignore[list-item]
+        "tokens": torch.cat(tokens, dim=0).to(device),
+        "token_mask": torch.cat(masks, dim=0).to(device),
         "cond": torch.cat([batch["cond"] for batch in cached_batches], dim=0).to(device),  # type: ignore[list-item]
     }
 
@@ -504,6 +539,34 @@ def sample_token_cache(cache: dict[str, torch.Tensor], batch_size: int) -> dict[
     n = cache["tokens"].shape[0]
     idx = torch.randint(n, (batch_size,), device=cache["tokens"].device)
     return {key: value[idx] for key, value in cache.items()}
+
+
+def cycle_loader(loader: DataLoader):
+    """Iterate forever without caching and replaying the first epoch."""
+    while True:
+        yield from loader
+
+
+def scheduled_lr(
+    base_lr: float,
+    step: int,
+    warmup_steps: int,
+    milestones: list[int],
+    gamma: float,
+) -> float:
+    if warmup_steps < 0:
+        raise ValueError("warmup_steps must be non-negative")
+    if not 0.0 < gamma <= 1.0:
+        raise ValueError("lr_gamma must be in (0, 1]")
+    if warmup_steps > 0 and step <= warmup_steps:
+        return base_lr * step / (warmup_steps + 1)
+    drops = sum(step > milestone for milestone in milestones)
+    return base_lr * (gamma ** drops)
+
+
+def set_optimizer_lr(optimizer: torch.optim.Optimizer, lr: float) -> None:
+    for group in optimizer.param_groups:
+        group["lr"] = lr
 
 
 def save_vq_train_checkpoint(
@@ -535,6 +598,8 @@ def main() -> None:
     torch.manual_seed(args.seed)
     random.seed(args.seed)
     device = torch.device(args.device)
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     loaded_token_ckpt = torch_load(args.load_token_checkpoint) if args.load_token_checkpoint else None
@@ -548,7 +613,23 @@ def main() -> None:
     if args.vq_steps <= 0 and loaded_vq_ckpt is None:
         raise ValueError("--vq-steps must be positive unless --load-vq-checkpoint or --load-token-checkpoint is set")
 
-    if args.canonical_h3d_dir:
+    is_window_dataset = bool(args.canonical_h3d_dir and args.vq_only and args.vq_window_dataset)
+    if is_window_dataset:
+        ds = CanonicalHumanML3DWindowDataset(
+            root=Path(args.data_root),
+            canonical_dir=Path(args.canonical_h3d_dir),
+            split=args.split,
+            window_size=args.max_seq_len,
+            window_stride=args.vq_window_stride,
+            subset_n=args.max_clips,
+            preload=args.vq_window_preload,
+        )
+        feature_source = (
+            f"canonical-windows:{args.canonical_h3d_dir} "
+            f"window={args.max_seq_len} stride={args.vq_window_stride} "
+            f"preload={args.vq_window_preload} skipped_short={ds.num_skipped_short}"
+        )
+    elif args.canonical_h3d_dir:
         ds = CanonicalHumanML3DDataset(
             root=Path(args.data_root),
             canonical_dir=Path(args.canonical_h3d_dir),
@@ -566,33 +647,53 @@ def main() -> None:
             mirror_augment=False,
         )
         feature_source = "packed-derived h3d_263"
-    n = min(args.max_clips, len(ds))
-    if n <= 0:
+    if is_window_dataset:
+        train_ds = ds
+        n_items = len(ds)
+        n_clips = ds.num_clips  # type: ignore[attr-defined]
+    else:
+        n_items = min(args.max_clips, len(ds))
+        train_ds = Subset(ds, list(range(n_items)))
+        n_clips = n_items
+    if n_items <= 0:
         raise RuntimeError(f"no clips available in split={args.split!r}")
-    small = Subset(ds, list(range(n)))
     if loaded_vq_ckpt is not None and "normalizer" in loaded_vq_ckpt:
         normalizer = H3DNormalizer.from_state_dict(loaded_vq_ckpt["normalizer"])
     else:
+        if is_window_dataset and not args.no_momask_normalize and not (args.h3d_mean and args.h3d_std):
+            raise ValueError(
+                "fixed-window RVQ training requires --h3d-mean and --h3d-std; "
+                "scanning every overlapping window would bias and duplicate normalization statistics"
+            )
         normalizer = (
             H3DNormalizer.identity()
             if args.no_momask_normalize
             else H3DNormalizer.from_files(args.h3d_mean, args.h3d_std, feat_bias=args.feat_bias)
             if args.h3d_mean and args.h3d_std
-            else H3DNormalizer.from_dataset(small, feat_bias=args.feat_bias)
+            else H3DNormalizer.from_dataset(train_ds, feat_bias=args.feat_bias)
         )
+    loader_kwargs: dict[str, object] = {}
+    if args.num_workers > 0:
+        loader_kwargs.update(persistent_workers=True, prefetch_factor=4)
     loader = DataLoader(
-        small,
+        train_ds,
         batch_size=args.batch_size,
         shuffle=True,
         collate_fn=collate,
         num_workers=args.num_workers,
         pin_memory=device.type == "cuda",
+        drop_last=is_window_dataset and n_items >= args.batch_size,
+        **loader_kwargs,
     )
-    batches = cycle(loader)
+    batches = cycle_loader(loader)
 
     print(f"[momask-smoke] data_root={args.data_root}")
     print(f"[momask-smoke] feature_source={feature_source}")
-    print(f"[momask-smoke] clips={n} batch_size={args.batch_size} device={device}")
+    print(
+        f"[momask-smoke] clips={n_clips} items={n_items} "
+        f"batches_per_epoch={len(loader)} batch_size={args.batch_size} "
+        f"workers={args.num_workers} device={device}"
+    )
     print(f"[momask-smoke] output_dir={output_dir}")
     print(
         "[momask-smoke] momask_normalize="
@@ -622,6 +723,7 @@ def main() -> None:
         use_ema_quantizer=args.vq_use_ema,
         ema_decay=args.vq_ema_decay,
         codebook_sample_temp=args.vq_codebook_sample_temp,
+        architecture=args.vq_arch,
     ).to(device)
     vq_opt = torch.optim.AdamW(
         vqvae.parameters(),
@@ -645,10 +747,13 @@ def main() -> None:
         )
 
     first_recon = None
+    vqvae.train()
     for step in range(start_vq_step + 1, args.vq_steps + 1):
+        current_lr = scheduled_lr(args.lr, step, args.warmup_steps, args.lr_milestones, args.lr_gamma)
+        set_optimizer_lr(vq_opt, current_lr)
         batch = next(batches)
-        x = normalizer.transform(batch.x1.to(device))
         mask = batch.mask.to(device)
+        x = normalize_motion(batch.x1.to(device), mask, normalizer)
         out = vqvae(x, mask=mask)
         vq_opt.zero_grad(set_to_none=True)
         out.loss.backward()
@@ -662,7 +767,8 @@ def main() -> None:
                 f"recon_mae={out.recon_loss.item():.5f} "
                 f"vel={out.velocity_loss.item():.5f} "
                 f"explicit={out.explicit_loss.item():.5f} "
-                f"vq={out.vq_loss.item():.5f} ppl={out.perplexity.item():.2f}",
+                f"vq={out.vq_loss.item():.5f} ppl={out.perplexity.item():.2f} "
+                f"lr={current_lr:.3e}",
                 flush=True,
             )
         if args.vq_only and args.save_every > 0 and step % args.save_every == 0:
@@ -670,15 +776,16 @@ def main() -> None:
 
     eval_batch = next(iter(loader))
     eval_raw_x = eval_batch.x1.to(device)
-    eval_x = normalizer.transform(eval_raw_x)
     eval_mask = eval_batch.mask.to(device)
+    eval_x = normalize_motion(eval_raw_x, eval_mask, normalizer)
     vq_eval = evaluate_vq(vqvae, loader, device, args.eval_batches, normalizer)
+    vqvae.eval()
     with torch.no_grad():
         eval_out = vqvae(eval_x, mask=eval_mask)
         tokens = eval_out.tokens.detach()
         recon = eval_out.recon.detach()
         raw_recon = normalizer.inverse(recon)
-        eval_token_mask = token_mask_from_frame_mask(eval_mask, tokens.shape[-1])
+        eval_token_mask = token_mask_from_frame_mask(eval_mask, tokens.shape[-1], args.downsample)
     print(
         f"[vq summary] first_train_recon_mae={(first_recon if first_recon is not None else float('nan')):.5f} "
         f"eval_recon_mae={vq_eval['recon_mae']:.5f} "
@@ -730,7 +837,8 @@ def main() -> None:
         cache_device = device if args.cache_token_device == "cuda" else torch.device("cpu")
         if cache_device.type == "cuda" and device.type != "cuda":
             raise ValueError("--cache-token-device cuda requires --device cuda")
-        token_cache = stack_token_cache(cached_batches, cache_device)
+        max_token_len = math.ceil(args.max_seq_len / args.downsample)
+        token_cache = stack_token_cache(cached_batches, cache_device, max_token_len)
         print(
             f"[token data] cached fixed VQ tokens batches={len(cached_batches)} "
             f"samples={n_cached} train_batch={token_batch_size} cache_device={cache_device}"
@@ -797,14 +905,16 @@ def main() -> None:
 
     vqvae.eval()
     for step in range(start_token_step + 1, args.token_steps + 1):
+        current_lr = scheduled_lr(args.lr, step, args.warmup_steps, args.lr_milestones, args.lr_gamma)
+        set_optimizer_lr(token_opt, current_lr)
         if args.live_token_crops:
             batch = next(batches)
-            x = normalizer.transform(batch.x1.to(device))
             mask = batch.mask.to(device)
+            x = normalize_motion(batch.x1.to(device), mask, normalizer)
             cond = text_encoder.encode(batch.texts, device=device)
             with torch.no_grad():
                 tok = vqvae.encode_to_tokens(x)
-            token_mask = token_mask_from_frame_mask(mask, tok.shape[-1])
+            token_mask = token_mask_from_frame_mask(mask, tok.shape[-1], args.downsample)
         else:
             if token_cache is None:
                 raise RuntimeError("token cache was not built")
@@ -857,7 +967,8 @@ def main() -> None:
             )
             print(
                 f"[tok {step:04d}] loss={loss.item():.5f} "
-                f"base_ce={base_loss.item():.5f} residual_ce={res_loss.item():.5f} {res_levels}",
+                f"base_ce={base_loss.item():.5f} residual_ce={res_loss.item():.5f} "
+                f"lr={current_lr:.3e} {res_levels}",
                 flush=True,
             )
         if args.save_every > 0 and step % args.save_every == 0:
@@ -917,9 +1028,17 @@ def main() -> None:
             guidance_scale=1.0,
             mask=eval_token_mask,
         )
-        base_only = normalizer.inverse(vqvae.decode_from_tokens(base.unsqueeze(1), target_len=eval_x.shape[1]))
+        base_only = normalizer.inverse(
+            vqvae.decode_from_tokens(
+                base.unsqueeze(1),
+                target_len=eval_x.shape[1],
+                token_mask=eval_token_mask,
+            )
+        )
         gen_tokens = residual_model.generate_residuals(base, cond=cond, guidance_scale=1.0, mask=eval_token_mask)
-        gen = normalizer.inverse(vqvae.decode_from_tokens(gen_tokens, target_len=eval_x.shape[1]))
+        gen = normalizer.inverse(
+            vqvae.decode_from_tokens(gen_tokens, target_len=eval_x.shape[1], token_mask=eval_token_mask)
+        )
         teacher_residual_tokens = residual_model.generate_residuals(
             tokens[:, 0],
             cond=cond,
@@ -927,11 +1046,19 @@ def main() -> None:
             mask=eval_token_mask,
         )
         teacher_residual = normalizer.inverse(
-            vqvae.decode_from_tokens(teacher_residual_tokens, target_len=eval_x.shape[1])
+            vqvae.decode_from_tokens(
+                teacher_residual_tokens,
+                target_len=eval_x.shape[1],
+                token_mask=eval_token_mask,
+            )
         )
-    print(f"[generate] tokens={tuple(gen_tokens.shape)} motion={tuple(gen.shape)} finite={bool(torch.isfinite(gen).all())}")
+    print(
+        f"[generate] tokens={tuple(gen_tokens.shape)} motion={tuple(gen.shape)} "
+        f"finite={bool(torch.isfinite(gen).all())}"
+    )
 
     ckpt = {
+        "step": args.token_steps,
         "args": vars(args),
         "normalizer": normalizer.state_dict(),
         "vqvae": vqvae.state_dict(),

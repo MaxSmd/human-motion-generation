@@ -127,31 +127,42 @@ class MaskedMotionTransformer(_TransformerBackbone):
         B, T = tokens.shape
         device = tokens.device
         if force_full_mask:
-            ratio = torch.ones(B, device=device)
+            predict_mask = (
+                valid_mask.bool().clone()
+                if valid_mask is not None
+                else torch.ones(B, T, dtype=torch.bool, device=device)
+            )
+            corrupted = torch.where(predict_mask, self.mask_token_id, tokens)
         else:
             tau = torch.rand(B, device=device)
             ratio = torch.cos(math.pi * tau / 2.0).clamp_min(1.0 / max(T, 1))
-        corrupted = tokens.clone()
-        predict_mask = torch.zeros(B, T, dtype=torch.bool, device=device)
-        for i in range(B):
-            candidates = valid_mask[i] if valid_mask is not None else torch.ones(T, dtype=torch.bool, device=device)
-            idx = candidates.nonzero(as_tuple=False).flatten()
-            if idx.numel() == 0:
-                continue
-            n = max(1, int(math.ceil(idx.numel() * float(ratio[i]))))
-            chosen = idx[torch.randperm(idx.numel(), device=device)[:n]]
-            predict_mask[i, chosen] = True
-        replace_prob = torch.rand(B, T, device=device)
-        random_tokens = torch.randint_like(corrupted, high=self.cfg.vocab_size)
-        corrupted = torch.where(predict_mask & (replace_prob < 0.8), self.mask_token_id, corrupted)
-        corrupted = torch.where(
-            predict_mask & (replace_prob >= 0.8) & (replace_prob < 0.9),
-            random_tokens,
-            corrupted,
-        )
+            corrupted = tokens.clone()
+            predict_mask = torch.zeros(B, T, dtype=torch.bool, device=device)
+            for i in range(B):
+                candidates = (
+                    valid_mask[i]
+                    if valid_mask is not None
+                    else torch.ones(T, dtype=torch.bool, device=device)
+                )
+                idx = candidates.nonzero(as_tuple=False).flatten()
+                if idx.numel() == 0:
+                    continue
+                n = max(1, int(math.ceil(idx.numel() * float(ratio[i]))))
+                chosen = idx[torch.randperm(idx.numel(), device=device)[:n]]
+                predict_mask[i, chosen] = True
+            replace_prob = torch.rand(B, T, device=device)
+            random_tokens = torch.randint_like(corrupted, high=self.cfg.vocab_size)
+            corrupted = torch.where(predict_mask & (replace_prob < 0.8), self.mask_token_id, corrupted)
+            corrupted = torch.where(
+                predict_mask & (replace_prob >= 0.8) & (replace_prob < 0.9),
+                random_tokens,
+                corrupted,
+            )
         drop = torch.rand(B, device=device) < cond_drop_prob
         logits = self(corrupted, cond=cond, mask=valid_mask, drop_cond_mask=drop)
         loss_mask = predict_mask if valid_mask is None else predict_mask & valid_mask
+        if not bool(loss_mask.any()):
+            raise ValueError("masked-transformer loss requires at least one valid token")
         return F.cross_entropy(logits[loss_mask], tokens[loss_mask])
 
     @torch.no_grad()
@@ -271,6 +282,8 @@ class ResidualTransformer(_TransformerBackbone):
         logits = self(prev, target_level, cond=cond, mask=valid_mask, drop_cond_mask=drop)
         if valid_mask is None:
             return F.cross_entropy(logits.reshape(-1, logits.shape[-1]), target.reshape(-1))
+        if not bool(valid_mask.any()):
+            raise ValueError("residual-transformer loss requires at least one valid token")
         return F.cross_entropy(logits[valid_mask], target[valid_mask])
 
     @torch.no_grad()
@@ -447,6 +460,8 @@ class CodebookResidualTransformer(_TransformerBackbone):
         logits = self(prev, target_level, cond=cond, mask=valid_mask, drop_cond_mask=drop)
         if valid_mask is None:
             return F.cross_entropy(logits.reshape(-1, logits.shape[-1]), target.reshape(-1))
+        if not bool(valid_mask.any()):
+            raise ValueError("residual-transformer loss requires at least one valid token")
         return F.cross_entropy(logits[valid_mask], target[valid_mask])
 
     @torch.no_grad()

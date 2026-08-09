@@ -27,7 +27,6 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 from torch import Tensor
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -39,6 +38,7 @@ from momask.models import (
     ResidualTransformer,
     TokenTransformerConfig,
 )
+from momask.data_utils import normalize_motion, token_mask_from_frame_mask
 from shared.data import H3D263Dataset, collate
 from shared.text import CLIPTextEncoder, RandomTextEncoder, TextEncoder
 from shared.geometry import H3D_FEATURE_DIM, quat_rotate, recover_joints_from_ric
@@ -164,6 +164,7 @@ def build_models(ckpt: dict, device: torch.device):
         use_ema_quantizer=bool(a.get("vq_use_ema", False)),
         ema_decay=float(a.get("vq_ema_decay", 0.99)),
         codebook_sample_temp=float(a.get("vq_codebook_sample_temp", 0.0)),
+        architecture=str(a.get("vq_arch", "simple")),
     ).to(device)
     cfg = TokenTransformerConfig(
         vocab_size=int(a.get("codebook_size", 64)),
@@ -272,13 +273,6 @@ def encode_text_batch(
         missing_texts = [texts[i] for i in missing_idxs]
         out[missing_idxs] = evaluator.encode_text_from_strings(missing_texts).cpu().numpy()
     return out, len(missing_idxs)
-
-
-def token_mask_from_frame_mask(mask: Tensor, token_len: int) -> Tensor:
-    if mask.shape[1] == token_len:
-        return mask
-    pooled = F.adaptive_max_pool1d(mask.float().unsqueeze(1), token_len).squeeze(1)
-    return pooled > 0.5
 
 
 def load_canonical_motion_batch(
@@ -410,9 +404,9 @@ def generate_full(
     sample: bool,
     remask_kept_tokens: bool,
 ) -> Tensor:
-    x_norm = normalizer.transform(real_x)
+    x_norm = normalize_motion(real_x, frame_mask, normalizer)
     true_tokens = vqvae.encode_to_tokens(x_norm)
-    token_mask = token_mask_from_frame_mask(frame_mask, true_tokens.shape[-1])
+    token_mask = token_mask_from_frame_mask(frame_mask, true_tokens.shape[-1], vqvae.downsample)
     base = masked.generate(
         cond=cond,
         seq_len=true_tokens.shape[-1],
@@ -433,12 +427,15 @@ def generate_full(
         sample=sample,
         mask=token_mask,
     )
-    return normalizer.inverse(vqvae.decode_from_tokens(tokens, target_len=real_x.shape[1]))
+    return normalizer.inverse(
+        vqvae.decode_from_tokens(tokens, target_len=real_x.shape[1], token_mask=token_mask)
+    )
 
 
 @torch.no_grad()
 def vq_project(vqvae: MotionRVQVAE, normalizer: H3DNormalizer, motion: Tensor, frame_mask: Tensor) -> Tensor:
-    return normalizer.inverse(vqvae(normalizer.transform(motion), mask=frame_mask).recon)
+    normalized = normalize_motion(motion, frame_mask, normalizer)
+    return normalizer.inverse(vqvae(normalized, mask=frame_mask).recon)
 
 
 def compute_quality(real: np.ndarray, gen: np.ndarray, text: np.ndarray, diversity_times: int, seed: int) -> dict:

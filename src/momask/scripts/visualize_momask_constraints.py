@@ -22,7 +22,6 @@ import numpy as np
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import torch
-import torch.nn.functional as F
 from matplotlib.animation import FuncAnimation, PillowWriter
 from torch import Tensor
 
@@ -33,6 +32,7 @@ from momask.models import (
     ResidualTransformer,
     TokenTransformerConfig,
 )
+from momask.data_utils import normalize_motion, token_mask_from_frame_mask
 from shared.data import H3D263Dataset, collate
 from shared.text import CLIPTextEncoder, RandomTextEncoder, TextEncoder
 from shared.geometry import H3D_FEATURE_DIM, PARENTS, quat_rotate, recover_joints_from_ric
@@ -140,6 +140,7 @@ def build_models(ckpt: dict, device: torch.device):
         use_ema_quantizer=bool(a.get("vq_use_ema", False)),
         ema_decay=float(a.get("vq_ema_decay", 0.99)),
         codebook_sample_temp=float(a.get("vq_codebook_sample_temp", 0.0)),
+        architecture=str(a.get("vq_arch", "simple")),
     ).to(device)
     cfg = TokenTransformerConfig(
         vocab_size=int(a.get("codebook_size", 64)),
@@ -186,13 +187,6 @@ def load_canonical_sample(h3d_dir: str | Path, clip_id: str, max_len: int) -> Te
     if arr.ndim != 2 or arr.shape[1] != H3D_FEATURE_DIM:
         raise ValueError(f"{path} must have shape (T, {H3D_FEATURE_DIM}), got {tuple(arr.shape)}")
     return arr[:max_len]
-
-
-def token_mask_from_frame_mask(mask: Tensor, token_len: int) -> Tensor:
-    if mask.shape[1] == token_len:
-        return mask
-    pooled = F.adaptive_max_pool1d(mask.float().unsqueeze(1), token_len).squeeze(1)
-    return pooled > 0.5
 
 
 def root_xz(motion: Tensor) -> Tensor:
@@ -263,9 +257,9 @@ def generate_full(
     sample_tokens: bool,
     remask_kept_tokens: bool,
 ) -> Tensor:
-    x_norm = normalizer.transform(real_x)
+    x_norm = normalize_motion(real_x, frame_mask, normalizer)
     true_tokens = vqvae.encode_to_tokens(x_norm)
-    token_mask = token_mask_from_frame_mask(frame_mask, true_tokens.shape[-1])
+    token_mask = token_mask_from_frame_mask(frame_mask, true_tokens.shape[-1], vqvae.downsample)
     base = masked.generate(
         cond=cond,
         seq_len=true_tokens.shape[-1],
@@ -286,12 +280,15 @@ def generate_full(
         sample=sample_tokens,
         mask=token_mask,
     )
-    return normalizer.inverse(vqvae.decode_from_tokens(tokens, target_len=real_x.shape[1]))
+    return normalizer.inverse(
+        vqvae.decode_from_tokens(tokens, target_len=real_x.shape[1], token_mask=token_mask)
+    )
 
 
 @torch.no_grad()
 def vq_project(vqvae: MotionRVQVAE, normalizer: H3DNormalizer, motion: Tensor, frame_mask: Tensor) -> Tensor:
-    return normalizer.inverse(vqvae(normalizer.transform(motion), mask=frame_mask).recon)
+    normalized = normalize_motion(motion, frame_mask, normalizer)
+    return normalizer.inverse(vqvae(normalized, mask=frame_mask).recon)
 
 
 def axis_limits(joints_list: list[Tensor], target: Tensor) -> tuple[tuple[float, float], tuple[float, float], tuple[float, float]]:

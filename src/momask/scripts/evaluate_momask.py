@@ -29,7 +29,6 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 from torch import Tensor
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -41,6 +40,7 @@ from momask.models import (
     ResidualTransformer,
     TokenTransformerConfig,
 )
+from momask.data_utils import normalize_motion, token_mask_from_frame_mask
 from shared.data import H3D263Dataset, collate
 from shared.text import CLIPTextEncoder, RandomTextEncoder, TextEncoder
 from shared.geometry import H3D_FEATURE_DIM
@@ -162,13 +162,6 @@ def require_path(path: str | Path, what: str) -> Path:
     return path
 
 
-def token_mask_from_frame_mask(mask: Tensor, token_len: int) -> Tensor:
-    if mask.shape[1] == token_len:
-        return mask
-    pooled = F.adaptive_max_pool1d(mask.float().unsqueeze(1), token_len).squeeze(1)
-    return pooled > 0.5
-
-
 def ckpt_args(ckpt: dict) -> dict:
     args = ckpt.get("args", {})
     if not isinstance(args, dict):
@@ -206,6 +199,7 @@ def build_vqvae(ckpt: dict, device: torch.device) -> MotionRVQVAE:
         use_ema_quantizer=bool(a.get("vq_use_ema", False)),
         ema_decay=float(a.get("vq_ema_decay", 0.99)),
         codebook_sample_temp=float(a.get("vq_codebook_sample_temp", 0.0)),
+        architecture=str(a.get("vq_arch", "simple")),
     ).to(device)
     if "vqvae" not in ckpt:
         raise KeyError("checkpoint missing 'vqvae'")
@@ -383,13 +377,13 @@ def generate_variant(
     sample: bool,
     remask_kept_tokens: bool,
 ) -> Tensor:
-    x_norm = normalizer.transform(real_x)
+    x_norm = normalize_motion(real_x, frame_mask, normalizer)
 
     if variant == "recon":
         return normalizer.inverse(vqvae(x_norm, mask=frame_mask).recon)
 
     true_tokens = vqvae.encode_to_tokens(x_norm)
-    token_mask = token_mask_from_frame_mask(frame_mask, true_tokens.shape[-1])
+    token_mask = token_mask_from_frame_mask(frame_mask, true_tokens.shape[-1], vqvae.downsample)
     base = masked.generate(
         cond=cond,
         seq_len=true_tokens.shape[-1],
@@ -417,7 +411,9 @@ def generate_variant(
     else:
         raise ValueError(f"unknown variant {variant!r}")
 
-    return normalizer.inverse(vqvae.decode_from_tokens(tokens, target_len=real_x.shape[1]))
+    return normalizer.inverse(
+        vqvae.decode_from_tokens(tokens, target_len=real_x.shape[1], token_mask=token_mask)
+    )
 
 
 def compute_metrics(real: np.ndarray, gen: np.ndarray, text: np.ndarray, diversity_times: int, seed: int) -> dict:

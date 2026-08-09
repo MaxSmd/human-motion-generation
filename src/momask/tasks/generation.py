@@ -41,4 +41,4 @@ def generate_h3d263(
         guidance_scale=guidance_scale,
         mask=token_mask,
     )
-    return vqvae.decode_from_tokens(tokens, target_len=target_len)
+    return vqvae.decode_from_tokens(tokens, target_len=target_len, token_mask=token_mask)

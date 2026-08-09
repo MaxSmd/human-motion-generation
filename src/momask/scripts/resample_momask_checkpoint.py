@@ -44,6 +44,7 @@ def _build_models(args: dict, device: torch.device):
         use_ema_quantizer=bool(args.get("vq_use_ema", False)),
         ema_decay=float(args.get("vq_ema_decay", 0.99)),
         codebook_sample_temp=float(args.get("vq_codebook_sample_temp", 0.0)),
+        architecture=str(args.get("vq_arch", "simple")),
     ).to(device)
     cfg = TokenTransformerConfig(
         vocab_size=int(args["codebook_size"]),
@@ -129,14 +130,20 @@ def main() -> None:
             guidance_scale=args.guidance_scale,
             mask=token_mask,
         )
-        base_only = _inverse_normalize(vqvae.decode_from_tokens(base.unsqueeze(1), target_len=target_len), ckpt)
+        base_only = _inverse_normalize(
+            vqvae.decode_from_tokens(base.unsqueeze(1), target_len=target_len, token_mask=token_mask),
+            ckpt,
+        )
         gen_tokens = residual_model.generate_residuals(
             base,
             cond=cond,
             guidance_scale=args.guidance_scale,
             mask=token_mask,
         )
-        gen = _inverse_normalize(vqvae.decode_from_tokens(gen_tokens, target_len=target_len), ckpt)
+        gen = _inverse_normalize(
+            vqvae.decode_from_tokens(gen_tokens, target_len=target_len, token_mask=token_mask),
+            ckpt,
+        )
         teacher_residual_tokens = residual_model.generate_residuals(
             true_tokens[:, 0],
             cond=cond,
@@ -144,7 +151,11 @@ def main() -> None:
             mask=token_mask,
         )
         teacher_residual = _inverse_normalize(
-            vqvae.decode_from_tokens(teacher_residual_tokens, target_len=target_len),
+            vqvae.decode_from_tokens(
+                teacher_residual_tokens,
+                target_len=target_len,
+                token_mask=token_mask,
+            ),
             ckpt,
         )
 

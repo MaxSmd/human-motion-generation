@@ -42,6 +42,7 @@ LOG_EVERY="${LOG_EVERY:-1000}"
 EVAL_BATCHES="${EVAL_BATCHES:-32}"
 MAX_CLIPS="${MAX_CLIPS:-999999}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
+NUM_WORKERS="${NUM_WORKERS:-0}"
 TOKEN_BATCH_SIZE="${TOKEN_BATCH_SIZE:-128}"
 MAX_SEQ_LEN="${MAX_SEQ_LEN:-80}"
 TEXT_ENCODER="${TEXT_ENCODER:-random}"
@@ -63,6 +64,9 @@ BASE_FULL_MASK_PROB="${BASE_FULL_MASK_PROB:-0.3}"
 GENERATION_STEPS="${GENERATION_STEPS:-10}"
 CACHE_TOKEN_DEVICE="${CACHE_TOKEN_DEVICE:-cuda}"
 LIVE_TOKEN_CROPS="${LIVE_TOKEN_CROPS:-0}"
+WARMUP_STEPS="${WARMUP_STEPS:-0}"
+LR_MILESTONES="${LR_MILESTONES:-}"
+LR_GAMMA="${LR_GAMMA:-0.1}"
 
 TOKEN_CKPT_ARG=""
 if [ -n "${TOKEN_CKPT}" ]; then
@@ -89,10 +93,11 @@ echo "[momask-tokens] vq_ckpt=${VQ_CKPT}"
 echo "[momask-tokens] token_ckpt=${TOKEN_CKPT:-<none>}"
 echo "[momask-tokens] masked_ckpt=${MASKED_CKPT:-<none>}"
 echo "[momask-tokens] output_dir=${OUTPUT_DIR}"
-echo "[momask-tokens] token_steps=${TOKEN_STEPS} max_clips=${MAX_CLIPS} batch_size=${BATCH_SIZE} token_batch_size=${TOKEN_BATCH_SIZE} max_seq_len=${MAX_SEQ_LEN}"
+echo "[momask-tokens] token_steps=${TOKEN_STEPS} max_clips=${MAX_CLIPS} batch_size=${BATCH_SIZE} token_batch_size=${TOKEN_BATCH_SIZE} num_workers=${NUM_WORKERS} max_seq_len=${MAX_SEQ_LEN}"
 echo "[momask-tokens] text_encoder=${TEXT_ENCODER} clip_model=${CLIP_MODEL} clip_backend=${CLIP_BACKEND}"
 echo "[momask-tokens] transformer hidden=${TRANSFORMER_HIDDEN_DIM} depth=${TRANSFORMER_DEPTH} heads=${TRANSFORMER_HEADS} ffn=${TRANSFORMER_FFN_DIM} dropout=${TRANSFORMER_DROPOUT}"
 echo "[momask-tokens] lr=${TOKEN_LR} residual_arch=${RESIDUAL_ARCH} residual_share_weight=${RESIDUAL_SHARE_WEIGHT} freeze_masked=${FREEZE_MASKED} live_token_crops=${LIVE_TOKEN_CROPS} base_full_mask_prob=${BASE_FULL_MASK_PROB} generation_steps=${GENERATION_STEPS}"
+echo "[momask-tokens] warmup_steps=${WARMUP_STEPS} lr_milestones=${LR_MILESTONES:-<none>} lr_gamma=${LR_GAMMA}"
 
 RESIDUAL_SHARE_ARG=""
 if [ "${RESIDUAL_SHARE_WEIGHT}" = "1" ]; then
@@ -105,6 +110,10 @@ fi
 LIVE_TOKEN_CROPS_ARG=""
 if [ "${LIVE_TOKEN_CROPS}" = "1" ]; then
     LIVE_TOKEN_CROPS_ARG="--live-token-crops"
+fi
+LR_MILESTONES_ARG=""
+if [ -n "${LR_MILESTONES}" ]; then
+    LR_MILESTONES_ARG="--lr-milestones ${LR_MILESTONES}"
 fi
 
 enroot start \
@@ -126,6 +135,7 @@ enroot start \
             ${CANONICAL_ARG} \\
             --max-clips ${MAX_CLIPS} \\
             --batch-size ${BATCH_SIZE} \\
+            --num-workers ${NUM_WORKERS} \\
             --token-batch-size ${TOKEN_BATCH_SIZE} \\
             --max-seq-len ${MAX_SEQ_LEN} \\
             --text-encoder ${TEXT_ENCODER} \\
@@ -138,6 +148,9 @@ enroot start \
             --vq-steps 0 \\
             --token-steps ${TOKEN_STEPS} \\
             --lr ${TOKEN_LR} \\
+            --warmup-steps ${WARMUP_STEPS} \\
+            ${LR_MILESTONES_ARG} \\
+            --lr-gamma ${LR_GAMMA} \\
             --text-dim 64 \\
             --transformer-hidden-dim ${TRANSFORMER_HIDDEN_DIM} \\
             --transformer-depth ${TRANSFORMER_DEPTH} \\
