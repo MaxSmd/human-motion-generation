@@ -249,6 +249,24 @@ class CanonicalHumanML3DWindowDataset(Dataset):
     def __len__(self) -> int:
         return self.num_windows
 
+    def materialize_frames_and_window_offsets(self) -> tuple[np.ndarray, np.ndarray]:
+        """Pack source motions and return each window's start in that packed array."""
+        motions: list[np.ndarray] = []
+        window_offsets: list[np.ndarray] = []
+        frame_offset = 0
+        previous_end = 0
+        for motion_idx, stored in enumerate(self._motions):
+            arr = np.load(stored, mmap_mode="r") if isinstance(stored, Path) else stored
+            motion = np.asarray(arr, dtype=np.float32)
+            count = self._window_ends[motion_idx] - previous_end
+            motions.append(motion)
+            window_offsets.append(
+                frame_offset + np.arange(count, dtype=np.int64) * self.window_stride
+            )
+            frame_offset += motion.shape[0]
+            previous_end = self._window_ends[motion_idx]
+        return np.concatenate(motions, axis=0), np.concatenate(window_offsets, axis=0)
+
     def __getitem__(self, idx: int) -> HumanML3DSample:
         if idx < 0:
             idx += self.num_windows

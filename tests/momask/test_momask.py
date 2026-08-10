@@ -19,7 +19,12 @@ from momask.models import (
     TokenTransformerConfig,
 )
 from momask.data_utils import normalize_motion, token_mask_from_frame_mask
-from momask.scripts.train_momask_smoke import cycle_loader, stack_token_cache
+from momask.scripts.train_momask_smoke import (
+    FixedWindowTensorBatcher,
+    H3DNormalizer,
+    cycle_loader,
+    stack_token_cache,
+)
 from momask.tasks import generate_h3d263
 from shared.data import CanonicalHumanML3DWindowDataset, H3D263Dataset, collate
 from shared.geometry import H3D_FEATURE_DIM, NUM_JOINTS
@@ -227,6 +232,57 @@ def test_canonical_window_dataset_preloads_and_indexes_all_windows(tmp_path: Pat
     sample = ds[2]
     assert sample.clip_id == "000001:4"
     assert torch.equal(sample.x1, torch.from_numpy(first[4:8]))
+
+
+def test_fixed_window_tensor_batcher_preserves_window_contents(tmp_path: Path) -> None:
+    canonical = tmp_path / "new_joint_vecs"
+    canonical.mkdir()
+    (tmp_path / "splits.json").write_text(
+        json.dumps({"train": ["000001"], "val": [], "test": []})
+    )
+    motion = np.arange(7 * H3D_FEATURE_DIM, dtype=np.float32).reshape(7, H3D_FEATURE_DIM)
+    np.save(canonical / "000001.npy", motion)
+    ds = CanonicalHumanML3DWindowDataset(
+        tmp_path,
+        canonical,
+        window_size=4,
+        window_stride=1,
+        preload=True,
+        subset_n=999999,
+    )
+    batcher = FixedWindowTensorBatcher(
+        ds,
+        batch_size=4,
+        device=torch.device("cpu"),
+        normalizer=H3DNormalizer.identity(),
+        seed=0,
+    )
+    x, mask = batcher.next()
+    expected = {tuple(motion[start : start + 4, 0]) for start in range(4)}
+    actual = {tuple(window[:, 0].tolist()) for window in x}
+    assert actual == expected
+    assert mask.all()
+
+
+def test_all_valid_mask_matches_unmasked_vq_path() -> None:
+    torch.manual_seed(0)
+    model = MotionRVQVAE(
+        input_dim=H3D_FEATURE_DIM,
+        hidden_dim=16,
+        latent_dim=8,
+        num_quantizers=2,
+        codebook_size=8,
+        downsample=4,
+        num_res_blocks=1,
+        quantize_dropout_prob=0.0,
+    ).eval()
+    x = torch.randn(2, 64, H3D_FEATURE_DIM)
+    with torch.no_grad():
+        unmasked = model(x)
+        masked = model(x, mask=torch.ones(2, 64, dtype=torch.bool))
+    assert torch.equal(unmasked.tokens, masked.tokens)
+    assert torch.allclose(unmasked.recon, masked.recon)
+    assert torch.allclose(unmasked.loss, masked.loss)
 
 
 def test_token_mask_uses_floor_convolution_lengths() -> None:

@@ -66,6 +66,8 @@ class ResidualVectorQuantizer(nn.Module):
         self.use_ema = use_ema
         self.ema_decay = ema_decay
         self.sample_codebook_temp = sample_codebook_temp
+        self._ema_initialized_runtime = [False] * num_quantizers
+        self.register_load_state_dict_post_hook(self._reset_ema_runtime_state)
         self.codebooks = nn.ModuleList([nn.Embedding(codebook_size, dim) for _ in range(num_quantizers)])
         for emb in self.codebooks:
             nn.init.uniform_(emb.weight, -1.0 / codebook_size, 1.0 / codebook_size)
@@ -75,6 +77,11 @@ class ResidualVectorQuantizer(nn.Module):
             self.register_buffer("ema_sum", torch.zeros(num_quantizers, codebook_size, dim))
             self.register_buffer("ema_count", torch.zeros(num_quantizers, codebook_size))
             self.register_buffer("ema_initialized", torch.zeros(num_quantizers, dtype=torch.bool))
+
+    @staticmethod
+    def _reset_ema_runtime_state(module: nn.Module, _incompatible_keys: object) -> None:
+        if isinstance(module, ResidualVectorQuantizer):
+            module._ema_initialized_runtime = [False] * module.num_quantizers
 
     def _nearest_indices(self, residual: Tensor, codebook: nn.Embedding) -> Tensor:
         flat = residual.reshape(-1, self.dim)
@@ -108,7 +115,10 @@ class ResidualVectorQuantizer(nn.Module):
 
     @torch.no_grad()
     def _maybe_init_ema(self, level: int, residual: Tensor, mask: Tensor | None = None) -> None:
-        if not self.use_ema or bool(self.ema_initialized[level]):
+        if not self.use_ema or self._ema_initialized_runtime[level]:
+            return
+        if bool(self.ema_initialized[level]):
+            self._ema_initialized_runtime[level] = True
             return
         flat = self._valid_values(residual, mask)
         if flat.shape[0] == 0:
@@ -118,6 +128,7 @@ class ResidualVectorQuantizer(nn.Module):
         self.ema_sum[level].copy_(codes)
         self.ema_count[level].fill_(1.0)
         self.ema_initialized[level] = True
+        self._ema_initialized_runtime[level] = True
 
     @torch.no_grad()
     def _update_ema(

@@ -18,7 +18,7 @@
 
 set -euo pipefail
 
-export VQ_CKPT="${VQ_CKPT:-runs/momask-canonical-vq-paper-fixed-windows64-150k/momask_vq_latest.pt}"
+export VQ_CKPT="${VQ_CKPT:-runs/momask-canonical-vq-paper-gpucache64-50e/momask_vq_latest.pt}"
 export CANONICAL_H3D_DIR="${CANONICAL_H3D_DIR:-${HOME}/rmg-runs/h3d-canonical/new_joint_vecs}"
 export RUN_NAME="${RUN_NAME:-momask-canonical-tokens-paper384-vqwindows64-len196-clip200k}"
 export TOKEN_STEPS="${TOKEN_STEPS:-200000}"

@@ -16,6 +16,7 @@ import argparse
 import math
 import os
 import random
+import time
 from pathlib import Path
 
 import torch
@@ -58,6 +59,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-seq-len", type=int, default=80)
     p.add_argument("--min-seq-len", type=int, default=20)
     p.add_argument("--vq-steps", type=int, default=30)
+    p.add_argument(
+        "--vq-epochs",
+        type=int,
+        default=0,
+        help="When positive, derive VQ training steps from this many complete DataLoader epochs.",
+    )
     p.add_argument("--token-steps", type=int, default=20)
     p.add_argument(
         "--token-batch-size",
@@ -77,6 +84,15 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Preload canonical motions once instead of opening one NumPy file per RVQ window.",
+    )
+    p.add_argument(
+        "--vq-gpu-window-cache",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Keep canonical fixed-window source frames and their shuffled window index on the GPU. "
+            "This avoids host transfers while preserving the configured optimization batch size."
+        ),
     )
     p.add_argument(
         "--load-vq-checkpoint",
@@ -547,6 +563,56 @@ def cycle_loader(loader: DataLoader):
         yield from loader
 
 
+class FixedWindowTensorBatcher:
+    """Shuffle fixed windows while gathering them from one packed device tensor."""
+
+    def __init__(
+        self,
+        dataset: CanonicalHumanML3DWindowDataset,
+        batch_size: int,
+        device: torch.device,
+        normalizer: H3DNormalizer,
+        seed: int,
+    ) -> None:
+        if batch_size <= 0 or batch_size > len(dataset):
+            raise ValueError(f"batch_size must be in [1, {len(dataset)}], got {batch_size}")
+        frames_np, offsets_np = dataset.materialize_frames_and_window_offsets()
+        self.frames = torch.from_numpy(frames_np).to(device=device, non_blocking=True)
+        mean = normalizer.mean.to(device=device, dtype=self.frames.dtype)
+        std = normalizer.std.to(device=device, dtype=self.frames.dtype)
+        self.frames.sub_(mean).div_(std)
+        self.window_offsets = torch.from_numpy(offsets_np).to(device=device, non_blocking=True)
+        self.frame_range = torch.arange(dataset.window_size, device=device)
+        self.batch_size = batch_size
+        self.generator = torch.Generator(device=device).manual_seed(seed)
+        self.order = torch.empty(0, dtype=torch.long, device=device)
+        self.cursor = 0
+        self._reshuffle()
+
+    @property
+    def cache_nbytes(self) -> int:
+        tensors = (self.frames, self.window_offsets, self.frame_range, self.order)
+        return sum(t.numel() * t.element_size() for t in tensors)
+
+    def _reshuffle(self) -> None:
+        self.order = torch.randperm(
+            self.window_offsets.numel(),
+            generator=self.generator,
+            device=self.window_offsets.device,
+        )
+        self.cursor = 0
+
+    def next(self) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.cursor + self.batch_size > self.order.numel():
+            self._reshuffle()
+        batch_ids = self.order[self.cursor : self.cursor + self.batch_size]
+        self.cursor += self.batch_size
+        frame_ids = self.window_offsets[batch_ids, None] + self.frame_range[None, :]
+        x = self.frames[frame_ids]
+        mask = torch.ones(x.shape[:2], dtype=torch.bool, device=x.device)
+        return x, mask
+
+
 def scheduled_lr(
     base_lr: float,
     step: int,
@@ -610,8 +676,11 @@ def main() -> None:
     )
     if loaded_vq_ckpt is not None:
         restore_model_args(args, loaded_vq_ckpt)
-    if args.vq_steps <= 0 and loaded_vq_ckpt is None:
-        raise ValueError("--vq-steps must be positive unless --load-vq-checkpoint or --load-token-checkpoint is set")
+    if args.vq_steps <= 0 and args.vq_epochs <= 0 and loaded_vq_ckpt is None:
+        raise ValueError(
+            "--vq-steps or --vq-epochs must be positive unless "
+            "--load-vq-checkpoint or --load-token-checkpoint is set"
+        )
 
     is_window_dataset = bool(args.canonical_h3d_dir and args.vq_only and args.vq_window_dataset)
     if is_window_dataset:
@@ -685,7 +754,27 @@ def main() -> None:
         drop_last=is_window_dataset and n_items >= args.batch_size,
         **loader_kwargs,
     )
+    if args.vq_epochs > 0:
+        args.vq_steps = args.vq_epochs * len(loader)
+        print(
+            f"[momask-smoke] vq_epochs={args.vq_epochs} resolved_vq_steps={args.vq_steps}",
+            flush=True,
+        )
     batches = cycle_loader(loader)
+    gpu_window_batches = None
+    if args.vq_gpu_window_cache:
+        if not is_window_dataset:
+            raise ValueError("--vq-gpu-window-cache requires --vq-window-dataset with canonical VQ-only training")
+        if device.type != "cuda":
+            raise ValueError("--vq-gpu-window-cache requires a CUDA device")
+        gpu_window_batches = FixedWindowTensorBatcher(ds, args.batch_size, device, normalizer, args.seed)
+        cache_gib = gpu_window_batches.cache_nbytes / (1024 ** 3)
+        free_bytes, total_bytes = torch.cuda.mem_get_info(device)
+        print(
+            f"[momask-smoke] gpu_window_cache={cache_gib:.2f}GiB "
+            f"cuda_free={free_bytes / (1024 ** 3):.2f}GiB/{total_bytes / (1024 ** 3):.2f}GiB",
+            flush=True,
+        )
 
     print(f"[momask-smoke] data_root={args.data_root}")
     print(f"[momask-smoke] feature_source={feature_source}")
@@ -747,30 +836,53 @@ def main() -> None:
         )
 
     first_recon = None
+    log_start_step = start_vq_step
+    log_start_time = time.perf_counter()
     vqvae.train()
     for step in range(start_vq_step + 1, args.vq_steps + 1):
         current_lr = scheduled_lr(args.lr, step, args.warmup_steps, args.lr_milestones, args.lr_gamma)
         set_optimizer_lr(vq_opt, current_lr)
-        batch = next(batches)
-        mask = batch.mask.to(device)
-        x = normalize_motion(batch.x1.to(device), mask, normalizer)
-        out = vqvae(x, mask=mask)
+        if gpu_window_batches is not None:
+            x, mask = gpu_window_batches.next()
+        else:
+            batch = next(batches)
+            mask = batch.mask.to(device)
+            x = normalize_motion(batch.x1.to(device), mask, normalizer)
+        # Fixed windows have no padding. Avoid masked gathers and mask-induced
+        # device synchronizations in every RVQ level while keeping ragged
+        # batches on the mask-aware path.
+        out = vqvae(x, mask=None if is_window_dataset else mask)
         vq_opt.zero_grad(set_to_none=True)
         out.loss.backward()
         torch.nn.utils.clip_grad_norm_(vqvae.parameters(), 1.0)
         vq_opt.step()
+        if step == start_vq_step + 1 and device.type == "cuda":
+            print(
+                "[momask-smoke] cuda_memory "
+                f"allocated={torch.cuda.memory_allocated(device) / (1024 ** 3):.2f}GiB "
+                f"reserved={torch.cuda.memory_reserved(device) / (1024 ** 3):.2f}GiB "
+                f"peak={torch.cuda.max_memory_allocated(device) / (1024 ** 3):.2f}GiB",
+                flush=True,
+            )
         if step == 1:
             first_recon = float(out.recon_loss.detach())
         if step == 1 or step == args.vq_steps or step % args.log_every == 0:
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            now = time.perf_counter()
+            interval_steps = max(step - log_start_step, 1)
+            steps_per_sec = interval_steps / max(now - log_start_time, 1e-9)
             print(
                 f"[vq {step:04d}] loss={out.loss.item():.5f} "
                 f"recon_mae={out.recon_loss.item():.5f} "
                 f"vel={out.velocity_loss.item():.5f} "
                 f"explicit={out.explicit_loss.item():.5f} "
                 f"vq={out.vq_loss.item():.5f} ppl={out.perplexity.item():.2f} "
-                f"lr={current_lr:.3e}",
+                f"lr={current_lr:.3e} steps_per_sec={steps_per_sec:.2f}",
                 flush=True,
             )
+            log_start_step = step
+            log_start_time = now
         if args.vq_only and args.save_every > 0 and step % args.save_every == 0:
             save_vq_train_checkpoint(output_dir, step, args, normalizer, vqvae, vq_opt)
 

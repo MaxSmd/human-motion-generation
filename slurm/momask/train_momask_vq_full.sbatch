@@ -35,6 +35,7 @@ LOAD_VQ_CKPT="${LOAD_VQ_CKPT:-}"
 RUN_NAME="${RUN_NAME:-momask-full-vq-raw-${SLURM_JOB_ID:-$(date +%Y%m%d-%H%M%S)}}"
 OUTPUT_DIR="${OUTPUT_DIR:-runs/${RUN_NAME}}"
 VQ_STEPS="${VQ_STEPS:-100000}"
+VQ_EPOCHS="${VQ_EPOCHS:-0}"
 SAVE_EVERY="${SAVE_EVERY:-10000}"
 LOG_EVERY="${LOG_EVERY:-1000}"
 EVAL_BATCHES="${EVAL_BATCHES:-32}"
@@ -46,6 +47,7 @@ MIN_SEQ_LEN="${MIN_SEQ_LEN:-20}"
 VQ_WINDOW_DATASET="${VQ_WINDOW_DATASET:-0}"
 VQ_WINDOW_STRIDE="${VQ_WINDOW_STRIDE:-1}"
 VQ_WINDOW_PRELOAD="${VQ_WINDOW_PRELOAD:-1}"
+VQ_GPU_WINDOW_CACHE="${VQ_GPU_WINDOW_CACHE:-0}"
 NO_MOMASK_NORMALIZE="${NO_MOMASK_NORMALIZE:-1}"
 VQ_LR="${VQ_LR:-1e-4}"
 ADAM_BETA2="${ADAM_BETA2:-0.999}"
@@ -76,7 +78,7 @@ echo "[momask-vq] canonical_h3d_dir=${CANONICAL_H3D_DIR:-<packed-derived>}"
 echo "[momask-vq] h3d_mean=${H3D_MEAN:-<dataset-scan-or-identity>} h3d_std=${H3D_STD:-<dataset-scan-or-identity>}"
 echo "[momask-vq] load_vq_ckpt=${LOAD_VQ_CKPT:-<none>}"
 echo "[momask-vq] output_dir=${OUTPUT_DIR}"
-echo "[momask-vq] vq_steps=${VQ_STEPS} max_clips=${MAX_CLIPS} batch_size=${BATCH_SIZE} num_workers=${NUM_WORKERS} max_seq_len=${MAX_SEQ_LEN} min_seq_len=${MIN_SEQ_LEN} vq_window_dataset=${VQ_WINDOW_DATASET} vq_window_stride=${VQ_WINDOW_STRIDE} vq_window_preload=${VQ_WINDOW_PRELOAD} no_momask_normalize=${NO_MOMASK_NORMALIZE}"
+echo "[momask-vq] vq_steps=${VQ_STEPS} vq_epochs=${VQ_EPOCHS} max_clips=${MAX_CLIPS} batch_size=${BATCH_SIZE} num_workers=${NUM_WORKERS} max_seq_len=${MAX_SEQ_LEN} min_seq_len=${MIN_SEQ_LEN} vq_window_dataset=${VQ_WINDOW_DATASET} vq_window_stride=${VQ_WINDOW_STRIDE} vq_window_preload=${VQ_WINDOW_PRELOAD} vq_gpu_window_cache=${VQ_GPU_WINDOW_CACHE} no_momask_normalize=${NO_MOMASK_NORMALIZE}"
 echo "[momask-vq] lr=${VQ_LR} adam_beta2=${ADAM_BETA2} hidden=${VQ_HIDDEN_DIM} latent=${VQ_LATENT_DIM} quantizers=${NUM_QUANTIZERS} codebook=${CODEBOOK_SIZE} res_blocks=${VQ_RES_BLOCKS} downsample=${DOWNSAMPLE}"
 echo "[momask-vq] arch=${VQ_ARCH} recon_loss=${VQ_RECON_LOSS} commit=${VQ_COMMITMENT_WEIGHT} vel=${VQ_VELOCITY_WEIGHT} explicit=${VQ_EXPLICIT_WEIGHT} qdrop=${QUANTIZE_DROPOUT} ema=${VQ_USE_EMA} ema_decay=${VQ_EMA_DECAY} codebook_temp=${VQ_CODEBOOK_SAMPLE_TEMP}"
 echo "[momask-vq] warmup_steps=${WARMUP_STEPS} lr_milestones=${LR_MILESTONES:-<none>} lr_gamma=${LR_GAMMA}"
@@ -110,6 +112,10 @@ if [ "${VQ_WINDOW_DATASET}" = "1" ]; then
         VQ_WINDOW_ARG="${VQ_WINDOW_ARG} --no-vq-window-preload"
     fi
 fi
+VQ_GPU_CACHE_ARG=""
+if [ "${VQ_GPU_WINDOW_CACHE}" = "1" ]; then
+    VQ_GPU_CACHE_ARG="--vq-gpu-window-cache"
+fi
 LR_MILESTONES_ARG=""
 if [ -n "${LR_MILESTONES}" ]; then
     LR_MILESTONES_ARG="--lr-milestones ${LR_MILESTONES}"
@@ -137,10 +143,12 @@ enroot start \
             --max-seq-len ${MAX_SEQ_LEN} \\
             --min-seq-len ${MIN_SEQ_LEN} \\
             ${VQ_WINDOW_ARG} \\
+            ${VQ_GPU_CACHE_ARG} \\
             ${H3D_STATS_ARG} \\
             --vq-only \\
             ${LOAD_VQ_ARG} \\
             --vq-steps ${VQ_STEPS} \\
+            --vq-epochs ${VQ_EPOCHS} \\
             --lr ${VQ_LR} \\
             --adam-beta2 ${ADAM_BETA2} \\
             --warmup-steps ${WARMUP_STEPS} \\
