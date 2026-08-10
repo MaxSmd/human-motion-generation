@@ -97,7 +97,8 @@ class ResidualVectorQuantizer(nn.Module):
         )
         if self.training and self.sample_codebook_temp > 0.0:
             noise = torch.zeros_like(dist).uniform_(0, 1)
-            gumbel = -torch.log(-torch.log(noise.clamp_min(1e-20)).clamp_min(1e-20))
+            neg_log_noise = -torch.log(noise.clamp_min(1e-20))
+            gumbel = -torch.log(neg_log_noise.clamp_min(1e-20))
             idx = ((-dist / self.sample_codebook_temp) + gumbel).argmax(dim=1)
         else:
             idx = dist.argmin(dim=1)

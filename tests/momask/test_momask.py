@@ -304,6 +304,22 @@ def test_rvq_has_one_straight_through_gradient_path_per_level() -> None:
     assert (out.active_codes_per_level > 0).all()
 
 
+def test_rvq_gumbel_sampling_uses_multiple_equal_distance_codes() -> None:
+    torch.manual_seed(0)
+    quantizer = ResidualVectorQuantizer(
+        num_quantizers=1,
+        codebook_size=8,
+        dim=4,
+        quantize_dropout_prob=0.0,
+        sample_codebook_temp=0.5,
+    ).train()
+    quantizer.codebooks[0].weight.data.zero_()
+    out = quantizer(torch.zeros(16, 8, 4))
+
+    assert out.active_codes_per_level[0] > 1
+    assert out.perplexity_per_level[0] > 1.0
+
+
 def test_rvq_dropout_does_not_initialize_inactive_ema_levels(monkeypatch) -> None:
     quantizer = ResidualVectorQuantizer(
         num_quantizers=3,
