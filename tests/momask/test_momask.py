@@ -15,6 +15,7 @@ from torch.utils.data import DataLoader
 from momask.models import (
     MaskedMotionTransformer,
     MotionRVQVAE,
+    ResidualVectorQuantizer,
     ResidualTransformer,
     TokenTransformerConfig,
 )
@@ -283,6 +284,44 @@ def test_all_valid_mask_matches_unmasked_vq_path() -> None:
     assert torch.equal(unmasked.tokens, masked.tokens)
     assert torch.allclose(unmasked.recon, masked.recon)
     assert torch.allclose(unmasked.loss, masked.loss)
+
+
+def test_rvq_has_one_straight_through_gradient_path_per_level() -> None:
+    torch.manual_seed(0)
+    quantizer = ResidualVectorQuantizer(
+        num_quantizers=3,
+        codebook_size=8,
+        dim=4,
+        quantize_dropout_prob=0.0,
+    ).train()
+    z = torch.randn(2, 5, 4, requires_grad=True)
+    out = quantizer(z)
+    out.quantized.sum().backward()
+
+    assert torch.allclose(z.grad, torch.full_like(z, 3.0))
+    assert out.perplexity_per_level.shape == (3,)
+    assert out.active_codes_per_level.shape == (3,)
+    assert (out.active_codes_per_level > 0).all()
+
+
+def test_rvq_dropout_does_not_initialize_inactive_ema_levels(monkeypatch) -> None:
+    quantizer = ResidualVectorQuantizer(
+        num_quantizers=3,
+        codebook_size=4,
+        dim=3,
+        quantize_dropout_prob=1.0,
+        use_ema=True,
+    ).train()
+    monkeypatch.setattr(
+        torch,
+        "randint",
+        lambda _low, _high, _size: torch.tensor(1),
+    )
+    out = quantizer(torch.randn(2, 4, 3))
+
+    assert quantizer.ema_initialized.tolist() == [True, False, False]
+    assert out.perplexity_per_level[1:].tolist() == [0.0, 0.0]
+    assert out.active_codes_per_level[1:].tolist() == [0, 0]
 
 
 def test_token_mask_uses_floor_convolution_lengths() -> None:

@@ -22,6 +22,8 @@ class RVQOutput:
     indices: Tensor            # (B, Q, T)
     loss: Tensor
     perplexity: Tensor
+    perplexity_per_level: Tensor
+    active_codes_per_level: Tensor
 
 
 @dataclass
@@ -34,6 +36,8 @@ class RVQVAEOutput:
     explicit_loss: Tensor
     vq_loss: Tensor
     perplexity: Tensor
+    perplexity_per_level: Tensor
+    active_codes_per_level: Tensor
 
 
 class ResidualVectorQuantizer(nn.Module):
@@ -106,8 +110,7 @@ class ResidualVectorQuantizer(nn.Module):
             tiled = tiled + torch.randn_like(tiled) * (0.01 / (self.dim ** 0.5))
         else:
             tiled = flat
-        perm = torch.randperm(tiled.shape[0], device=flat.device)
-        return tiled[perm[: self.codebook_size]].detach()
+        return tiled[: self.codebook_size].detach()
 
     @staticmethod
     def _valid_values(x: Tensor, mask: Tensor | None) -> Tensor:
@@ -120,6 +123,10 @@ class ResidualVectorQuantizer(nn.Module):
         if bool(self.ema_initialized[level]):
             self._ema_initialized_runtime[level] = True
             return
+        if not self.training:
+            raise RuntimeError(
+                f"EMA codebook level {level} is uninitialized; train or load a VQ checkpoint before evaluation"
+            )
         flat = self._valid_values(residual, mask)
         if flat.shape[0] == 0:
             raise ValueError("RVQ received a batch with no valid latent positions")
@@ -194,6 +201,9 @@ class ResidualVectorQuantizer(nn.Module):
         one_hot_counts = []
 
         for level, codebook in enumerate(self.codebooks):
+            if level >= active:
+                all_indices.append(torch.zeros(z.shape[:2], dtype=torch.long, device=z.device))
+                continue
             self._maybe_init_ema(level, residual, mask)
             idx = self._nearest_indices(residual, codebook)
             q = codebook(idx)
@@ -203,34 +213,45 @@ class ResidualVectorQuantizer(nn.Module):
             valid_idx = idx.reshape(-1) if mask is None else idx[mask]
             one_hot_counts.append(F.one_hot(valid_idx, self.codebook_size).float().sum(dim=0))
 
-            if level < active:
-                quantized_sum = quantized_sum + q
-                residual_valid = self._valid_values(residual, mask)
-                q_valid = self._valid_values(q, mask)
-                if self.use_ema:
-                    losses.append(self.commitment_weight * F.mse_loss(residual_valid, q_valid.detach()))
-                    self._update_ema(level, residual, idx, mask)
-                else:
-                    losses.append(
-                        F.mse_loss(q_valid, residual_valid.detach())
-                        + self.commitment_weight * F.mse_loss(residual_valid, q_valid.detach())
-                    )
-                residual = residual - q.detach()
+            residual_valid = self._valid_values(residual, mask)
+            q_valid = self._valid_values(q, mask)
+            if self.use_ema:
+                losses.append(self.commitment_weight * F.mse_loss(residual_valid, q_valid.detach()))
+                self._update_ema(level, residual, idx, mask)
             else:
-                residual = residual.detach()
+                losses.append(
+                    F.mse_loss(q_valid, residual_valid.detach())
+                    + self.commitment_weight * F.mse_loss(residual_valid, q_valid.detach())
+                )
 
-        quantized = z + (quantized_sum - z).detach()
+            # Match the official residual quantizer: every active level has its
+            # own straight-through path before the quantized levels are summed.
+            q_st = residual + (q - residual).detach()
+            quantized_sum = quantized_sum + q_st
+            residual = residual - q.detach()
+
+        quantized = quantized_sum
         if mask is not None:
             quantized = quantized.masked_fill(~mask.unsqueeze(-1), 0.0)
         loss = torch.stack(losses).mean() if losses else z.new_tensor(0.0)
-        avg_probs = torch.stack(one_hot_counts).sum(dim=0)
-        avg_probs = avg_probs / avg_probs.sum().clamp_min(1.0)
-        perplexity = torch.exp(-(avg_probs * avg_probs.clamp_min(1e-12).log()).sum())
+        level_counts = torch.stack(one_hot_counts)
+        level_probs = level_counts / level_counts.sum(dim=1, keepdim=True).clamp_min(1.0)
+        level_perplexity = torch.exp(
+            -(level_probs * level_probs.clamp_min(1e-12).log()).sum(dim=1)
+        )
+        active_codes = (level_counts > 0).sum(dim=1)
+        perplexity = level_perplexity.mean()
+        if active < self.num_quantizers:
+            pad = self.num_quantizers - active
+            level_perplexity = F.pad(level_perplexity, (0, pad), value=0.0)
+            active_codes = F.pad(active_codes, (0, pad), value=0)
         return RVQOutput(
             quantized=quantized,
             indices=torch.stack(all_indices, dim=1),
             loss=loss,
             perplexity=perplexity,
+            perplexity_per_level=level_perplexity,
+            active_codes_per_level=active_codes,
         )
 
 
@@ -461,4 +482,6 @@ class MotionRVQVAE(nn.Module):
             explicit_loss=explicit_loss,
             vq_loss=vq.loss,
             perplexity=vq.perplexity,
+            perplexity_per_level=vq.perplexity_per_level,
+            active_codes_per_level=vq.active_codes_per_level,
         )

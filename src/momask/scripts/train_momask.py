@@ -161,6 +161,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--vq-codebook-sample-temp", type=float, default=0.0)
     p.add_argument("--vq-arch", choices=["simple", "paper"], default="simple")
     p.add_argument(
+        "--vq-grad-clip",
+        type=float,
+        default=1.0,
+        help="Maximum RVQ-VAE gradient norm; set to 0 to disable clipping.",
+    )
+    p.add_argument(
         "--vq-velocity-weight",
         type=float,
         default=0.0,
@@ -854,7 +860,8 @@ def main() -> None:
         out = vqvae(x, mask=None if is_window_dataset else mask)
         vq_opt.zero_grad(set_to_none=True)
         out.loss.backward()
-        torch.nn.utils.clip_grad_norm_(vqvae.parameters(), 1.0)
+        if args.vq_grad_clip > 0.0:
+            torch.nn.utils.clip_grad_norm_(vqvae.parameters(), args.vq_grad_clip)
         vq_opt.step()
         if step == start_vq_step + 1 and device.type == "cuda":
             print(
@@ -872,12 +879,19 @@ def main() -> None:
             now = time.perf_counter()
             interval_steps = max(step - log_start_step, 1)
             steps_per_sec = interval_steps / max(now - log_start_time, 1e-9)
+            level_ppl = "/".join(
+                f"{value:.1f}" for value in out.perplexity_per_level.detach().cpu().tolist()
+            )
+            level_codes = "/".join(
+                str(value) for value in out.active_codes_per_level.detach().cpu().tolist()
+            )
             print(
                 f"[vq {step:04d}] loss={out.loss.item():.5f} "
                 f"recon_mae={out.recon_loss.item():.5f} "
                 f"vel={out.velocity_loss.item():.5f} "
                 f"explicit={out.explicit_loss.item():.5f} "
                 f"vq={out.vq_loss.item():.5f} ppl={out.perplexity.item():.2f} "
+                f"ppl_levels={level_ppl} active_codes={level_codes} "
                 f"lr={current_lr:.3e} steps_per_sec={steps_per_sec:.2f}",
                 flush=True,
             )

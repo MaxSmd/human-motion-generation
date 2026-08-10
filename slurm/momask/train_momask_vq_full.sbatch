@@ -66,6 +66,7 @@ VQ_USE_EMA="${VQ_USE_EMA:-0}"
 VQ_EMA_DECAY="${VQ_EMA_DECAY:-0.99}"
 VQ_CODEBOOK_SAMPLE_TEMP="${VQ_CODEBOOK_SAMPLE_TEMP:-0.0}"
 VQ_ARCH="${VQ_ARCH:-simple}"
+VQ_GRAD_CLIP="${VQ_GRAD_CLIP:-1.0}"
 WARMUP_STEPS="${WARMUP_STEPS:-0}"
 LR_MILESTONES="${LR_MILESTONES:-}"
 LR_GAMMA="${LR_GAMMA:-0.1}"
@@ -80,7 +81,7 @@ echo "[momask-vq] load_vq_ckpt=${LOAD_VQ_CKPT:-<none>}"
 echo "[momask-vq] output_dir=${OUTPUT_DIR}"
 echo "[momask-vq] vq_steps=${VQ_STEPS} vq_epochs=${VQ_EPOCHS} max_clips=${MAX_CLIPS} batch_size=${BATCH_SIZE} num_workers=${NUM_WORKERS} max_seq_len=${MAX_SEQ_LEN} min_seq_len=${MIN_SEQ_LEN} vq_window_dataset=${VQ_WINDOW_DATASET} vq_window_stride=${VQ_WINDOW_STRIDE} vq_window_preload=${VQ_WINDOW_PRELOAD} vq_gpu_window_cache=${VQ_GPU_WINDOW_CACHE} no_momask_normalize=${NO_MOMASK_NORMALIZE}"
 echo "[momask-vq] lr=${VQ_LR} adam_beta2=${ADAM_BETA2} hidden=${VQ_HIDDEN_DIM} latent=${VQ_LATENT_DIM} quantizers=${NUM_QUANTIZERS} codebook=${CODEBOOK_SIZE} res_blocks=${VQ_RES_BLOCKS} downsample=${DOWNSAMPLE}"
-echo "[momask-vq] arch=${VQ_ARCH} recon_loss=${VQ_RECON_LOSS} commit=${VQ_COMMITMENT_WEIGHT} vel=${VQ_VELOCITY_WEIGHT} explicit=${VQ_EXPLICIT_WEIGHT} qdrop=${QUANTIZE_DROPOUT} ema=${VQ_USE_EMA} ema_decay=${VQ_EMA_DECAY} codebook_temp=${VQ_CODEBOOK_SAMPLE_TEMP}"
+echo "[momask-vq] arch=${VQ_ARCH} recon_loss=${VQ_RECON_LOSS} commit=${VQ_COMMITMENT_WEIGHT} vel=${VQ_VELOCITY_WEIGHT} explicit=${VQ_EXPLICIT_WEIGHT} qdrop=${QUANTIZE_DROPOUT} ema=${VQ_USE_EMA} ema_decay=${VQ_EMA_DECAY} codebook_temp=${VQ_CODEBOOK_SAMPLE_TEMP} grad_clip=${VQ_GRAD_CLIP}"
 echo "[momask-vq] warmup_steps=${WARMUP_STEPS} lr_milestones=${LR_MILESTONES:-<none>} lr_gamma=${LR_GAMMA}"
 
 CANONICAL_ARG=""
@@ -169,6 +170,7 @@ enroot start \
             --vq-ema-decay ${VQ_EMA_DECAY} \\
             --vq-codebook-sample-temp ${VQ_CODEBOOK_SAMPLE_TEMP} \\
             --vq-arch ${VQ_ARCH} \\
+            --vq-grad-clip ${VQ_GRAD_CLIP} \\
             ${NORMALIZE_ARG} \\
             --log-every ${LOG_EVERY} \\
             --eval-batches ${EVAL_BATCHES} \\
