@@ -98,12 +98,12 @@ def main() -> None:
     if "sample_cond" not in ckpt:
         raise KeyError(
             "checkpoint does not contain 'sample_cond'. "
-            "Re-run train_momask_smoke.py after pulling the latest code."
+            "Re-run train_momask.py after pulling the latest code."
         )
     if "sample_true_tokens" not in ckpt:
         raise KeyError(
             "checkpoint does not contain 'sample_true_tokens'. "
-            "Re-run train_momask_smoke.py after pulling the latest code."
+            "Re-run train_momask.py after pulling the latest code."
         )
 
     vqvae, masked_model, residual_model = _build_models(run_args, device)

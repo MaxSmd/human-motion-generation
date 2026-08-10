@@ -34,7 +34,7 @@ src/momask/
                    CodebookResidualTransformer
     training/      Stage 1/2/3 single-step helpers
     tasks/         generation.py - text embedding -> 263-D motion sampling
-    scripts/       train_momask_smoke · evaluate_momask{,_constraints} ·
+    scripts/       train_momask · evaluate_momask{,_constraints} ·
                    visualize_momask_{checkpoint,constraints} ·
                    resample_momask_checkpoint · summarize_momask_sweep
 configs/momask/    TODO: Hydra configs

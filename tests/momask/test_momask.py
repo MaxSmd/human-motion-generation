@@ -20,7 +20,7 @@ from momask.models import (
     TokenTransformerConfig,
 )
 from momask.data_utils import normalize_motion, token_mask_from_frame_mask
-from momask.scripts.train_momask_smoke import (
+from momask.scripts.train_momask import (
     FixedWindowTensorBatcher,
     H3DNormalizer,
     cycle_loader,

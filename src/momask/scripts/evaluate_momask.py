@@ -1,6 +1,6 @@
 """Evaluate the local MoMask checkpoint with the shared Guo evaluator.
 
-This targets checkpoints produced by `scripts/train_momask_smoke.py`.
+This targets checkpoints produced by `scripts/train_momask.py`.
 
 Typical quick run on the cluster:
 
