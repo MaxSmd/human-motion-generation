@@ -35,6 +35,9 @@ HUMANML3D_TEXTS_ZIP="${HUMANML3D_TEXTS_ZIP:-}"
 VQ_CKPT="${VQ_CKPT:-runs/momask-full-vq-raw-12668/momask_vq_latest.pt}"
 TOKEN_CKPT="${TOKEN_CKPT:-}"
 MASKED_CKPT="${MASKED_CKPT:-}"
+ASSEMBLE_AFTER_TRAIN="${ASSEMBLE_AFTER_TRAIN:-0}"
+ASSEMBLE_MASKED_CKPT="${ASSEMBLE_MASKED_CKPT:-}"
+ASSEMBLE_OUTPUT="${ASSEMBLE_OUTPUT:-}"
 RUN_NAME="${RUN_NAME:-momask-full-tokens-${SLURM_JOB_ID:-$(date +%Y%m%d-%H%M%S)}}"
 OUTPUT_DIR="${OUTPUT_DIR:-runs/${RUN_NAME}}"
 TOKEN_STEPS="${TOKEN_STEPS:-100000}"
@@ -105,6 +108,9 @@ echo "[momask-tokens] humanml3d_texts_zip=${HUMANML3D_TEXTS_ZIP:-<unused>}"
 echo "[momask-tokens] vq_ckpt=${VQ_CKPT}"
 echo "[momask-tokens] token_ckpt=${TOKEN_CKPT:-<none>}"
 echo "[momask-tokens] masked_ckpt=${MASKED_CKPT:-<none>}"
+echo "[momask-tokens] assemble_after_train=${ASSEMBLE_AFTER_TRAIN}"
+echo "[momask-tokens] assemble_masked_ckpt=${ASSEMBLE_MASKED_CKPT:-<none>}"
+echo "[momask-tokens] assemble_output=${ASSEMBLE_OUTPUT:-<none>}"
 echo "[momask-tokens] output_dir=${OUTPUT_DIR}"
 echo "[momask-tokens] token_steps=${TOKEN_STEPS} token_epochs=${TOKEN_EPOCHS} max_clips=${MAX_CLIPS} batch_size=${BATCH_SIZE} token_batch_size=${TOKEN_BATCH_SIZE} num_workers=${NUM_WORKERS} max_seq_len=${MAX_SEQ_LEN} min_seq_len=${MIN_SEQ_LEN}"
 echo "[momask-tokens] validate_every=${VALIDATE_EVERY} val_eval_batches=${VAL_EVAL_BATCHES}"
@@ -207,4 +213,15 @@ enroot start \
             --val-eval-batches ${VAL_EVAL_BATCHES} \\
             --save-every ${SAVE_EVERY} \\
             --output-dir '${OUTPUT_DIR}'
+
+        if [ '${ASSEMBLE_AFTER_TRAIN}' = '1' ]; then
+            if [ -z '${ASSEMBLE_MASKED_CKPT}' ] || [ -z '${ASSEMBLE_OUTPUT}' ]; then
+                echo '[momask-tokens] ERROR: assembly requires both ASSEMBLE_MASKED_CKPT and ASSEMBLE_OUTPUT' >&2
+                exit 2
+            fi
+            python -u -m momask.scripts.assemble_token_checkpoints \\
+                --masked-checkpoint '${ASSEMBLE_MASKED_CKPT}' \\
+                --residual-checkpoint '${OUTPUT_DIR}/checkpoints/tokens_best_val.pt' \\
+                --output '${ASSEMBLE_OUTPUT}'
+        fi
     "

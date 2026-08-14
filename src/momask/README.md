@@ -70,8 +70,7 @@ training on the head node:
 bash slurm/momask/submit_momask_transformer_probes.sh
 ```
 
-Once both probes show acceptable cluster utilization, submit both full jobs and
-an automatic dependent assembly job:
+Once both probes show acceptable cluster utilization, submit the two full jobs:
 
 ```bash
 bash slurm/momask/submit_momask_transformers_paperstyle.sh
@@ -84,6 +83,8 @@ corruptions: masked-token CE for the M-Transformer and the same sampled-level
 residual-token CE used to train the R-Transformer. The assembly job consumes
 each run's `checkpoints/tokens_best_val.pt`, not its final
 training checkpoint. FID still needs to be measured on the assembled model.
+The R job depends on the M job and assembles both best checkpoints after its own
+training completes, keeping the workflow within the two-job submission quota.
 The launcher only submits SLURM jobs; training and checkpoint assembly do not
 run on the head node. To resume a cancelled component independently, pass its
 stage checkpoint as `TOKEN_CKPT` when submitting the corresponding masked or
