@@ -4,7 +4,6 @@
 #SBATCH --qos=students_normal
 #SBATCH --gres=gpu:1,ccc:75
 #SBATCH --nodes=1
-#SBATCH --cpus-per-task=4
 #SBATCH --output=slurm/logs/momask-rtrans-paperstyle-%j.out
 #SBATCH --error=slurm/logs/momask-rtrans-paperstyle-%j.err
 #
