@@ -7,7 +7,7 @@
 #SBATCH --output=slurm/logs/momask-constraints-%j.out
 #SBATCH --error=slurm/logs/momask-constraints-%j.err
 #
-# Evaluate root-trajectory, joint-position, and bend-angle constraints.
+# Evaluate root-trajectory, joint-position, bend-angle, and body-fixed constraints.
 #
 # Submit from repo root, for example:
 #   MAX_CLIPS=256 LATENT_VARIANTS=joint,angle \
@@ -47,9 +47,12 @@ JOINT_IDS="${JOINT_IDS:-20,21}"
 JOINT_TARGET_SPACE="${JOINT_TARGET_SPACE:-root-relative}"
 ANGLE_JOINTS="${ANGLE_JOINTS:-4,5,18,19}"
 ANGLE_TOLERANCE_DEG="${ANGLE_TOLERANCE_DEG:-5.0}"
+BODY_FIXED_JOINT_IDS="${BODY_FIXED_JOINT_IDS:-17,19,21}"
+BODY_REFERENCE_FRAME="${BODY_REFERENCE_FRAME:-0}"
 REFINEMENT_STEPS="${REFINEMENT_STEPS:-50}"
 REFINEMENT_LR="${REFINEMENT_LR:-0.01}"
 POSITION_WEIGHT="${POSITION_WEIGHT:-1.0}"
+TORSO_RELATIVE_WEIGHT="${TORSO_RELATIVE_WEIGHT:-1.0}"
 ANGLE_WEIGHT="${ANGLE_WEIGHT:-1.0}"
 LATENT_WEIGHT="${LATENT_WEIGHT:-0.01}"
 DYNAMICS_WEIGHT="${DYNAMICS_WEIGHT:-0.1}"
@@ -90,7 +93,8 @@ echo "[momask-constraints] steps=${GENERATION_STEPS} guidance=${GUIDANCE_SCALE} 
 echo "[momask-constraints] sample=${SAMPLE} topk_filter_thres=${TOPK_FILTER_THRES} remask_kept_tokens=${REMASK_KEPT_TOKENS}"
 echo "[momask-constraints] latent_variants=${LATENT_VARIANTS} joint_ids=${JOINT_IDS} joint_space=${JOINT_TARGET_SPACE}"
 echo "[momask-constraints] angle_joints=${ANGLE_JOINTS} angle_tolerance_deg=${ANGLE_TOLERANCE_DEG}"
-echo "[momask-constraints] refinement_steps=${REFINEMENT_STEPS} refinement_lr=${REFINEMENT_LR} position_weight=${POSITION_WEIGHT} angle_weight=${ANGLE_WEIGHT}"
+echo "[momask-constraints] body_fixed_joint_ids=${BODY_FIXED_JOINT_IDS} body_reference_frame=${BODY_REFERENCE_FRAME}"
+echo "[momask-constraints] refinement_steps=${REFINEMENT_STEPS} refinement_lr=${REFINEMENT_LR} position_weight=${POSITION_WEIGHT} torso_relative_weight=${TORSO_RELATIVE_WEIGHT} angle_weight=${ANGLE_WEIGHT}"
 echo "[momask-constraints] output=${OUTPUT}"
 
 TEXTS_ZIP_ARG=""
@@ -157,9 +161,12 @@ enroot start \
             --joint-target-space '${JOINT_TARGET_SPACE}' \
             --angle-joints '${ANGLE_JOINTS}' \
             --angle-tolerance-deg ${ANGLE_TOLERANCE_DEG} \
+            --body-fixed-joint-ids '${BODY_FIXED_JOINT_IDS}' \
+            --body-reference-frame ${BODY_REFERENCE_FRAME} \
             --refinement-steps ${REFINEMENT_STEPS} \
             --refinement-lr ${REFINEMENT_LR} \
             --position-weight ${POSITION_WEIGHT} \
+            --torso-relative-weight ${TORSO_RELATIVE_WEIGHT} \
             --angle-weight ${ANGLE_WEIGHT} \
             --latent-weight ${LATENT_WEIGHT} \
             --dynamics-weight ${DYNAMICS_WEIGHT} \

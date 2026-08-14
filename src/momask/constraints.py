@@ -81,6 +81,62 @@ class JointPositionConstraint:
 
 
 @dataclass(frozen=True)
+class TorsoRelativeJointConstraint:
+    """Joint targets fixed in a moving torso coordinate frame.
+
+    ``reference_offsets`` has shape ``(B, 22, 3)`` and stores one local-space
+    pose per sample. ``mask`` has shape ``(B, T, 22)``. The torso frame uses
+    Spine3 as its origin, the collar line as its lateral axis, and the
+    Spine3-to-Neck direction as its vertical axis by default. This keeps the
+    constraint invariant to world translation and torso rotation.
+    """
+
+    reference_offsets: Tensor
+    mask: Tensor
+    origin_joint: int = 9
+    left_joint: int = 13
+    right_joint: int = 14
+    up_joint: int = 12
+
+    def __post_init__(self) -> None:
+        if self.reference_offsets.ndim != 3 or self.reference_offsets.shape[-2:] != (
+            NUM_JOINTS,
+            3,
+        ):
+            raise ValueError(
+                f"reference_offsets must be (B, {NUM_JOINTS}, 3), "
+                f"got {tuple(self.reference_offsets.shape)}"
+            )
+        if (
+            self.mask.ndim != 3
+            or self.mask.shape[0] != self.reference_offsets.shape[0]
+            or self.mask.shape[2] != NUM_JOINTS
+        ):
+            raise ValueError(
+                f"mask must be (B, T, {NUM_JOINTS}) with the same batch size as reference_offsets"
+            )
+        frame_joints = (self.origin_joint, self.left_joint, self.right_joint, self.up_joint)
+        if any(not 0 <= joint < NUM_JOINTS for joint in frame_joints):
+            raise ValueError(f"torso-frame joint ids must lie in [0, {NUM_JOINTS - 1}]")
+        if len(set(frame_joints)) != len(frame_joints):
+            raise ValueError("torso-frame joint ids must be distinct")
+        active = self.mask.bool().any(dim=1)
+        active_offsets = self.reference_offsets[active]
+        if bool(active_offsets.numel()) and not bool(torch.isfinite(active_offsets).all()):
+            raise ValueError("active torso-relative reference offsets must be finite")
+
+    def to(self, device: torch.device, dtype: torch.dtype) -> "TorsoRelativeJointConstraint":
+        return TorsoRelativeJointConstraint(
+            reference_offsets=self.reference_offsets.to(device=device, dtype=dtype),
+            mask=self.mask.to(device=device, dtype=torch.bool),
+            origin_joint=self.origin_joint,
+            left_joint=self.left_joint,
+            right_joint=self.right_joint,
+            up_joint=self.up_joint,
+        )
+
+
+@dataclass(frozen=True)
 class BendAngleConstraint:
     """Exact or ranged bend-angle targets over joint triplets.
 
@@ -158,6 +214,208 @@ class BendAngleConstraint:
             min_radians=move(self.min_radians),
             max_radians=move(self.max_radians),
         )
+
+
+def _torso_local_joint_positions(
+    joints: Tensor,
+    *,
+    origin_joint: int,
+    left_joint: int,
+    right_joint: int,
+    up_joint: int,
+    eps: float,
+) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    if joints.ndim != 4 or joints.shape[-2:] != (NUM_JOINTS, 3):
+        raise ValueError(f"joints must be (B, T, {NUM_JOINTS}, 3), got {tuple(joints.shape)}")
+    origin = joints[:, :, origin_joint]
+    lateral = joints[:, :, right_joint] - joints[:, :, left_joint]
+    up_raw = joints[:, :, up_joint] - origin
+    lateral_norm = torch.linalg.vector_norm(lateral, dim=-1)
+    lateral_unit = lateral / lateral_norm.clamp_min(eps).unsqueeze(-1)
+    up_orthogonal = up_raw - (up_raw * lateral_unit).sum(dim=-1, keepdim=True) * lateral_unit
+    up_norm = torch.linalg.vector_norm(up_orthogonal, dim=-1)
+    up_unit = up_orthogonal / up_norm.clamp_min(eps).unsqueeze(-1)
+    forward = torch.cross(lateral_unit, up_unit, dim=-1)
+    forward_norm = torch.linalg.vector_norm(forward, dim=-1)
+    forward_unit = forward / forward_norm.clamp_min(eps).unsqueeze(-1)
+    basis = torch.stack((lateral_unit, up_unit, forward_unit), dim=-1)
+    local = torch.einsum("btjc,btcd->btjd", joints - origin.unsqueeze(-2), basis)
+    valid = (lateral_norm > eps) & (up_norm > eps) & (forward_norm > eps)
+    return local, origin, basis, valid
+
+
+def torso_local_joint_positions(
+    joints: Tensor,
+    *,
+    origin_joint: int = 9,
+    left_joint: int = 13,
+    right_joint: int = 14,
+    up_joint: int = 12,
+    eps: float = 1e-7,
+) -> Tensor:
+    """Express all joints in an orthonormal frame attached to the torso."""
+
+    local, _, _, valid = _torso_local_joint_positions(
+        joints,
+        origin_joint=origin_joint,
+        left_joint=left_joint,
+        right_joint=right_joint,
+        up_joint=up_joint,
+        eps=eps,
+    )
+    if not bool(valid.all()):
+        raise ValueError("cannot construct a torso frame from degenerate torso joints")
+    return local
+
+
+def build_torso_relative_joint_constraint(
+    reference_joints: Tensor,
+    frame_mask: Tensor,
+    joint_ids: list[int],
+    *,
+    reference_frame: int = 0,
+    origin_joint: int = 9,
+    left_joint: int = 13,
+    right_joint: int = 14,
+    up_joint: int = 12,
+) -> TorsoRelativeJointConstraint:
+    """Keep selected joints at their reference-frame offsets from the torso."""
+
+    if reference_joints.ndim != 4 or reference_joints.shape[-2:] != (NUM_JOINTS, 3):
+        raise ValueError(
+            f"reference_joints must be (B, T, {NUM_JOINTS}, 3), "
+            f"got {tuple(reference_joints.shape)}"
+        )
+    batch, time, _, _ = reference_joints.shape
+    valid_frames = _as_frame_mask(frame_mask, batch, time, reference_joints.device)
+    if not 0 <= reference_frame < time:
+        raise ValueError(f"reference_frame must lie in [0, {time - 1}]")
+    if not bool(valid_frames[:, reference_frame].all()):
+        raise ValueError("reference_frame must be valid for every sample")
+    if not joint_ids:
+        raise ValueError("joint_ids must contain at least one joint")
+    if len(set(joint_ids)) != len(joint_ids):
+        raise ValueError("joint_ids must not contain duplicates")
+    if any(not 0 <= joint < NUM_JOINTS for joint in joint_ids):
+        raise ValueError(f"joint ids must lie in [0, {NUM_JOINTS - 1}]")
+    local, _, _, torso_valid = _torso_local_joint_positions(
+        reference_joints,
+        origin_joint=origin_joint,
+        left_joint=left_joint,
+        right_joint=right_joint,
+        up_joint=up_joint,
+        eps=1e-7,
+    )
+    if bool((valid_frames & ~torso_valid).any()):
+        raise ValueError("valid frames contain degenerate torso joints")
+    mask = torch.zeros(batch, time, NUM_JOINTS, dtype=torch.bool, device=reference_joints.device)
+    mask[:, :, joint_ids] = valid_frames.unsqueeze(-1)
+    return TorsoRelativeJointConstraint(
+        reference_offsets=local[:, reference_frame].detach().clone(),
+        mask=mask,
+        origin_joint=origin_joint,
+        left_joint=left_joint,
+        right_joint=right_joint,
+        up_joint=up_joint,
+    )
+
+
+def torso_relative_targets_world(
+    joints: Tensor,
+    constraint: TorsoRelativeJointConstraint,
+    *,
+    eps: float = 1e-7,
+) -> Tensor:
+    """Return the moving world-space targets implied by a torso-relative pose."""
+
+    if constraint.mask.shape != joints.shape[:-1]:
+        raise ValueError(f"constraint mask must be {tuple(joints.shape[:-1])}")
+    if constraint.reference_offsets.shape[0] != joints.shape[0]:
+        raise ValueError("constraint and joints must have the same batch size")
+    _, origin, basis, valid = _torso_local_joint_positions(
+        joints,
+        origin_joint=constraint.origin_joint,
+        left_joint=constraint.left_joint,
+        right_joint=constraint.right_joint,
+        up_joint=constraint.up_joint,
+        eps=eps,
+    )
+    active_frames = constraint.mask.to(joints.device, torch.bool).any(dim=-1)
+    if bool((active_frames & ~valid).any()):
+        raise ValueError("active torso-relative constraints contain a degenerate torso frame")
+    reference = constraint.reference_offsets.to(joints.device, joints.dtype)
+    world_offsets = torch.einsum("btcd,bjd->btjc", basis, reference)
+    return origin.unsqueeze(-2) + world_offsets
+
+
+def _torso_relative_errors_and_mask(
+    joints: Tensor,
+    constraint: TorsoRelativeJointConstraint,
+    frame_mask: Tensor | None,
+    eps: float,
+) -> tuple[Tensor, Tensor]:
+    if constraint.mask.shape != joints.shape[:-1]:
+        raise ValueError(f"constraint mask must be {tuple(joints.shape[:-1])}")
+    valid_frames = _as_frame_mask(frame_mask, joints.shape[0], joints.shape[1], joints.device)
+    active = constraint.mask.to(joints.device, torch.bool) & valid_frames.unsqueeze(-1)
+    local, _, _, torso_valid = _torso_local_joint_positions(
+        joints,
+        origin_joint=constraint.origin_joint,
+        left_joint=constraint.left_joint,
+        right_joint=constraint.right_joint,
+        up_joint=constraint.up_joint,
+        eps=eps,
+    )
+    if bool((active & ~torso_valid.unsqueeze(-1)).any()):
+        raise ValueError("active torso-relative constraints contain a degenerate torso frame")
+    target = constraint.reference_offsets.to(joints.device, joints.dtype).unsqueeze(1)
+    errors = torch.linalg.vector_norm(local - target, dim=-1)
+    return errors, active
+
+
+def torso_relative_joint_errors(
+    joints: Tensor,
+    constraint: TorsoRelativeJointConstraint,
+    *,
+    frame_mask: Tensor | None = None,
+    eps: float = 1e-7,
+) -> Tensor:
+    """Return one local-space Euclidean error per active joint/frame cell."""
+
+    errors, active = _torso_relative_errors_and_mask(joints, constraint, frame_mask, eps)
+    return errors[active]
+
+
+def torso_relative_joint_error(
+    joints: Tensor,
+    constraint: TorsoRelativeJointConstraint,
+    *,
+    frame_mask: Tensor | None = None,
+    eps: float = 1e-7,
+) -> Tensor:
+    """Mean torso-relative joint error in metres."""
+
+    errors, active = _torso_relative_errors_and_mask(joints, constraint, frame_mask, eps)
+    if not bool(active.any()):
+        return _zero_loss(joints)
+    return _masked_mean(errors, active)
+
+
+def torso_relative_joint_loss(
+    joints: Tensor,
+    constraint: TorsoRelativeJointConstraint,
+    *,
+    frame_mask: Tensor | None = None,
+    beta: float = 0.05,
+    eps: float = 1e-7,
+) -> Tensor:
+    """Smooth-L1 loss for joints fixed in the moving torso frame."""
+
+    errors, active = _torso_relative_errors_and_mask(joints, constraint, frame_mask, eps)
+    if not bool(active.any()):
+        return _zero_loss(joints)
+    losses = F.smooth_l1_loss(errors, torch.zeros_like(errors), beta=beta, reduction="none")
+    return _masked_mean(losses, active)
 
 
 def bend_angles_from_joints(
@@ -443,6 +701,7 @@ class LatentRefinementConfig:
     max_delta_norm: float | None = 1.0
     grad_clip_norm: float | None = 1.0
     history_interval: int = 0
+    torso_relative_weight: float = 1.0
 
     def __post_init__(self) -> None:
         if self.steps < 1:
@@ -451,6 +710,7 @@ class LatentRefinementConfig:
             raise ValueError("learning_rate must be positive")
         for name in (
             "position_weight",
+            "torso_relative_weight",
             "angle_weight",
             "latent_weight",
             "dynamics_weight",
@@ -496,13 +756,14 @@ def refine_motion_latents(
     token_mask: Tensor | None = None,
     frame_mask: Tensor | None = None,
     position_constraint: JointPositionConstraint | None = None,
+    torso_relative_constraint: TorsoRelativeJointConstraint | None = None,
     angle_constraint: BendAngleConstraint | None = None,
     config: LatentRefinementConfig | None = None,
 ) -> LatentRefinementResult:
     """Refine continuous RVQ latents while leaving all model weights frozen."""
 
-    if position_constraint is None and angle_constraint is None:
-        raise ValueError("at least one position or angle constraint is required")
+    if position_constraint is None and torso_relative_constraint is None and angle_constraint is None:
+        raise ValueError("at least one position, torso-relative, or angle constraint is required")
     config = config or LatentRefinementConfig()
     if initial_latents.ndim != 3 or not initial_latents.is_floating_point():
         raise ValueError("initial_latents must be a floating-point (B, L, D) tensor")
@@ -563,6 +824,17 @@ def refine_motion_latents(
                     raise ValueError(
                         "frame-0 root XZ is fixed at the canonical origin; apply an external scene transform"
                     )
+            if torso_relative_constraint is not None:
+                torso_relative_constraint = torso_relative_constraint.to(z0.device, z0.dtype)
+                if torso_relative_constraint.mask.shape != (batch, target_len, NUM_JOINTS):
+                    raise ValueError(
+                        "torso-relative constraint batch/time dimensions must match target_len"
+                    )
+                impossible = torso_relative_constraint.mask & ~valid_frames.unsqueeze(-1)
+                if bool(impossible.any()):
+                    raise ValueError(
+                        "torso-relative constraints target padded or invalid decoded frames"
+                    )
             if angle_constraint is not None:
                 angle_constraint = angle_constraint.to(z0.device, z0.dtype)
                 if angle_constraint.mask.shape[:2] != (batch, target_len):
@@ -581,9 +853,16 @@ def refine_motion_latents(
                 angle_constraint is not None
                 and (angle_constraint.mask & valid_frames.unsqueeze(-1)).any()
             )
+            active_torso_relative = bool(
+                torso_relative_constraint is not None
+                and (torso_relative_constraint.mask & valid_frames.unsqueeze(-1)).any()
+            )
             weighted_position = active_position and config.position_weight > 0.0
+            weighted_torso_relative = (
+                active_torso_relative and config.torso_relative_weight > 0.0
+            )
             weighted_angle = active_angle and config.angle_weight > 0.0
-            if not weighted_position and not weighted_angle:
+            if not weighted_position and not weighted_torso_relative and not weighted_angle:
                 raise ValueError("no positively weighted constraints remain after applying masks")
 
             _, initial_motion, initial_joints = _decode_latents_to_joints_prepared(
@@ -594,6 +873,12 @@ def refine_motion_latents(
                 target_len=target_len,
                 token_mask=token_valid,
             )
+            if torso_relative_constraint is not None:
+                torso_relative_joint_errors(
+                    initial_joints,
+                    torso_relative_constraint,
+                    frame_mask=valid_frames,
+                )
             if angle_constraint is not None:
                 initial_angles, angle_valid = _bend_angles_and_validity(
                     initial_joints,
@@ -659,6 +944,13 @@ def refine_motion_latents(
                         frame_mask=valid_frames,
                         beta=config.position_huber_beta,
                     )
+                if torso_relative_constraint is not None and config.torso_relative_weight > 0.0:
+                    losses["torso_relative"] = torso_relative_joint_loss(
+                        joints,
+                        torso_relative_constraint,
+                        frame_mask=valid_frames,
+                        beta=config.position_huber_beta,
+                    )
                 if angle_constraint is not None and config.angle_weight > 0.0:
                     losses["angle"] = bend_angle_loss(
                         joints,
@@ -691,6 +983,7 @@ def refine_motion_latents(
                 zero = _zero_loss(joints)
                 total = (
                     config.position_weight * losses.get("position", zero)
+                    + config.torso_relative_weight * losses.get("torso_relative", zero)
                     + config.angle_weight * losses.get("angle", zero)
                     + config.latent_weight * losses.get("latent", zero)
                     + config.dynamics_weight * losses.get("dynamics", zero)
@@ -748,6 +1041,21 @@ def refine_motion_latents(
                 )
                 metrics["position_error_final_m"] = float(
                     joint_position_error(joints, position_constraint, frame_mask=valid_frames).cpu()
+                )
+            if torso_relative_constraint is not None and config.torso_relative_weight > 0.0:
+                metrics["torso_relative_error_initial_m"] = float(
+                    torso_relative_joint_error(
+                        initial_joints,
+                        torso_relative_constraint,
+                        frame_mask=valid_frames,
+                    ).cpu()
+                )
+                metrics["torso_relative_error_final_m"] = float(
+                    torso_relative_joint_error(
+                        joints,
+                        torso_relative_constraint,
+                        frame_mask=valid_frames,
+                    ).cpu()
                 )
             if angle_constraint is not None and config.angle_weight > 0.0:
                 metrics["angle_violation_initial_rad"] = float(

@@ -10,6 +10,7 @@ from momask.constraints import (
     JointPositionConstraint,
     LatentRefinementConfig,
     LatentRefinementResult,
+    TorsoRelativeJointConstraint,
     refine_motion_latents,
 )
 from momask.models import (
@@ -107,6 +108,7 @@ def generate_h3d263_constrained(
     mean: Tensor,
     std: Tensor,
     position_constraint: JointPositionConstraint | None = None,
+    torso_relative_constraint: TorsoRelativeJointConstraint | None = None,
     angle_constraint: BendAngleConstraint | None = None,
     refinement: LatentRefinementConfig | None = None,
     steps: int = 10,
@@ -150,6 +152,7 @@ def generate_h3d263_constrained(
         token_mask=token_mask,
         frame_mask=frame_mask,
         position_constraint=position_constraint,
+        torso_relative_constraint=torso_relative_constraint,
         angle_constraint=angle_constraint,
         config=refinement,
     )

@@ -10,18 +10,26 @@ from momask.constraints import (
     BendAngleConstraint,
     JointPositionConstraint,
     LatentRefinementConfig,
+    TorsoRelativeJointConstraint,
     bend_angle_loss,
     bend_angle_violation,
     bend_angles_from_joints,
+    build_torso_relative_joint_constraint,
     decode_latents_to_joints,
     joint_position_error,
     joint_position_loss,
     refine_motion_latents,
+    torso_local_joint_positions,
+    torso_relative_joint_error,
+    torso_relative_joint_errors,
+    torso_relative_joint_loss,
+    torso_relative_targets_world,
 )
 from momask.models import MotionRVQVAE
 from momask.scripts.evaluate_momask_constraints import (
     angle_triplets_from_centers,
     build_joint_constraint,
+    parse_latent_variants,
 )
 from momask.tasks import generate_h3d263_constrained
 from shared.geometry import H3D_FEATURE_DIM, NUM_JOINTS
@@ -45,6 +53,10 @@ def test_evaluator_builds_physical_knee_and_elbow_triplets() -> None:
     triplets = angle_triplets_from_centers([4, 5, 18, 19], torch.device("cpu"))
 
     assert triplets.tolist() == [[1, 4, 7], [2, 5, 8], [16, 18, 20], [17, 19, 21]]
+
+
+def test_evaluator_accepts_body_fixed_latent_variant() -> None:
+    assert parse_latent_variants("body-fixed") == ("body-fixed",)
 
 
 def test_root_relative_joint_targets_follow_generated_heading() -> None:
@@ -73,6 +85,81 @@ def test_root_relative_joint_targets_follow_generated_heading() -> None:
     assert torch.allclose(constraint.targets[0, 0, 20], torch.tensor([1.0, 0.0, 0.0]))
     assert torch.allclose(constraint.targets[0, 1, 20], torch.tensor([5.0, 0.0, 3.0]), atol=1e-6)
     assert constraint.mask[0, :, 20].all()
+
+
+def _rigidly_moving_right_arm() -> torch.Tensor:
+    joints = _empty_joints(time=2)
+    frame_zero = joints[0, 0]
+    frame_zero[9] = torch.tensor([0.0, 1.0, 0.0])
+    frame_zero[12] = torch.tensor([0.0, 2.0, 0.0])
+    frame_zero[13] = torch.tensor([-0.4, 1.6, 0.0])
+    frame_zero[14] = torch.tensor([0.4, 1.6, 0.0])
+    frame_zero[17] = torch.tensor([0.6, 1.5, 0.0])
+    frame_zero[19] = torch.tensor([0.9, 1.2, 0.1])
+    frame_zero[21] = torch.tensor([1.1, 0.9, 0.2])
+    rotation = torch.tensor(
+        [
+            [0.0, 0.0, 1.0],
+            [0.0, 1.0, 0.0],
+            [-1.0, 0.0, 0.0],
+        ]
+    )
+    translation = torch.tensor([3.0, 0.2, -2.0])
+    joints[0, 1] = frame_zero @ rotation.T + translation
+    return joints
+
+
+def test_torso_local_positions_ignore_world_translation_and_rotation() -> None:
+    joints = _rigidly_moving_right_arm()
+
+    local = torso_local_joint_positions(joints)
+
+    assert torch.allclose(local[:, 0], local[:, 1], atol=1e-6)
+
+
+def test_body_fixed_constraint_is_dense_and_detects_only_relative_arm_motion() -> None:
+    joints = _rigidly_moving_right_arm()
+    frame_mask = torch.ones(1, 2, dtype=torch.bool)
+    constraint = build_torso_relative_joint_constraint(
+        joints,
+        frame_mask,
+        [17, 19, 21],
+        reference_frame=0,
+    )
+
+    assert isinstance(constraint, TorsoRelativeJointConstraint)
+    assert constraint.mask[0, :, [17, 19, 21]].all()
+    assert int(constraint.mask.sum()) == 6
+    assert torch.allclose(torso_relative_joint_error(joints, constraint), torch.tensor(0.0), atol=1e-6)
+    world_targets = torso_relative_targets_world(joints, constraint)
+    assert torch.allclose(world_targets[:, :, [17, 19, 21]], joints[:, :, [17, 19, 21]], atol=1e-6)
+
+    violated = joints.clone()
+    violated[0, 1, 21, 0] += 0.3
+    errors = torso_relative_joint_errors(violated, constraint)
+
+    assert errors.shape == (6,)
+    assert float(errors.max()) > 0.29
+    assert torso_relative_joint_loss(violated, constraint) > 0.0
+
+
+def test_body_fixed_loss_has_finite_gradient() -> None:
+    reference = _rigidly_moving_right_arm()
+    constraint = build_torso_relative_joint_constraint(
+        reference,
+        torch.ones(1, 2, dtype=torch.bool),
+        [17, 19, 21],
+    )
+    joints = reference.clone()
+    joints[0, 1, 19, 2] += 0.2
+    joints.requires_grad_(True)
+
+    loss = torso_relative_joint_loss(joints, constraint)
+    loss.backward()
+
+    assert joints.grad is not None
+    assert torch.isfinite(joints.grad).all()
+    assert joints.grad.abs().sum() > 0
 
 
 def test_bend_angles_use_zero_for_straight_and_pi_over_two_for_right_angle() -> None:
@@ -214,6 +301,52 @@ def test_latent_refinement_reduces_joint_error_without_model_gradients() -> None
     assert model.scale.grad is None
     assert result.history[-1]["position"] < result.history[0]["position"]
     assert result.metrics["position_error_final_m"] < result.metrics["position_error_initial_m"]
+
+
+def test_latent_refinement_reduces_torso_relative_arm_error() -> None:
+    model = _IdentityDecoder()
+    reference_joints = _rigidly_moving_right_arm()
+    reference_joints[:, 1] = reference_joints[:, 0]
+    reference_features = torch.zeros(1, 2, H3D_FEATURE_DIM)
+    reference_features[..., 4 : 4 + (NUM_JOINTS - 1) * 3] = reference_joints[
+        ..., 1:, :
+    ].reshape(1, 2, -1)
+    constraint = build_torso_relative_joint_constraint(
+        reference_joints,
+        torch.ones(1, 2, dtype=torch.bool),
+        [17, 19, 21],
+    )
+    initial = reference_features.clone()
+    right_wrist_start = 4 + (21 - 1) * 3
+    initial[0, 1, right_wrist_start] += 0.4
+
+    result = refine_motion_latents(
+        model,
+        initial,
+        mean=torch.zeros(H3D_FEATURE_DIM),
+        std=torch.ones(H3D_FEATURE_DIM),
+        target_len=2,
+        torso_relative_constraint=constraint,
+        config=LatentRefinementConfig(
+            steps=60,
+            learning_rate=0.1,
+            position_weight=0.0,
+            torso_relative_weight=1.0,
+            latent_weight=0.001,
+            dynamics_weight=0.0,
+            root_weight=0.0,
+            bone_weight=0.0,
+            max_delta_norm=2.0,
+            grad_clip_norm=10.0,
+        ),
+    )
+
+    before = torso_relative_joint_error(result.initial_joints, constraint)
+    after = torso_relative_joint_error(result.joints, constraint)
+    assert after < before * 0.25
+    assert result.metrics["torso_relative_error_final_m"] < result.metrics[
+        "torso_relative_error_initial_m"
+    ]
 
 
 def test_latent_refinement_reduces_bend_angle_violation() -> None:

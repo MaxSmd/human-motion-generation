@@ -106,6 +106,42 @@ heading; set it to `global` to test absolute clip-canonical joint targets. Bend
 angles are unsigned magnitudes: they can constrain how much
 a knee or elbow bends, but not the side of the bending plane by themselves.
 
+### Fixed limbs relative to the body
+
+`TorsoRelativeJointConstraint` represents commands such as “keep the right arm
+fixed relative to the torso.” It defines a moving chest frame from Spine3
+(origin), the left-to-right collar direction (lateral axis), and the
+Spine3-to-Neck direction (vertical axis). The forward axis is their cross
+product. At a reference frame, selected joint positions are converted into this
+local frame; the same local offsets are required at every valid generated
+frame. World translation, turning, and leaning therefore do not count as arm
+motion.
+
+For the right arm, the constrained joints are R_Shoulder (17), R_Elbow (19),
+and R_Wrist (21). The default reference is generated frame 0, so this
+constraint needs no paired ground-truth motion at inference time. It is dense,
+not sampled every 20 frames.
+
+```bash
+# Small metric smoke test: unconstrained versus body_fixed_latent.
+MAX_CLIPS=8 \
+LATENT_VARIANTS=body-fixed \
+BODY_FIXED_JOINT_IDS=17,19,21 \
+REFINEMENT_STEPS=100 \
+TORSO_RELATIVE_WEIGHT=5 \
+OUTPUT=runs/momask-canonical-tokens-clip200k/constraints/body_fixed_right_arm_smoke8.json \
+sbatch slurm/momask/evaluate_momask_constraints.sbatch
+
+# Render ground truth, generated motion, and the torso-relative result.
+SAMPLES="0 500" \
+sbatch slurm/momask/visualize_momask_body_fixed_constraints.sbatch
+```
+
+The evaluator reports `torso_relative_l2_m`, success within 5/10 cm, FID,
+R-Precision, MM-Dist, diversity, and root-trajectory drift. The GIF title names
+the controlled shoulder, elbow, and wrist and states that they remain fixed
+relative to the torso. Ground truth is shown only for visual comparison.
+
 Render the same wrist-position and knee/elbow-angle refinements as synchronized
 GIFs. Each GIF shows the ground-truth reference, unconstrained generation,
 joint-refined motion, and angle-refined motion. Green targets appear on active
