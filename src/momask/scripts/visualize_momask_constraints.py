@@ -1,4 +1,4 @@
-"""Render MoMask trajectory constraints as a side-by-side GIF.
+"""Render MoMask trajectory or latent pose constraints as GIFs.
 
 The GIF compares:
   real motion | unconstrained generation | trajectory-projected generation
@@ -32,10 +32,23 @@ from momask.models import (
     ResidualTransformer,
     TokenTransformerConfig,
 )
+from momask.constraints import (
+    BendAngleConstraint,
+    JointPositionConstraint,
+    LatentRefinementConfig,
+    bend_angles_from_joints,
+    refine_motion_latents,
+)
 from momask.data_utils import normalize_motion, token_mask_from_frame_mask
+from momask.scripts.evaluate_momask_constraints import (
+    angle_triplets_from_centers,
+    build_angle_constraint,
+    build_joint_constraint,
+    parse_csv_ints,
+)
 from shared.data import H3D263Dataset, collate
 from shared.text import CLIPTextEncoder, RandomTextEncoder, TextEncoder
-from shared.geometry import H3D_FEATURE_DIM, PARENTS, quat_rotate, recover_joints_from_ric
+from shared.geometry import H3D_FEATURE_DIM, JOINT_NAMES, PARENTS, quat_rotate, recover_joints_from_ric
 
 plt.rcParams.update(
     {
@@ -79,7 +92,29 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sample-tokens", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--remask-kept-tokens", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--anchor-stride", type=int, default=20)
-    p.add_argument("--constraint-variant", choices=["projected", "vq", "both"], default="both")
+    p.add_argument(
+        "--constraint-variant",
+        choices=["projected", "vq", "both", "joint", "angle", "joint-angle", "all"],
+        default="both",
+    )
+    p.add_argument("--joint-ids", default="20,21")
+    p.add_argument(
+        "--joint-target-space",
+        choices=["root-relative", "global"],
+        default="root-relative",
+    )
+    p.add_argument("--angle-joints", default="4,5,18,19")
+    p.add_argument("--angle-tolerance-deg", type=float, default=5.0)
+    p.add_argument("--refinement-steps", type=int, default=50)
+    p.add_argument("--refinement-lr", type=float, default=0.01)
+    p.add_argument("--position-weight", type=float, default=1.0)
+    p.add_argument("--angle-weight", type=float, default=1.0)
+    p.add_argument("--latent-weight", type=float, default=0.01)
+    p.add_argument("--dynamics-weight", type=float, default=0.1)
+    p.add_argument("--root-weight", type=float, default=0.1)
+    p.add_argument("--bone-weight", type=float, default=0.1)
+    p.add_argument("--max-delta-norm", type=float, default=1.0)
+    p.add_argument("--grad-clip-norm", type=float, default=1.0)
     p.add_argument("--real-h3d-dir", default=None)
     p.add_argument("--model-input-source", choices=["auto", "packed", "canonical"], default="auto")
     p.add_argument("--auto-sample-moving", type=int, default=0)
@@ -248,7 +283,7 @@ def project_root_trajectory(motion: Tensor, target_root: Tensor, length: int) ->
 def generate_full(
     vqvae: MotionRVQVAE,
     masked: MaskedMotionTransformer,
-    residual: ResidualTransformer,
+    residual: ResidualTransformer | CodebookResidualTransformer,
     normalizer: H3DNormalizer,
     cond: Tensor,
     real_x: Tensor,
@@ -259,7 +294,7 @@ def generate_full(
     topk_filter_thres: float,
     sample_tokens: bool,
     remask_kept_tokens: bool,
-) -> Tensor:
+) -> tuple[Tensor, Tensor, Tensor]:
     x_norm = normalize_motion(real_x, frame_mask, normalizer)
     true_tokens = vqvae.encode_to_tokens(x_norm)
     token_mask = token_mask_from_frame_mask(frame_mask, true_tokens.shape[-1], vqvae.downsample)
@@ -283,9 +318,10 @@ def generate_full(
         sample=sample_tokens,
         mask=token_mask,
     )
-    return normalizer.inverse(
+    motion = normalizer.inverse(
         vqvae.decode_from_tokens(tokens, target_len=real_x.shape[1], token_mask=token_mask)
     )
+    return motion, tokens, token_mask
 
 
 @torch.no_grad()
@@ -486,6 +522,290 @@ def draw_path_frame(ax, joints_seq: Tensor, target: Tensor, anchor_mask: Tensor,
     ax.grid(True, linewidth=0.75, alpha=0.45)
 
 
+def control_error_series(
+    joints: Tensor,
+    *,
+    position_targets: Tensor | None,
+    joint_ids: list[int],
+    angle_triplets: Tensor | None,
+    angle_target: Tensor | None,
+) -> tuple[Tensor | None, Tensor | None]:
+    joint_error = None
+    if position_targets is not None:
+        joint_error = torch.linalg.vector_norm(
+            joints[:, joint_ids] - position_targets[:, joint_ids], dim=-1
+        ).mean(dim=-1) * 100.0
+    angle_error = None
+    if angle_triplets is not None and angle_target is not None:
+        angles = bend_angles_from_joints(joints.unsqueeze(0), angle_triplets)[0]
+        angle_error = torch.rad2deg((angles - angle_target).abs()).mean(dim=-1)
+    return joint_error, angle_error
+
+
+def draw_latent_pose_frame(
+    ax,
+    *,
+    joints_seq: Tensor,
+    position_targets: Tensor | None,
+    joint_ids: list[int],
+    angle_triplets: Tensor | None,
+    anchor_mask: Tensor,
+    joint_error: Tensor | None,
+    angle_error: Tensor | None,
+    title: str,
+    frame: int,
+) -> None:
+    ax.cla()
+    joints = joints_seq[frame]
+    highlighted_bones: set[tuple[int, int]] = set()
+    if angle_triplets is not None:
+        for parent, center, child in angle_triplets.tolist():
+            highlighted_bones.add(tuple(sorted((parent, center))))
+            highlighted_bones.add(tuple(sorted((center, child))))
+    for joint, parent in enumerate(PARENTS):
+        if parent < 0:
+            continue
+        highlighted = tuple(sorted((parent, joint))) in highlighted_bones
+        ax.plot(
+            [joints[parent, 0], joints[joint, 0]],
+            [joints[parent, 2], joints[joint, 2]],
+            [joints[parent, 1], joints[joint, 1]],
+            color="#16a34a" if highlighted else "#2563eb",
+            linewidth=4.0 if highlighted else 2.3,
+            alpha=0.95,
+        )
+    ax.scatter(joints[:, 0], joints[:, 2], joints[:, 1], color="#dc2626", s=16, depthshade=True)
+    if joint_ids:
+        selected = joints[joint_ids]
+        ax.scatter(
+            selected[:, 0], selected[:, 2], selected[:, 1],
+            color="#f97316", edgecolor="white", linewidth=0.8, s=62, label="controlled joints",
+        )
+    active_anchor = bool(anchor_mask[frame])
+    if active_anchor and angle_triplets is not None:
+        centers = angle_triplets[:, 1]
+        selected = joints[centers]
+        ax.scatter(
+            selected[:, 0], selected[:, 2], selected[:, 1],
+            marker="D", color="#22c55e", edgecolor="#052e16", linewidth=0.8,
+            s=66, depthshade=False, label="active angle joints",
+        )
+    if active_anchor and position_targets is not None:
+        targets = position_targets[frame, joint_ids]
+        ax.scatter(
+            targets[:, 0], targets[:, 2], targets[:, 1],
+            marker="*", color="#22c55e", edgecolor="#052e16", linewidth=0.9,
+            s=180, depthshade=False, label="active wrist targets",
+        )
+        for joint_id, target in zip(joint_ids, targets):
+            current = joints[joint_id]
+            ax.plot(
+                [current[0], target[0]], [current[2], target[2]], [current[1], target[1]],
+                color="#22c55e", linestyle="--", linewidth=2.0,
+            )
+            ax.text(
+                float(target[0]), float(target[2]), float(target[1] + 0.05),
+                JOINT_NAMES[joint_id].replace("_", " "), fontsize=8, color="#14532d", weight="bold",
+            )
+
+    status = "ACTIVE ANCHOR" if active_anchor else "between anchors"
+    measurements: list[str] = []
+    if joint_error is not None:
+        measurements.append(f"wrist error {float(joint_error[frame]):.1f} cm")
+    if angle_error is not None:
+        measurements.append(f"angle error {float(angle_error[frame]):.1f} deg")
+    subtitle = " | ".join(measurements)
+    ax.set_title(f"{title} | frame {frame} | {status}\n{subtitle}", pad=13)
+    ax.set_xlabel("X (m)")
+    ax.set_ylabel("Z (m)")
+    ax.set_zlabel("Y height (m)")
+    body_min = joints.amin(dim=0)
+    body_max = joints.amax(dim=0)
+    root = joints[0]
+    extra_points = [joints]
+    if active_anchor and position_targets is not None:
+        extra_points.append(position_targets[frame, joint_ids])
+    visible = torch.cat(extra_points, dim=0)
+    horizontal_radius = float(
+        torch.stack(
+            [
+                (visible[:, 0] - root[0]).abs().max(),
+                (visible[:, 2] - root[2]).abs().max(),
+                visible.new_tensor(0.8),
+            ]
+        ).max()
+    ) * 1.15
+    ax.set_xlim(float(root[0] - horizontal_radius), float(root[0] + horizontal_radius))
+    ax.set_ylim(float(root[2] - horizontal_radius), float(root[2] + horizontal_radius))
+    ax.set_zlim(float(body_min[1] - 0.25), float(body_max[1] + 0.25))
+    ax.grid(True, linewidth=0.8, alpha=0.5)
+    ax.xaxis.pane.set_alpha(0.08)
+    ax.yaxis.pane.set_alpha(0.08)
+    ax.zaxis.pane.set_alpha(0.04)
+    ax.view_init(elev=17, azim=-72)
+    try:
+        ax.set_box_aspect((1.0, 1.0, 0.9))
+    except AttributeError:
+        pass
+
+
+def draw_control_error_frame(
+    ax,
+    angle_ax,
+    *,
+    joint_error: Tensor | None,
+    angle_error: Tensor | None,
+    anchor_mask: Tensor,
+    angle_tolerance_deg: float,
+    joint_ylim: float,
+    angle_ylim: float,
+    title: str,
+    frame: int,
+) -> None:
+    ax.cla()
+    angle_ax.cla()
+    anchor_frames = torch.nonzero(anchor_mask, as_tuple=False).flatten()
+    completed = anchor_frames <= frame
+    if joint_error is not None:
+        values = joint_error[anchor_frames]
+        ax.plot(anchor_frames, values, color="#93c5fd", linewidth=1.4, alpha=0.75)
+        ax.scatter(anchor_frames[completed], values[completed], color="#2563eb", s=36, label="wrist error")
+        ax.axhline(5.0, color="#2563eb", linestyle="--", linewidth=1.0, alpha=0.65, label="5 cm")
+        ax.axhline(10.0, color="#60a5fa", linestyle=":", linewidth=1.0, alpha=0.65, label="10 cm")
+        ax.set_ylabel("Wrist error (cm)", color="#1d4ed8")
+        ax.tick_params(axis="y", colors="#1d4ed8")
+        ax.set_ylim(0.0, joint_ylim)
+    else:
+        ax.set_yticks([])
+    if angle_error is not None:
+        values = angle_error[anchor_frames]
+        angle_ax.plot(anchor_frames, values, color="#86efac", linewidth=1.4, alpha=0.75)
+        angle_ax.scatter(anchor_frames[completed], values[completed], color="#16a34a", s=36, label="bend error")
+        angle_ax.axhline(
+            angle_tolerance_deg, color="#16a34a", linestyle="--", linewidth=1.0,
+            alpha=0.7, label=f"{angle_tolerance_deg:g} deg tolerance",
+        )
+        angle_ax.set_ylabel("Bend error (deg)", color="#15803d")
+        angle_ax.tick_params(axis="y", colors="#15803d")
+        angle_ax.set_ylim(0.0, angle_ylim)
+    else:
+        angle_ax.set_yticks([])
+    ax.axvline(frame, color="#111827", linewidth=1.2, alpha=0.8)
+    ax.set_xlim(0, max(1, anchor_mask.shape[0] - 1))
+    ax.set_xlabel("Frame (dots are active anchors)")
+    ax.set_title(f"{title}: sparse control error", pad=8, fontsize=11)
+    ax.grid(True, axis="x", linewidth=0.7, alpha=0.35)
+
+
+def render_latent_constraint_comparison(
+    *,
+    series: list[tuple[str, Tensor, Tensor | None]],
+    joint_ids: list[int],
+    angle_triplets: Tensor | None,
+    angle_target: Tensor | None,
+    anchor_mask: Tensor,
+    angle_tolerance_deg: float,
+    anchor_stride: int,
+    joint_target_space: str,
+    prompt: str,
+    sample_idx: int,
+    seed: int,
+    fps: int,
+    out_dir: Path,
+) -> None:
+    errors = [
+        control_error_series(
+            joints,
+            position_targets=position_targets,
+            joint_ids=joint_ids,
+            angle_triplets=angle_triplets,
+            angle_target=angle_target,
+        )
+        for _, joints, position_targets in series
+    ]
+    anchor_values = anchor_mask.bool()
+    joint_max = max(
+        [float(err[anchor_values].max()) for err, _ in errors if err is not None] + [10.0]
+    )
+    angle_max = max(
+        [float(err[anchor_values].max()) for _, err in errors if err is not None] + [angle_tolerance_deg]
+    )
+    joint_ylim = joint_max * 1.2 + 1.0
+    angle_ylim = angle_max * 1.2 + 1.0
+    n_cols = len(series)
+    fig = plt.figure(figsize=(max(13.5, 4.5 * n_cols), 9.8))
+    joint_names = ", ".join(JOINT_NAMES[joint].replace("_", " ") for joint in joint_ids)
+    angle_names = (
+        ", ".join(JOINT_NAMES[int(joint)].replace("_", " ") for joint in angle_triplets[:, 1])
+        if angle_triplets is not None
+        else ""
+    )
+    constraint_parts = [f"Sparse anchors every {anchor_stride} frames."]
+    if joint_ids:
+        constraint_parts.append(
+            f"Joint target: {joint_names} reproduce the reference {joint_target_space} positions."
+        )
+    if angle_triplets is not None:
+        constraint_parts.append(
+            f"Angle target: {angle_names} remain within +/-{angle_tolerance_deg:g} deg of the reference bend."
+        )
+    constraint_parts.append(
+        "Green stars/diamonds mark active targets; green bone chains identify angle-controlled joints."
+    )
+    constraint_text = " ".join(constraint_parts)
+    title = f"Sample {sample_idx} | Seed {seed} | Prompt: {prompt}\n{constraint_text}"
+    fig.suptitle("\n".join(textwrap.wrap(title, width=150)), fontsize=14, fontweight="semibold", y=0.985)
+    grid = fig.add_gridspec(2, n_cols, height_ratios=[2.3, 1.0], hspace=0.24, wspace=0.32)
+    pose_axes = [fig.add_subplot(grid[0, col], projection="3d") for col in range(n_cols)]
+    error_axes = [fig.add_subplot(grid[1, col]) for col in range(n_cols)]
+    angle_axes = [ax.twinx() for ax in error_axes]
+    fig.subplots_adjust(top=0.82, left=0.045, right=0.96, bottom=0.08)
+
+    def update(frame: int):
+        for idx, ((name, joints, targets), (joint_error, angle_error)) in enumerate(zip(series, errors)):
+            draw_latent_pose_frame(
+                pose_axes[idx],
+                joints_seq=joints,
+                position_targets=targets,
+                joint_ids=joint_ids,
+                angle_triplets=angle_triplets,
+                anchor_mask=anchor_mask,
+                joint_error=joint_error,
+                angle_error=angle_error,
+                title=name,
+                frame=frame,
+            )
+            draw_control_error_frame(
+                error_axes[idx],
+                angle_axes[idx],
+                joint_error=joint_error,
+                angle_error=angle_error,
+                anchor_mask=anchor_mask,
+                angle_tolerance_deg=angle_tolerance_deg,
+                joint_ylim=joint_ylim,
+                angle_ylim=angle_ylim,
+                title=name,
+                frame=frame,
+            )
+        return []
+
+    update(0)
+    png = out_dir / f"joint_angle_constraint_sample_{sample_idx:04d}_seed{seed:03d}_frame0.png"
+    gif = out_dir / f"joint_angle_constraint_sample_{sample_idx:04d}_seed{seed:03d}.gif"
+    fig.savefig(png, dpi=150, bbox_inches="tight")
+    held_frames: list[int] = []
+    anchor_hold = max(2, int(round(fps * 0.3)))
+    for frame in range(anchor_mask.shape[0]):
+        held_frames.append(frame)
+        if bool(anchor_mask[frame]):
+            held_frames.extend([frame] * anchor_hold)
+    animation = FuncAnimation(fig, update, frames=held_frames, interval=1000 / fps, blit=False)
+    animation.save(gif, writer=PillowWriter(fps=fps))
+    plt.close(fig)
+    print(f"[constraints-viz] wrote {png}")
+    print(f"[constraints-viz] wrote {gif}")
+
+
 def select_sample(ds: H3D263Dataset, start_idx: int, max_frames: int, min_root_span: float, auto: bool):
     if not auto:
         return start_idx, ds[start_idx], None
@@ -567,7 +887,7 @@ def main() -> None:
         length = int(canonical.shape[0])
         frame_mask = torch.ones(1, length, dtype=torch.bool, device=device)
 
-    generated = generate_full(
+    generated_batch, generated_tokens, token_mask = generate_full(
         vqvae,
         masked,
         residual,
@@ -581,9 +901,160 @@ def main() -> None:
         args.topk_filter_thres,
         args.sample_tokens,
         args.remask_kept_tokens,
-    )[0, :length]
+    )
+    generated = generated_batch[0, :length]
     real = real_x[0, :length]
     target, anchor_mask = interpolate_anchor_trajectory(root_xz(real.unsqueeze(0))[0], length, args.anchor_stride)
+
+    default_run_dir = ckpt_path.parent.parent if ckpt_path.parent.name == "checkpoints" else ckpt_path.parent
+    out_dir = Path(args.out_dir) if args.out_dir else default_run_dir / "constraints" / "viz"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    latent_joint = args.constraint_variant in {"joint", "joint-angle", "all"}
+    latent_angle = args.constraint_variant in {"angle", "joint-angle", "all"}
+    trajectory_mode = args.constraint_variant in {"projected", "vq", "both", "all"}
+    if latent_joint or latent_angle:
+        joint_ids = parse_csv_ints(args.joint_ids, name="--joint-ids") if latent_joint else []
+        angle_centers = parse_csv_ints(args.angle_joints, name="--angle-joints") if latent_angle else []
+        triplets = angle_triplets_from_centers(angle_centers, device) if latent_angle else None
+        decoded_length = int(
+            (token_mask[0].sum() * vqvae.downsample).clamp(max=length).item()
+        )
+        if decoded_length < 1:
+            raise RuntimeError("generated token mask contains no valid decoded frames")
+        _, latent_anchor_mask = interpolate_anchor_trajectory(
+            root_xz(real.unsqueeze(0))[0], decoded_length, args.anchor_stride
+        )
+        latent_anchor_mask_batch = latent_anchor_mask.unsqueeze(0)
+        with torch.no_grad():
+            real_joints = recover_joints_from_ric(real.unsqueeze(0).float())
+            generated_joints = recover_joints_from_ric(generated_batch.float())
+            initial_latents = vqvae.quantizer.decode(generated_tokens)
+
+        position_constraint: JointPositionConstraint | None = None
+        angle_constraint: BendAngleConstraint | None = None
+        angle_target: Tensor | None = None
+        joint_motion: Tensor | None = None
+        angle_motion: Tensor | None = None
+        if latent_joint:
+            position_constraint = build_joint_constraint(
+                real.unsqueeze(0),
+                generated_batch,
+                real_joints,
+                generated_joints,
+                latent_anchor_mask_batch,
+                joint_ids,
+                target_space=args.joint_target_space,
+            )
+            joint_result = refine_motion_latents(
+                vqvae,
+                initial_latents,
+                mean=normalizer.mean,
+                std=normalizer.std,
+                target_len=length,
+                token_mask=token_mask,
+                frame_mask=frame_mask,
+                position_constraint=position_constraint,
+                config=LatentRefinementConfig(
+                    steps=args.refinement_steps,
+                    learning_rate=args.refinement_lr,
+                    position_weight=args.position_weight,
+                    angle_weight=0.0,
+                    latent_weight=args.latent_weight,
+                    dynamics_weight=args.dynamics_weight,
+                    root_weight=args.root_weight,
+                    bone_weight=args.bone_weight,
+                    max_delta_norm=args.max_delta_norm,
+                    grad_clip_norm=args.grad_clip_norm,
+                ),
+            )
+            joint_motion = joint_result.motion
+            print(f"[constraints-viz] joint refinement metrics={joint_result.metrics}", flush=True)
+        if latent_angle:
+            assert triplets is not None
+            angle_constraint, angle_target = build_angle_constraint(
+                real_joints,
+                latent_anchor_mask_batch,
+                triplets,
+                args.angle_tolerance_deg,
+            )
+            angle_result = refine_motion_latents(
+                vqvae,
+                initial_latents,
+                mean=normalizer.mean,
+                std=normalizer.std,
+                target_len=length,
+                token_mask=token_mask,
+                frame_mask=frame_mask,
+                angle_constraint=angle_constraint,
+                config=LatentRefinementConfig(
+                    steps=args.refinement_steps,
+                    learning_rate=args.refinement_lr,
+                    position_weight=0.0,
+                    angle_weight=args.angle_weight,
+                    latent_weight=args.latent_weight,
+                    dynamics_weight=args.dynamics_weight,
+                    root_weight=args.root_weight,
+                    bone_weight=args.bone_weight,
+                    max_delta_norm=args.max_delta_norm,
+                    grad_clip_norm=args.grad_clip_norm,
+                ),
+            )
+            angle_motion = angle_result.motion
+            print(f"[constraints-viz] angle refinement metrics={angle_result.metrics}", flush=True)
+
+        position_targets = None if position_constraint is None else position_constraint.targets[0].detach().cpu()
+        rendered_joint_ids = joint_ids if position_constraint is not None else []
+        rendered_triplets = None if triplets is None else triplets.detach().cpu()
+        rendered_angle_target = None if angle_target is None else angle_target[0].detach().cpu()
+        real_joints_cpu = real_joints[0, :decoded_length].detach().cpu()
+        latent_series: list[tuple[str, Tensor, Tensor | None]] = [
+            (
+                "ground truth reference",
+                real_joints_cpu,
+                real_joints_cpu if position_constraint is not None else None,
+            ),
+            (
+                "generated",
+                generated_joints[0, :decoded_length].detach().cpu(),
+                None if position_targets is None else position_targets[:decoded_length],
+            ),
+        ]
+        if joint_motion is not None:
+            latent_series.append(
+                (
+                    "joint-position refined",
+                    recover_joints_from_ric(joint_motion.float())[0, :decoded_length].detach().cpu(),
+                    position_targets[:decoded_length] if position_targets is not None else None,
+                )
+            )
+        if angle_motion is not None:
+            latent_series.append(
+                (
+                    "bend-angle refined",
+                    recover_joints_from_ric(angle_motion.float())[0, :decoded_length].detach().cpu(),
+                    position_targets[:decoded_length] if position_targets is not None else None,
+                )
+            )
+        render_latent_constraint_comparison(
+            series=latent_series,
+            joint_ids=rendered_joint_ids,
+            angle_triplets=rendered_triplets,
+            angle_target=None if rendered_angle_target is None else rendered_angle_target[:decoded_length],
+            anchor_mask=latent_anchor_mask[:decoded_length].detach().cpu(),
+            angle_tolerance_deg=args.angle_tolerance_deg,
+            anchor_stride=args.anchor_stride,
+            joint_target_space=args.joint_target_space,
+            prompt=text,
+            sample_idx=sample_idx,
+            seed=args.seed,
+            fps=args.fps,
+            out_dir=out_dir,
+        )
+
+    if not trajectory_mode:
+        return
+
     projected = project_root_trajectory(generated, target, length)
     constrained_vq = vq_project(vqvae, normalizer, projected.unsqueeze(0), frame_mask)[0, :length]
 
@@ -591,16 +1062,13 @@ def main() -> None:
         ("ground truth", real),
         ("generated", generated),
     ]
-    if args.constraint_variant in {"projected", "both"}:
+    if args.constraint_variant in {"projected", "both", "all"}:
         series.append(("constraint exact", projected))
-    if args.constraint_variant in {"vq", "both"}:
+    if args.constraint_variant in {"vq", "both", "all"}:
         series.append(("constraint + VQ", constrained_vq))
     joints_by_name = [(name, recover_joints_from_ric(feat.unsqueeze(0))[0].float().cpu()) for name, feat in series]
     limits = axis_limits([j for _, j in joints_by_name], target.cpu())
 
-    default_run_dir = ckpt_path.parent.parent if ckpt_path.parent.name == "checkpoints" else ckpt_path.parent
-    out_dir = Path(args.out_dir) if args.out_dir else default_run_dir / "constraints" / "viz"
-    out_dir.mkdir(parents=True, exist_ok=True)
     fig = plt.figure(figsize=(18, 10.6))
     constraint_text = (
         f"Constraint: root XZ trajectory must pass through ordered anchors every "

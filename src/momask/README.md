@@ -106,6 +106,24 @@ heading; set it to `global` to test absolute clip-canonical joint targets. Bend
 angles are unsigned magnitudes: they can constrain how much
 a knee or elbow bends, but not the side of the bending plane by themselves.
 
+Render the same wrist-position and knee/elbow-angle refinements as synchronized
+GIFs. Each GIF shows the ground-truth reference, unconstrained generation,
+joint-refined motion, and angle-refined motion. Green targets appear on active
+anchor frames; the lower plots show wrist error in centimetres and bend-angle
+error in degrees.
+
+```bash
+# One quick sample before the full render.
+SAMPLES="0" SEEDS="0" \
+sbatch slurm/momask/visualize_momask_joint_angle_constraints.sbatch
+
+# Defaults to samples 0, 500, 1000, 1500, and 2000 with the validated 145k checkpoint.
+sbatch slurm/momask/visualize_momask_joint_angle_constraints.sbatch
+```
+
+Outputs are written under
+`runs/momask-canonical-tokens-clip200k/constraints/viz_joint_angle_step145k/`.
+
 ## Do not reuse
 
 - Anything under `rmg.*`. MoMask operates on flat 263-D HumanML3D features and
