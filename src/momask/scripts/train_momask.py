@@ -32,7 +32,13 @@ from momask.models import (
     TokenTransformerConfig,
 )
 from momask.data_utils import normalize_motion, token_mask_from_frame_mask
-from shared.data import CanonicalHumanML3DDataset, CanonicalHumanML3DWindowDataset, H3D263Dataset, collate
+from shared.data import (
+    CanonicalHumanML3DDataset,
+    CanonicalHumanML3DText2MotionDataset,
+    CanonicalHumanML3DWindowDataset,
+    H3D263Dataset,
+    collate,
+)
 from shared.text import CLIPTextEncoder, RandomTextEncoder, TextEncoder
 from shared.geometry import H3D_FEATURE_DIM, recover_joints_from_ric
 
@@ -58,6 +64,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--max-seq-len", type=int, default=80)
     p.add_argument("--min-seq-len", type=int, default=20)
+    p.add_argument(
+        "--paper-transformer-data",
+        action="store_true",
+        help="Use the official HumanML3D transformer sample construction, including caption time spans.",
+    )
+    p.add_argument(
+        "--humanml3d-texts-zip",
+        default=None,
+        help="Original HumanML3D texts.zip; required by --paper-transformer-data.",
+    )
     p.add_argument("--vq-steps", type=int, default=30)
     p.add_argument(
         "--vq-epochs",
@@ -66,6 +82,12 @@ def parse_args() -> argparse.Namespace:
         help="When positive, derive VQ training steps from this many complete DataLoader epochs.",
     )
     p.add_argument("--token-steps", type=int, default=20)
+    p.add_argument(
+        "--token-epochs",
+        type=int,
+        default=0,
+        help="If positive, override --token-steps with epochs * transformer DataLoader length.",
+    )
     p.add_argument(
         "--token-batch-size",
         type=int,
@@ -118,6 +140,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--adam-beta1", type=float, default=0.9)
     p.add_argument("--adam-beta2", type=float, default=0.999)
     p.add_argument("--weight-decay", type=float, default=0.0)
+    p.add_argument(
+        "--token-grad-clip",
+        type=float,
+        default=1.0,
+        help="Maximum token-transformer gradient norm; set to 0 to disable.",
+    )
     p.add_argument("--warmup-steps", type=int, default=0)
     p.add_argument("--lr-milestones", type=int, nargs="*", default=[])
     p.add_argument("--lr-gamma", type=float, default=0.1)
@@ -184,6 +212,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--clip-model", default="ViT-B/32")
     p.add_argument("--clip-cache-dir", default=None)
     p.add_argument("--clip-backend", choices=["auto", "openai", "transformers"], default="auto")
+    p.add_argument(
+        "--clip-l2-normalize",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="L2-normalize CLIP features. Official MoMask uses raw CLIP features.",
+    )
+    p.add_argument("--transformer-arch", choices=["legacy", "paper"], default="legacy")
     p.add_argument("--transformer-hidden-dim", type=int, default=64)
     p.add_argument("--transformer-depth", type=int, default=2)
     p.add_argument("--transformer-heads", type=int, default=4)
@@ -309,7 +344,9 @@ def restore_model_args(args: argparse.Namespace, ckpt: dict) -> None:
         "text_encoder",
         "clip_model",
         "clip_backend",
+        "clip_l2_normalize",
         "text_dim",
+        "transformer_arch",
         "transformer_hidden_dim",
         "transformer_depth",
         "transformer_heads",
@@ -336,6 +373,7 @@ def build_text_encoder(args: argparse.Namespace) -> TextEncoder:
             model_name=args.clip_model,
             cache_dir=args.clip_cache_dir,
             backend=args.clip_backend,
+            l2_normalize=args.clip_l2_normalize,
         )
         args.text_dim = encoder.text_dim
         return encoder
@@ -505,10 +543,13 @@ def cache_token_batches(
     loader: DataLoader,
     device: torch.device,
     normalizer: H3DNormalizer,
+    max_batches: int | None = None,
 ) -> list[dict[str, torch.Tensor | list[str]]]:
     vqvae.eval()
     cached = []
-    for batch in loader:
+    for batch_idx, batch in enumerate(loader):
+        if max_batches is not None and batch_idx >= max_batches:
+            break
         frame_mask = batch.mask.to(device)
         x = normalize_motion(batch.x1.to(device), frame_mask, normalizer)
         tokens = vqvae.encode_to_tokens(x).cpu()
@@ -704,6 +745,27 @@ def main() -> None:
             f"window={args.max_seq_len} stride={args.vq_window_stride} "
             f"preload={args.vq_window_preload} skipped_short={ds.num_skipped_short}"
         )
+    elif args.paper_transformer_data:
+        if args.vq_only:
+            raise ValueError("--paper-transformer-data is only valid for transformer training")
+        if not args.canonical_h3d_dir:
+            raise ValueError("--paper-transformer-data requires --canonical-h3d-dir")
+        if not args.humanml3d_texts_zip:
+            raise ValueError("--paper-transformer-data requires --humanml3d-texts-zip")
+        ds = CanonicalHumanML3DText2MotionDataset(
+            root=Path(args.data_root),
+            canonical_dir=Path(args.canonical_h3d_dir),
+            texts_zip=Path(args.humanml3d_texts_zip),
+            split=args.split,
+            max_seq_len=args.max_seq_len,
+            min_seq_len=args.min_seq_len,
+            unit_length=args.downsample,
+            subset_n=args.max_clips,
+        )
+        feature_source = (
+            f"canonical-paper-t2m:{args.canonical_h3d_dir} "
+            f"texts={args.humanml3d_texts_zip}"
+        )
     elif args.canonical_h3d_dir:
         ds = CanonicalHumanML3DDataset(
             root=Path(args.data_root),
@@ -729,7 +791,7 @@ def main() -> None:
     else:
         n_items = min(args.max_clips, len(ds))
         train_ds = Subset(ds, list(range(n_items)))
-        n_clips = n_items
+        n_clips = int(getattr(ds, "num_clips", n_items))
     if n_items <= 0:
         raise RuntimeError(f"no clips available in split={args.split!r}")
     if loaded_vq_ckpt is not None and "normalizer" in loaded_vq_ckpt:
@@ -757,13 +819,19 @@ def main() -> None:
         collate_fn=collate,
         num_workers=args.num_workers,
         pin_memory=device.type == "cuda",
-        drop_last=is_window_dataset and n_items >= args.batch_size,
+        drop_last=(is_window_dataset or args.paper_transformer_data) and n_items >= args.batch_size,
         **loader_kwargs,
     )
     if args.vq_epochs > 0:
         args.vq_steps = args.vq_epochs * len(loader)
         print(
             f"[momask-smoke] vq_epochs={args.vq_epochs} resolved_vq_steps={args.vq_steps}",
+            flush=True,
+        )
+    if args.token_epochs > 0:
+        args.token_steps = args.token_epochs * len(loader)
+        print(
+            f"[momask-smoke] token_epochs={args.token_epochs} resolved_token_steps={args.token_steps}",
             flush=True,
         )
     batches = cycle_loader(loader)
@@ -953,7 +1021,14 @@ def main() -> None:
         f"residual_share_weight={args.residual_share_weight}",
         flush=True,
     )
-    cached_batches = cache_token_batches(vqvae, text_encoder, loader, device, normalizer)
+    cached_batches = cache_token_batches(
+        vqvae,
+        text_encoder,
+        loader,
+        device,
+        normalizer,
+        max_batches=args.eval_batches if args.live_token_crops else None,
+    )
     token_batch_size = args.token_batch_size or args.batch_size
     token_cache = None
     if args.live_token_crops:
@@ -973,12 +1048,14 @@ def main() -> None:
     cfg = TokenTransformerConfig(
         vocab_size=args.codebook_size,
         text_dim=args.text_dim,
+        code_dim=args.vq_latent_dim,
         hidden_dim=args.transformer_hidden_dim,
         depth=args.transformer_depth,
         num_heads=args.transformer_heads,
         ffn_dim=args.transformer_ffn_dim,
         max_seq_len=math.ceil(args.max_seq_len / args.downsample),
         dropout=args.transformer_dropout,
+        architecture=args.transformer_arch,
     )
     masked_model = MaskedMotionTransformer(cfg).to(device)
     if args.residual_arch == "codebook":
@@ -1017,9 +1094,9 @@ def main() -> None:
         masked_model.eval()
         optimizer_state = None
         print("[momask-smoke] frozen masked transformer; optimizer trains residual transformer only", flush=True)
-    token_params = list(residual_model.parameters())
+    token_params = [param for param in residual_model.parameters() if param.requires_grad]
     if not args.freeze_masked_transformer:
-        token_params = list(masked_model.parameters()) + token_params
+        token_params = [param for param in masked_model.parameters() if param.requires_grad] + token_params
     token_opt = torch.optim.AdamW(
         token_params,
         lr=args.lr,
@@ -1070,27 +1147,45 @@ def main() -> None:
                 cond_drop_prob=args.base_cond_drop,
                 force_full_mask=bool(torch.rand(()) < args.base_full_mask_prob),
             )
-        residual_parts = [
-            residual_model.training_loss(
+        if args.transformer_arch == "paper" and isinstance(residual_model, CodebookResidualTransformer):
+            res_loss, sampled_levels = residual_model.sampled_training_loss(
                 tok,
-                level,
                 cond=cond,
                 valid_mask=token_mask,
                 cond_drop_prob=args.residual_cond_drop,
             )
-            for level in range(1, tok.shape[1])
-        ]
-        res_loss = torch.stack(residual_parts).mean() if residual_parts else base_loss.new_tensor(0.0)
+            residual_parts = [res_loss]
+        else:
+            sampled_levels = None
+            residual_parts = [
+                residual_model.training_loss(
+                    tok,
+                    level,
+                    cond=cond,
+                    valid_mask=token_mask,
+                    cond_drop_prob=args.residual_cond_drop,
+                )
+                for level in range(1, tok.shape[1])
+            ]
+            res_loss = torch.stack(residual_parts).mean() if residual_parts else base_loss.new_tensor(0.0)
         loss = res_loss if args.freeze_masked_transformer else base_loss + res_loss
         token_opt.zero_grad(set_to_none=True)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(list(masked_model.parameters()) + list(residual_model.parameters()), 1.0)
+        if args.token_grad_clip > 0.0:
+            torch.nn.utils.clip_grad_norm_(
+                list(masked_model.parameters()) + list(residual_model.parameters()),
+                args.token_grad_clip,
+            )
         token_opt.step()
         if step == 1 or step == args.token_steps or step % args.log_every == 0:
-            res_levels = " ".join(
-                f"res_l{level}={loss.item():.5f}"
-                for level, loss in zip(range(1, tok.shape[1]), residual_parts)
-            )
+            if sampled_levels is not None:
+                counts = torch.bincount(sampled_levels, minlength=tok.shape[1]).tolist()
+                res_levels = "res_q_counts=" + "/".join(str(v) for v in counts[1:])
+            else:
+                res_levels = " ".join(
+                    f"res_l{level}={level_loss.item():.5f}"
+                    for level, level_loss in zip(range(1, tok.shape[1]), residual_parts)
+                )
             print(
                 f"[tok {step:04d}] loss={loss.item():.5f} "
                 f"base_ce={base_loss.item():.5f} residual_ce={res_loss.item():.5f} "

@@ -49,12 +49,14 @@ def _build_models(args: dict, device: torch.device):
     cfg = TokenTransformerConfig(
         vocab_size=int(args["codebook_size"]),
         text_dim=int(args["text_dim"]),
+        code_dim=int(args["vq_latent_dim"]),
         hidden_dim=int(args["transformer_hidden_dim"]),
         depth=int(args["transformer_depth"]),
         num_heads=int(args["transformer_heads"]),
         ffn_dim=int(args["transformer_ffn_dim"]),
         max_seq_len=math.ceil(int(args["max_seq_len"]) / int(args.get("downsample", 1))),
         dropout=float(args["transformer_dropout"]),
+        architecture=str(args.get("transformer_arch", "legacy")),
     )
     masked_model = MaskedMotionTransformer(cfg).to(device)
     if args.get("residual_arch", "simple") == "codebook":

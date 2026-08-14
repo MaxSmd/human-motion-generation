@@ -13,6 +13,7 @@ from .humanml3d import (
 )
 from .humanml3d_263 import (
     CanonicalHumanML3DDataset,
+    CanonicalHumanML3DText2MotionDataset,
     CanonicalHumanML3DWindowDataset,
     H3D263Dataset,
     H3D263Representation,
@@ -34,5 +35,6 @@ __all__ = [
     "H3D263Representation",
     "H3D263Dataset",
     "CanonicalHumanML3DDataset",
+    "CanonicalHumanML3DText2MotionDataset",
     "CanonicalHumanML3DWindowDataset",
 ]

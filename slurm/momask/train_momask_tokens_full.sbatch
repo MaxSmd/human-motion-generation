@@ -31,12 +31,14 @@ IMAGE="${IMAGE:-${HOME}/rmg-momask.sqsh}"
 HF_CACHE="${HF_CACHE:-${HOME}/hf-cache}"
 DATA_ROOT="${DATA_ROOT:-/mnt/projects/drl4cvb/human-motion-representation/data/data/humanml3d_packed}"
 CANONICAL_H3D_DIR="${CANONICAL_H3D_DIR:-}"
+HUMANML3D_TEXTS_ZIP="${HUMANML3D_TEXTS_ZIP:-}"
 VQ_CKPT="${VQ_CKPT:-runs/momask-full-vq-raw-12668/momask_vq_latest.pt}"
 TOKEN_CKPT="${TOKEN_CKPT:-}"
 MASKED_CKPT="${MASKED_CKPT:-}"
 RUN_NAME="${RUN_NAME:-momask-full-tokens-${SLURM_JOB_ID:-$(date +%Y%m%d-%H%M%S)}}"
 OUTPUT_DIR="${OUTPUT_DIR:-runs/${RUN_NAME}}"
 TOKEN_STEPS="${TOKEN_STEPS:-100000}"
+TOKEN_EPOCHS="${TOKEN_EPOCHS:-0}"
 SAVE_EVERY="${SAVE_EVERY:-5000}"
 LOG_EVERY="${LOG_EVERY:-1000}"
 EVAL_BATCHES="${EVAL_BATCHES:-32}"
@@ -45,11 +47,17 @@ BATCH_SIZE="${BATCH_SIZE:-32}"
 NUM_WORKERS="${NUM_WORKERS:-0}"
 TOKEN_BATCH_SIZE="${TOKEN_BATCH_SIZE:-128}"
 MAX_SEQ_LEN="${MAX_SEQ_LEN:-80}"
+MIN_SEQ_LEN="${MIN_SEQ_LEN:-20}"
 TEXT_ENCODER="${TEXT_ENCODER:-random}"
 CLIP_MODEL="${CLIP_MODEL:-ViT-B/32}"
 CLIP_CACHE_DIR="${CLIP_CACHE_DIR:-${HF_CACHE}}"
 CLIP_BACKEND="${CLIP_BACKEND:-auto}"
+CLIP_L2_NORMALIZE="${CLIP_L2_NORMALIZE:-1}"
 TOKEN_LR="${TOKEN_LR:-1e-4}"
+ADAM_BETA2="${ADAM_BETA2:-0.999}"
+WEIGHT_DECAY="${WEIGHT_DECAY:-0.0}"
+TOKEN_GRAD_CLIP="${TOKEN_GRAD_CLIP:-1.0}"
+TRANSFORMER_ARCH="${TRANSFORMER_ARCH:-legacy}"
 TRANSFORMER_HIDDEN_DIM="${TRANSFORMER_HIDDEN_DIM:-512}"
 TRANSFORMER_DEPTH="${TRANSFORMER_DEPTH:-8}"
 TRANSFORMER_HEADS="${TRANSFORMER_HEADS:-8}"
@@ -64,6 +72,7 @@ BASE_FULL_MASK_PROB="${BASE_FULL_MASK_PROB:-0.3}"
 GENERATION_STEPS="${GENERATION_STEPS:-10}"
 CACHE_TOKEN_DEVICE="${CACHE_TOKEN_DEVICE:-cuda}"
 LIVE_TOKEN_CROPS="${LIVE_TOKEN_CROPS:-0}"
+PAPER_TRANSFORMER_DATA="${PAPER_TRANSFORMER_DATA:-0}"
 WARMUP_STEPS="${WARMUP_STEPS:-0}"
 LR_MILESTONES="${LR_MILESTONES:-}"
 LR_GAMMA="${LR_GAMMA:-0.1}"
@@ -89,14 +98,15 @@ echo "[momask-tokens] image=${IMAGE}"
 echo "[momask-tokens] hf_cache=${HF_CACHE}"
 echo "[momask-tokens] data_root=${DATA_ROOT}"
 echo "[momask-tokens] canonical_h3d_dir=${CANONICAL_H3D_DIR:-<checkpoint-or-packed-derived>}"
+echo "[momask-tokens] humanml3d_texts_zip=${HUMANML3D_TEXTS_ZIP:-<unused>}"
 echo "[momask-tokens] vq_ckpt=${VQ_CKPT}"
 echo "[momask-tokens] token_ckpt=${TOKEN_CKPT:-<none>}"
 echo "[momask-tokens] masked_ckpt=${MASKED_CKPT:-<none>}"
 echo "[momask-tokens] output_dir=${OUTPUT_DIR}"
-echo "[momask-tokens] token_steps=${TOKEN_STEPS} max_clips=${MAX_CLIPS} batch_size=${BATCH_SIZE} token_batch_size=${TOKEN_BATCH_SIZE} num_workers=${NUM_WORKERS} max_seq_len=${MAX_SEQ_LEN}"
-echo "[momask-tokens] text_encoder=${TEXT_ENCODER} clip_model=${CLIP_MODEL} clip_backend=${CLIP_BACKEND}"
-echo "[momask-tokens] transformer hidden=${TRANSFORMER_HIDDEN_DIM} depth=${TRANSFORMER_DEPTH} heads=${TRANSFORMER_HEADS} ffn=${TRANSFORMER_FFN_DIM} dropout=${TRANSFORMER_DROPOUT}"
-echo "[momask-tokens] lr=${TOKEN_LR} residual_arch=${RESIDUAL_ARCH} residual_share_weight=${RESIDUAL_SHARE_WEIGHT} freeze_masked=${FREEZE_MASKED} live_token_crops=${LIVE_TOKEN_CROPS} base_full_mask_prob=${BASE_FULL_MASK_PROB} generation_steps=${GENERATION_STEPS}"
+echo "[momask-tokens] token_steps=${TOKEN_STEPS} token_epochs=${TOKEN_EPOCHS} max_clips=${MAX_CLIPS} batch_size=${BATCH_SIZE} token_batch_size=${TOKEN_BATCH_SIZE} num_workers=${NUM_WORKERS} max_seq_len=${MAX_SEQ_LEN} min_seq_len=${MIN_SEQ_LEN}"
+echo "[momask-tokens] text_encoder=${TEXT_ENCODER} clip_model=${CLIP_MODEL} clip_backend=${CLIP_BACKEND} clip_l2_normalize=${CLIP_L2_NORMALIZE}"
+echo "[momask-tokens] transformer arch=${TRANSFORMER_ARCH} hidden=${TRANSFORMER_HIDDEN_DIM} depth=${TRANSFORMER_DEPTH} heads=${TRANSFORMER_HEADS} ffn=${TRANSFORMER_FFN_DIM} dropout=${TRANSFORMER_DROPOUT}"
+echo "[momask-tokens] lr=${TOKEN_LR} adam_beta2=${ADAM_BETA2} weight_decay=${WEIGHT_DECAY} grad_clip=${TOKEN_GRAD_CLIP} residual_arch=${RESIDUAL_ARCH} residual_share_weight=${RESIDUAL_SHARE_WEIGHT} freeze_masked=${FREEZE_MASKED} live_token_crops=${LIVE_TOKEN_CROPS} paper_data=${PAPER_TRANSFORMER_DATA} base_full_mask_prob=${BASE_FULL_MASK_PROB} generation_steps=${GENERATION_STEPS}"
 echo "[momask-tokens] warmup_steps=${WARMUP_STEPS} lr_milestones=${LR_MILESTONES:-<none>} lr_gamma=${LR_GAMMA}"
 
 RESIDUAL_SHARE_ARG=""
@@ -110,6 +120,18 @@ fi
 LIVE_TOKEN_CROPS_ARG=""
 if [ "${LIVE_TOKEN_CROPS}" = "1" ]; then
     LIVE_TOKEN_CROPS_ARG="--live-token-crops"
+fi
+PAPER_DATA_ARG=""
+if [ "${PAPER_TRANSFORMER_DATA}" = "1" ]; then
+    if [ -z "${HUMANML3D_TEXTS_ZIP}" ]; then
+        echo "[momask-tokens] ERROR: PAPER_TRANSFORMER_DATA=1 requires HUMANML3D_TEXTS_ZIP" >&2
+        exit 2
+    fi
+    PAPER_DATA_ARG="--paper-transformer-data --humanml3d-texts-zip '${HUMANML3D_TEXTS_ZIP}'"
+fi
+CLIP_NORMALIZE_ARG="--clip-l2-normalize"
+if [ "${CLIP_L2_NORMALIZE}" = "0" ]; then
+    CLIP_NORMALIZE_ARG="--no-clip-l2-normalize"
 fi
 LR_MILESTONES_ARG=""
 if [ -n "${LR_MILESTONES}" ]; then
@@ -138,20 +160,28 @@ enroot start \
             --num-workers ${NUM_WORKERS} \\
             --token-batch-size ${TOKEN_BATCH_SIZE} \\
             --max-seq-len ${MAX_SEQ_LEN} \\
+            --min-seq-len ${MIN_SEQ_LEN} \\
+            ${PAPER_DATA_ARG} \\
             --text-encoder ${TEXT_ENCODER} \\
             --clip-model '${CLIP_MODEL}' \\
             --clip-cache-dir '${CLIP_CACHE_DIR}' \\
             --clip-backend ${CLIP_BACKEND} \\
+            ${CLIP_NORMALIZE_ARG} \\
             --load-vq-checkpoint '${VQ_CKPT}' \\
             ${TOKEN_CKPT_ARG} \\
             ${MASKED_CKPT_ARG} \\
             --vq-steps 0 \\
             --token-steps ${TOKEN_STEPS} \\
+            --token-epochs ${TOKEN_EPOCHS} \\
             --lr ${TOKEN_LR} \\
+            --adam-beta2 ${ADAM_BETA2} \\
+            --weight-decay ${WEIGHT_DECAY} \\
+            --token-grad-clip ${TOKEN_GRAD_CLIP} \\
             --warmup-steps ${WARMUP_STEPS} \\
             ${LR_MILESTONES_ARG} \\
             --lr-gamma ${LR_GAMMA} \\
             --text-dim 64 \\
+            --transformer-arch ${TRANSFORMER_ARCH} \\
             --transformer-hidden-dim ${TRANSFORMER_HIDDEN_DIM} \\
             --transformer-depth ${TRANSFORMER_DEPTH} \\
             --transformer-heads ${TRANSFORMER_HEADS} \\

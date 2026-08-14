@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import random
 import types
 import zipfile
 from pathlib import Path
@@ -13,6 +14,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from momask.models import (
+    CodebookResidualTransformer,
     MaskedMotionTransformer,
     MotionRVQVAE,
     ResidualVectorQuantizer,
@@ -27,7 +29,12 @@ from momask.scripts.train_momask import (
     stack_token_cache,
 )
 from momask.tasks import generate_h3d263
-from shared.data import CanonicalHumanML3DWindowDataset, H3D263Dataset, collate
+from shared.data import (
+    CanonicalHumanML3DText2MotionDataset,
+    CanonicalHumanML3DWindowDataset,
+    H3D263Dataset,
+    collate,
+)
 from shared.geometry import H3D_FEATURE_DIM, NUM_JOINTS
 
 
@@ -233,6 +240,108 @@ def test_canonical_window_dataset_preloads_and_indexes_all_windows(tmp_path: Pat
     sample = ds[2]
     assert sample.clip_id == "000001:4"
     assert torch.equal(sample.x1, torch.from_numpy(first[4:8]))
+
+
+def test_paper_text_motion_dataset_preserves_caption_spans_and_196_padding(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    canonical = tmp_path / "new_joint_vecs"
+    canonical.mkdir()
+    (tmp_path / "splits.json").write_text(
+        json.dumps({"train": ["000001", "000002"], "val": [], "test": []})
+    )
+    motion = np.arange(100 * H3D_FEATURE_DIM, dtype=np.float32).reshape(100, H3D_FEATURE_DIM)
+    np.save(canonical / "000001.npy", motion)
+    np.save(canonical / "000002.npy", np.zeros((200, H3D_FEATURE_DIM), dtype=np.float32))
+    with zipfile.ZipFile(tmp_path / "texts.zip", "w") as zf:
+        zf.writestr(
+            "texts/000001.txt",
+            "whole caption#whole/OTHER#0#0\n"
+            "another whole caption#another/OTHER#0#0\n"
+            "segment caption#segment/OTHER#1.0#3.5\n",
+        )
+        zf.writestr("texts/000002.txt", "excluded#excluded/OTHER#0#0\n")
+
+    ds = CanonicalHumanML3DText2MotionDataset(
+        tmp_path,
+        canonical,
+        tmp_path / "texts.zip",
+        max_seq_len=196,
+        min_seq_len=40,
+        unit_length=4,
+        subset_n=999999,
+    )
+    assert ds.num_clips == 1
+    assert len(ds) == 2
+
+    monkeypatch.setattr(random, "random", lambda: 1.0)
+    monkeypatch.setattr(random, "randint", lambda _low, _high: 0)
+    monkeypatch.setattr(random, "choice", lambda values: values[0])
+    def unexpected_load(*_args, **_kwargs):
+        raise AssertionError("preloaded text-motion dataset reopened a NumPy file")
+
+    monkeypatch.setattr(np, "load", unexpected_load)
+
+    full_idx = next(i for i, entry in enumerate(ds.entries) if entry.clip_id == "000001")
+    segment_idx = next(i for i, entry in enumerate(ds.entries) if ":segment" in entry.clip_id)
+    full = ds[full_idx]
+    segment = ds[segment_idx]
+    assert full.length == 100
+    assert full.x1.shape == (196, H3D_FEATURE_DIM)
+    assert full.text == "whole caption"
+    assert torch.equal(full.x1[:100], torch.from_numpy(motion))
+    assert not full.x1[100:].any()
+    assert segment.length == 48
+    assert segment.text == "segment caption"
+    assert torch.equal(segment.x1[:48], torch.from_numpy(motion[20:68]))
+    assert not segment.x1[48:].any()
+
+
+def test_paper_transformers_use_official_shapes_and_sample_one_residual_level() -> None:
+    torch.manual_seed(7)
+    cfg = TokenTransformerConfig(
+        vocab_size=8,
+        text_dim=6,
+        code_dim=12,
+        hidden_dim=8,
+        depth=1,
+        num_heads=2,
+        ffn_dim=16,
+        max_seq_len=6,
+        dropout=0.0,
+        architecture="paper",
+    )
+    masked = MaskedMotionTransformer(cfg)
+    residual = CodebookResidualTransformer(
+        cfg,
+        num_quantizers=4,
+        code_dim=cfg.code_dim,
+        share_weight=True,
+    )
+    assert masked.token_embed.embedding_dim == cfg.code_dim
+    assert "pos_embed" not in dict(masked.named_parameters())
+    assert isinstance(masked.norm, torch.nn.Identity)
+
+    tokens = torch.randint(0, cfg.vocab_size, (3, 4, 6))
+    valid = torch.tensor(
+        [
+            [True, True, True, True, True, True],
+            [True, True, True, True, False, False],
+            [True, True, True, False, False, False],
+        ]
+    )
+    cond = torch.randn(3, cfg.text_dim)
+    base_loss = masked.training_loss(tokens[:, 0], cond=cond, valid_mask=valid)
+    residual_loss, levels = residual.sampled_training_loss(
+        tokens,
+        cond=cond,
+        valid_mask=valid,
+    )
+    assert torch.isfinite(base_loss)
+    assert torch.isfinite(residual_loss)
+    assert levels.shape == (3,)
+    assert ((levels >= 1) & (levels < 4)).all()
 
 
 def test_fixed_window_tensor_batcher_preserves_window_contents(tmp_path: Path) -> None:

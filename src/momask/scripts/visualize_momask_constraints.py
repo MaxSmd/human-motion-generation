@@ -119,6 +119,7 @@ def build_text_encoder(args: argparse.Namespace, saved_args: dict) -> TextEncode
             model_name=args.clip_model or str(saved_args.get("clip_model", "ViT-B/32")),
             cache_dir=args.clip_cache_dir,
             backend=args.clip_backend,
+            l2_normalize=bool(saved_args.get("clip_l2_normalize", True)),
         )
     raise ValueError(f"unknown text encoder: {kind}")
 
@@ -145,12 +146,14 @@ def build_models(ckpt: dict, device: torch.device):
     cfg = TokenTransformerConfig(
         vocab_size=int(a.get("codebook_size", 64)),
         text_dim=int(a.get("text_dim", 64)),
+        code_dim=int(a.get("vq_latent_dim", 32)),
         hidden_dim=int(a.get("transformer_hidden_dim", 64)),
         depth=int(a.get("transformer_depth", 2)),
         num_heads=int(a.get("transformer_heads", 4)),
         ffn_dim=int(a.get("transformer_ffn_dim", 128)),
         max_seq_len=math.ceil(int(a.get("max_seq_len", 80)) / int(a.get("downsample", 1))),
         dropout=float(a.get("transformer_dropout", 0.0)),
+        architecture=str(a.get("transformer_arch", "legacy")),
     )
     masked = MaskedMotionTransformer(cfg).to(device)
     if a.get("residual_arch", "simple") == "codebook":

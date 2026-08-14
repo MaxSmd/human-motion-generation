@@ -40,21 +40,41 @@ def sample_logits(logits: Tensor, *, temperature: float = 1.0, topk_filter_thres
 class TokenTransformerConfig:
     vocab_size: int = 512
     text_dim: int = 1024
+    code_dim: int = 512
     hidden_dim: int = 384
     depth: int = 8
     num_heads: int = 6
     ffn_dim: int = 1024
     max_seq_len: int = 196
     dropout: float = 0.1
+    architecture: str = "legacy"
 
 
 class _TransformerBackbone(nn.Module):
     def __init__(self, cfg: TokenTransformerConfig) -> None:
         super().__init__()
+        if cfg.architecture not in {"legacy", "paper"}:
+            raise ValueError("transformer architecture must be 'legacy' or 'paper'")
         self.cfg = cfg
-        self.pos_embed = nn.Parameter(torch.zeros(1, cfg.max_seq_len, cfg.hidden_dim))
+        if cfg.architecture == "paper":
+            position = torch.arange(cfg.max_seq_len, dtype=torch.float32).unsqueeze(1)
+            div_term = torch.exp(
+                torch.arange(0, cfg.hidden_dim, 2, dtype=torch.float32)
+                * (-math.log(10000.0) / cfg.hidden_dim)
+            )
+            pe = torch.zeros(1, cfg.max_seq_len, cfg.hidden_dim)
+            pe[0, :, 0::2] = torch.sin(position * div_term)
+            pe[0, :, 1::2] = torch.cos(position * div_term)
+            self.register_buffer("pos_embed", pe)
+            self.pos_dropout = nn.Dropout(cfg.dropout)
+        else:
+            self.pos_embed = nn.Parameter(torch.zeros(1, cfg.max_seq_len, cfg.hidden_dim))
+            self.pos_dropout = nn.Identity()
         self.text_proj = nn.Linear(cfg.text_dim, cfg.hidden_dim)
-        self.null_text = nn.Parameter(torch.zeros(cfg.text_dim))
+        if cfg.architecture == "paper":
+            self.register_buffer("null_text", torch.zeros(cfg.text_dim))
+        else:
+            self.null_text = nn.Parameter(torch.zeros(cfg.text_dim))
         layer = nn.TransformerEncoderLayer(
             d_model=cfg.hidden_dim,
             nhead=cfg.num_heads,
@@ -62,11 +82,22 @@ class _TransformerBackbone(nn.Module):
             dropout=cfg.dropout,
             activation="gelu",
             batch_first=True,
-            norm_first=True,
+            norm_first=cfg.architecture != "paper",
         )
         self.encoder = nn.TransformerEncoder(layer, num_layers=cfg.depth)
-        self.norm = nn.LayerNorm(cfg.hidden_dim)
-        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+        self.norm = nn.Identity() if cfg.architecture == "paper" else nn.LayerNorm(cfg.hidden_dim)
+        if cfg.architecture != "paper":
+            nn.init.trunc_normal_(self.pos_embed, std=0.02)
+
+    @staticmethod
+    def _paper_init(module: nn.Module) -> None:
+        if isinstance(module, (nn.Linear, nn.Embedding)):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if isinstance(module, nn.Linear) and module.bias is not None:
+                nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.LayerNorm):
+            nn.init.ones_(module.weight)
+            nn.init.zeros_(module.bias)
 
     def _condition(self, cond: Tensor | None, B: int, device: torch.device, drop_cond_mask: Tensor | None) -> Tensor:
         if cond is None:
@@ -80,7 +111,7 @@ class _TransformerBackbone(nn.Module):
         B, T, _ = x.shape
         if T > self.cfg.max_seq_len:
             raise ValueError(f"sequence length {T} exceeds max_seq_len {self.cfg.max_seq_len}")
-        h = x + self.pos_embed[:, :T]
+        h = self.pos_dropout(x + self.pos_embed[:, :T])
         c = self._condition(cond, B, h.device, drop_cond_mask).unsqueeze(1)
         src = torch.cat([c, h], dim=1)
         key_padding_mask = None
@@ -100,8 +131,21 @@ class MaskedMotionTransformer(_TransformerBackbone):
         cfg = cfg or TokenTransformerConfig()
         super().__init__(cfg)
         self.mask_token_id = cfg.vocab_size
-        self.token_embed = nn.Embedding(cfg.vocab_size + 1, cfg.hidden_dim)
-        self.to_logits = nn.Linear(cfg.hidden_dim, cfg.vocab_size)
+        self.pad_token_id = cfg.vocab_size + 1
+        if cfg.architecture == "paper":
+            self.token_embed = nn.Embedding(cfg.vocab_size + 2, cfg.code_dim)
+            self.input_proj = nn.Linear(cfg.code_dim, cfg.hidden_dim)
+            self.to_logits = nn.Sequential(
+                nn.Linear(cfg.hidden_dim, cfg.hidden_dim),
+                nn.GELU(),
+                nn.LayerNorm(cfg.hidden_dim, eps=1e-12),
+                nn.Linear(cfg.hidden_dim, cfg.vocab_size),
+            )
+            self.apply(self._paper_init)
+        else:
+            self.token_embed = nn.Embedding(cfg.vocab_size + 1, cfg.hidden_dim)
+            self.input_proj = nn.Identity()
+            self.to_logits = nn.Linear(cfg.hidden_dim, cfg.vocab_size)
 
     def forward(
         self,
@@ -111,7 +155,10 @@ class MaskedMotionTransformer(_TransformerBackbone):
         mask: Tensor | None = None,
         drop_cond_mask: Tensor | None = None,
     ) -> Tensor:
-        h = self.token_embed(tokens.clamp_min(0))
+        if self.cfg.architecture == "paper" and mask is not None:
+            tokens = torch.where(mask, tokens, self.pad_token_id)
+        max_token_id = self.pad_token_id if self.cfg.architecture == "paper" else self.mask_token_id
+        h = self.input_proj(self.token_embed(tokens.clamp(0, max_token_id)))
         h = self._encode(h, cond=cond, mask=mask, drop_cond_mask=drop_cond_mask)
         return self.to_logits(h)
 
@@ -137,27 +184,46 @@ class MaskedMotionTransformer(_TransformerBackbone):
             tau = torch.rand(B, device=device)
             ratio = torch.cos(math.pi * tau / 2.0).clamp_min(1.0 / max(T, 1))
             corrupted = tokens.clone()
-            predict_mask = torch.zeros(B, T, dtype=torch.bool, device=device)
-            for i in range(B):
+            if self.cfg.architecture == "paper":
                 candidates = (
-                    valid_mask[i]
+                    valid_mask.bool()
                     if valid_mask is not None
-                    else torch.ones(T, dtype=torch.bool, device=device)
+                    else torch.ones(B, T, dtype=torch.bool, device=device)
                 )
-                idx = candidates.nonzero(as_tuple=False).flatten()
-                if idx.numel() == 0:
-                    continue
-                n = max(1, int(math.ceil(idx.numel() * float(ratio[i]))))
-                chosen = idx[torch.randperm(idx.numel(), device=device)[:n]]
-                predict_mask[i, chosen] = True
-            replace_prob = torch.rand(B, T, device=device)
-            random_tokens = torch.randint_like(corrupted, high=self.cfg.vocab_size)
-            corrupted = torch.where(predict_mask & (replace_prob < 0.8), self.mask_token_id, corrupted)
-            corrupted = torch.where(
-                predict_mask & (replace_prob >= 0.8) & (replace_prob < 0.9),
-                random_tokens,
-                corrupted,
-            )
+                n_masked = torch.round(T * ratio).long().clamp(min=1)
+                ranks = torch.rand(B, T, device=device).argsort(dim=-1).argsort(dim=-1)
+                predict_mask = (ranks < n_masked.unsqueeze(-1)) & candidates
+                random_replace = predict_mask & (torch.rand(B, T, device=device) < 0.1)
+                mask_replace = (
+                    predict_mask
+                    & ~random_replace
+                    & (torch.rand(B, T, device=device) < 0.88)
+                )
+                random_tokens = torch.randint_like(corrupted, high=self.cfg.vocab_size)
+                corrupted = torch.where(random_replace, random_tokens, corrupted)
+                corrupted = torch.where(mask_replace, self.mask_token_id, corrupted)
+            else:
+                predict_mask = torch.zeros(B, T, dtype=torch.bool, device=device)
+                for i in range(B):
+                    candidates = (
+                        valid_mask[i]
+                        if valid_mask is not None
+                        else torch.ones(T, dtype=torch.bool, device=device)
+                    )
+                    idx = candidates.nonzero(as_tuple=False).flatten()
+                    if idx.numel() == 0:
+                        continue
+                    n = max(1, int(math.ceil(idx.numel() * float(ratio[i]))))
+                    chosen = idx[torch.randperm(idx.numel(), device=device)[:n]]
+                    predict_mask[i, chosen] = True
+                replace_prob = torch.rand(B, T, device=device)
+                random_tokens = torch.randint_like(corrupted, high=self.cfg.vocab_size)
+                corrupted = torch.where(predict_mask & (replace_prob < 0.8), self.mask_token_id, corrupted)
+                corrupted = torch.where(
+                    predict_mask & (replace_prob >= 0.8) & (replace_prob < 0.9),
+                    random_tokens,
+                    corrupted,
+                )
         drop = torch.rand(B, device=device) < cond_drop_prob
         logits = self(corrupted, cond=cond, mask=valid_mask, drop_cond_mask=drop)
         loss_mask = predict_mask if valid_mask is None else predict_mask & valid_mask
@@ -362,10 +428,16 @@ class CodebookResidualTransformer(_TransformerBackbone):
         self.output_proj = nn.Sequential(
             nn.Linear(cfg.hidden_dim, cfg.hidden_dim),
             nn.GELU(),
-            nn.LayerNorm(cfg.hidden_dim),
+            nn.LayerNorm(cfg.hidden_dim, eps=1e-12 if cfg.architecture == "paper" else 1e-5),
             nn.Linear(cfg.hidden_dim, code_dim),
         )
-        self.quant_embed = nn.Embedding(num_quantizers, cfg.hidden_dim)
+        self.quant_embed = (
+            nn.Linear(num_quantizers, cfg.hidden_dim)
+            if cfg.architecture == "paper"
+            else nn.Embedding(num_quantizers, cfg.hidden_dim)
+        )
+        if cfg.architecture == "paper":
+            self.apply(self._paper_init)
 
     def _token_embed_weight(self) -> Tensor:
         if self.share_weight:
@@ -391,7 +463,7 @@ class CodebookResidualTransformer(_TransformerBackbone):
     def _encode_codes(
         self,
         history_codes: Tensor,
-        target_level: int,
+        target_level: int | Tensor,
         *,
         cond: Tensor | None,
         mask: Tensor | None,
@@ -400,9 +472,19 @@ class CodebookResidualTransformer(_TransformerBackbone):
         B, T, _ = history_codes.shape
         if T > self.cfg.max_seq_len:
             raise ValueError(f"sequence length {T} exceeds max_seq_len {self.cfg.max_seq_len}")
-        h = self.input_proj(history_codes) + self.pos_embed[:, :T]
+        h = self.pos_dropout(self.input_proj(history_codes) + self.pos_embed[:, :T])
         c = self._condition(cond, B, h.device, drop_cond_mask).unsqueeze(1)
-        q = self.quant_embed(torch.full((B,), target_level, device=h.device, dtype=torch.long)).unsqueeze(1)
+        levels = (
+            torch.full((B,), target_level, device=h.device, dtype=torch.long)
+            if isinstance(target_level, int)
+            else target_level.to(device=h.device, dtype=torch.long)
+        )
+        if levels.shape != (B,):
+            raise ValueError(f"target levels must have shape ({B},), got {tuple(levels.shape)}")
+        if self.cfg.architecture == "paper":
+            q = self.quant_embed(F.one_hot(levels, num_classes=self.num_quantizers).to(h.dtype)).unsqueeze(1)
+        else:
+            q = self.quant_embed(levels).unsqueeze(1)
         src = torch.cat([c, q, h], dim=1)
         key_padding_mask = None
         if mask is not None:
@@ -413,13 +495,19 @@ class CodebookResidualTransformer(_TransformerBackbone):
         out = self.encoder(src, src_key_padding_mask=key_padding_mask)
         return self.norm(out[:, 2:])
 
-    def _project_logits(self, h: Tensor, target_level: int) -> Tensor:
-        idx = target_level - 1
+    def _project_logits(self, h: Tensor, target_level: int | Tensor) -> Tensor:
         code = self.output_proj(h)
-        weight = self._output_proj_weight()[idx, : self.cfg.vocab_size]
-        logits = code @ weight.t()
+        if isinstance(target_level, int):
+            idx = target_level - 1
+            weight = self._output_proj_weight()[idx, : self.cfg.vocab_size]
+            logits = code @ weight.t()
+        else:
+            idx = target_level.to(device=h.device, dtype=torch.long) - 1
+            weight = self._output_proj_weight()[idx, : self.cfg.vocab_size]
+            logits = torch.einsum("btc,bvc->btv", code, weight)
         if self.output_proj_bias is not None:
-            logits = logits + self.output_proj_bias[idx, : self.cfg.vocab_size]
+            bias = self.output_proj_bias[idx, : self.cfg.vocab_size]
+            logits = logits + (bias if isinstance(target_level, int) else bias.unsqueeze(1))
         return logits
 
     def forward(
@@ -463,6 +551,58 @@ class CodebookResidualTransformer(_TransformerBackbone):
         if not bool(valid_mask.any()):
             raise ValueError("residual-transformer loss requires at least one valid token")
         return F.cross_entropy(logits[valid_mask], target[valid_mask])
+
+    def sampled_training_loss(
+        self,
+        tokens: Tensor,
+        *,
+        cond: Tensor | None = None,
+        valid_mask: Tensor | None = None,
+        cond_drop_prob: float = 0.2,
+    ) -> tuple[Tensor, Tensor]:
+        """Official residual objective with one quantizer level per sample."""
+        if tokens.dim() != 3 or tokens.shape[1] != self.num_quantizers:
+            raise ValueError(
+                f"tokens must be (B, {self.num_quantizers}, T), got {tuple(tokens.shape)}"
+            )
+        B, Q, T = tokens.shape
+        device = tokens.device
+        candidates = (
+            valid_mask.bool()
+            if valid_mask is not None
+            else torch.ones(B, T, dtype=torch.bool, device=device)
+        )
+        if not bool(candidates.any()):
+            raise ValueError("residual-transformer loss requires at least one valid token")
+
+        noise = torch.rand(B, device=device)
+        schedule = 1.0 - torch.cos(noise * math.pi * 0.5)
+        target_levels = torch.round(schedule * (Q - 2)).long() + 1
+
+        safe_tokens = torch.where(
+            candidates.unsqueeze(1),
+            tokens,
+            torch.full_like(tokens, self.pad_id),
+        )
+        embed_weight = self._token_embed_weight()
+        level_codes = [
+            F.embedding(safe_tokens[:, level], embed_weight[level])
+            for level in range(Q - 1)
+        ]
+        history_by_level = torch.stack(level_codes, dim=1).cumsum(dim=1)
+        batch_idx = torch.arange(B, device=device)
+        history = history_by_level[batch_idx, target_levels - 1]
+        target = tokens[batch_idx, target_levels]
+        drop = torch.rand(B, device=device) < cond_drop_prob
+        h = self._encode_codes(
+            history,
+            target_levels,
+            cond=cond,
+            mask=candidates,
+            drop_cond_mask=drop,
+        )
+        logits = self._project_logits(h, target_levels)
+        return F.cross_entropy(logits[candidates], target[candidates]), target_levels
 
     @torch.no_grad()
     def generate_residuals(
