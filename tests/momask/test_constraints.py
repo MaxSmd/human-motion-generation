@@ -19,6 +19,10 @@ from momask.constraints import (
     refine_motion_latents,
 )
 from momask.models import MotionRVQVAE
+from momask.scripts.evaluate_momask_constraints import (
+    angle_triplets_from_centers,
+    build_joint_constraint,
+)
 from momask.tasks import generate_h3d263_constrained
 from shared.geometry import H3D_FEATURE_DIM, NUM_JOINTS
 
@@ -35,6 +39,40 @@ def _position_constraint(
     targets[:, frame, joint] = torch.tensor(target)
     mask[:, frame, joint] = True
     return JointPositionConstraint(targets, mask)
+
+
+def test_evaluator_builds_physical_knee_and_elbow_triplets() -> None:
+    triplets = angle_triplets_from_centers([4, 5, 18, 19], torch.device("cpu"))
+
+    assert triplets.tolist() == [[1, 4, 7], [2, 5, 8], [16, 18, 20], [17, 19, 21]]
+
+
+def test_root_relative_joint_targets_follow_generated_heading() -> None:
+    real_motion = torch.zeros(1, 2, H3D_FEATURE_DIM)
+    generated_motion = torch.zeros_like(real_motion)
+    # HumanML3D stores the half-angle quaternion increment. At frame 1 this
+    # makes generated root-local +X point toward world +Z.
+    generated_motion[0, 0, 0] = math.pi / 4
+
+    real_joints = _empty_joints(time=2)
+    generated_joints = _empty_joints(time=2)
+    real_joints[0, :, 20, 0] = 1.0
+    generated_joints[0, 1, 0] = torch.tensor([5.0, 0.0, 2.0])
+    anchors = torch.ones(1, 2, dtype=torch.bool)
+
+    constraint = build_joint_constraint(
+        real_motion,
+        generated_motion,
+        real_joints,
+        generated_joints,
+        anchors,
+        [20],
+        target_space="root-relative",
+    )
+
+    assert torch.allclose(constraint.targets[0, 0, 20], torch.tensor([1.0, 0.0, 0.0]))
+    assert torch.allclose(constraint.targets[0, 1, 20], torch.tensor([5.0, 0.0, 3.0]), atol=1e-6)
+    assert constraint.mask[0, :, 20].all()
 
 
 def test_bend_angles_use_zero_for_straight_and_pi_over_two_for_right_angle() -> None:

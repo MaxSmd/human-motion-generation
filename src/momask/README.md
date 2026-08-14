@@ -87,6 +87,25 @@ reported. Integer token ids themselves are not differentiable. Set
 `LatentRefinementConfig(root_weight=0.0)` when the constraint is intentionally
 supposed to change the root trajectory.
 
+The constraint evaluator compares the unconstrained sample, the existing root
+trajectory baselines, wrist-position latent refinement, and knee/elbow-angle
+latent refinement from the same generated tokens. Its SLURM wrapper defaults to
+the validated legacy checkpoint at step 145k:
+
+```bash
+MAX_CLIPS=256 \
+LATENT_VARIANTS=joint,angle \
+sbatch slurm/momask/evaluate_momask_constraints.sbatch
+```
+
+The JSON reports FID, R@1/R@2/R@3, MM-Dist, and diversity for every variant. It
+also reports wrist error and success within 5/10 cm, bend-angle error and success
+within the configured tolerance, and root-trajectory drift. `JOINT_TARGET_SPACE`
+defaults to `root-relative`, which aligns GT offsets to the generated pelvis and
+heading; set it to `global` to test absolute clip-canonical joint targets. Bend
+angles are unsigned magnitudes: they can constrain how much
+a knee or elbow bends, but not the side of the bending plane by themselves.
+
 ## Do not reuse
 
 - Anything under `rmg.*`. MoMask operates on flat 263-D HumanML3D features and

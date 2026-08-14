@@ -1,4 +1,4 @@
-"""Evaluate simple inference-time trajectory constraints for MoMask.
+"""Evaluate inference-time trajectory, joint-position, and bend constraints.
 
 This is a first constraint baseline, intentionally separate from the standard
 FID evaluator:
@@ -9,9 +9,11 @@ FID evaluator:
   4. Project generated root velocity features to follow that target.
   5. Optionally re-encode/decode through the RVQ-VAE to pull the result back
      toward the learned motion-token manifold.
+  6. Refine the same generated continuous RVQ latents against sparse joint and
+     bend-angle targets while keeping MoMask's weights frozen.
 
-The paired real trajectory is an oracle target used only for measuring whether
-the constraint mechanism can satisfy known motion constraints.
+The paired real trajectory and pose are oracle targets used only for measuring
+whether the constraint mechanism can satisfy known motion constraints.
 """
 
 from __future__ import annotations
@@ -38,10 +40,24 @@ from momask.models import (
     ResidualTransformer,
     TokenTransformerConfig,
 )
+from momask.constraints import (
+    BendAngleConstraint,
+    JointPositionConstraint,
+    LatentRefinementConfig,
+    bend_angles_from_joints,
+    refine_motion_latents,
+)
 from momask.data_utils import normalize_motion, token_mask_from_frame_mask
 from shared.data import H3D263Dataset, collate
 from shared.text import CLIPTextEncoder, RandomTextEncoder, TextEncoder
-from shared.geometry import H3D_FEATURE_DIM, quat_rotate, recover_joints_from_ric
+from shared.geometry import (
+    H3D_FEATURE_DIM,
+    NUM_JOINTS,
+    PARENTS,
+    quat_inv,
+    quat_rotate,
+    recover_joints_from_ric,
+)
 from shared.eval import RandomGuoEvaluator, RealGuoEvaluator, diversity, fid, mm_distance, r_precision
 
 
@@ -77,6 +93,38 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sample", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--remask-kept-tokens", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--anchor-stride", type=int, default=20, help="Frames between root-XZ trajectory anchors.")
+    p.add_argument(
+        "--latent-variants",
+        default="joint,angle",
+        help="Comma-separated latent-refinement variants: joint, angle, or none.",
+    )
+    p.add_argument(
+        "--joint-ids",
+        default="20,21",
+        help="Comma-separated HumanML3D joint ids constrained at sparse anchors (default: both wrists).",
+    )
+    p.add_argument(
+        "--joint-target-space",
+        choices=["root-relative", "global"],
+        default="root-relative",
+        help="Align GT joint targets to the generated pelvis path, or keep canonical global coordinates.",
+    )
+    p.add_argument(
+        "--angle-joints",
+        default="4,5,18,19",
+        help="Comma-separated bend centers (default: knees and elbows).",
+    )
+    p.add_argument("--angle-tolerance-deg", type=float, default=5.0)
+    p.add_argument("--refinement-steps", type=int, default=50)
+    p.add_argument("--refinement-lr", type=float, default=0.01)
+    p.add_argument("--position-weight", type=float, default=1.0)
+    p.add_argument("--angle-weight", type=float, default=1.0)
+    p.add_argument("--latent-weight", type=float, default=0.01)
+    p.add_argument("--dynamics-weight", type=float, default=0.1)
+    p.add_argument("--root-weight", type=float, default=0.1)
+    p.add_argument("--bone-weight", type=float, default=0.1)
+    p.add_argument("--max-delta-norm", type=float, default=1.0)
+    p.add_argument("--grad-clip-norm", type=float, default=1.0)
     p.add_argument("--text-encoder", choices=["checkpoint", "random", "clip"], default="checkpoint")
     p.add_argument("--clip-model", default=None)
     p.add_argument("--clip-cache-dir", default=None)
@@ -111,6 +159,49 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--output", default=None)
     return p.parse_args()
+
+
+def parse_csv_ints(value: str, *, name: str) -> list[int]:
+    try:
+        result = [int(item.strip()) for item in value.split(",") if item.strip()]
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a comma-separated list of integers") from exc
+    if not result:
+        raise ValueError(f"{name} must contain at least one value")
+    if len(set(result)) != len(result):
+        raise ValueError(f"{name} must not contain duplicate values")
+    return result
+
+
+def parse_latent_variants(value: str) -> tuple[str, ...]:
+    variants = tuple(item.strip().lower() for item in value.split(",") if item.strip())
+    if variants == ("none",) or not variants:
+        return ()
+    unknown = set(variants) - {"joint", "angle"}
+    if unknown:
+        raise ValueError(f"unknown latent constraint variants: {sorted(unknown)}")
+    if len(set(variants)) != len(variants):
+        raise ValueError("--latent-variants must not contain duplicates")
+    return variants
+
+
+def angle_triplets_from_centers(centers: list[int], device: torch.device) -> Tensor:
+    children: dict[int, list[int]] = {joint: [] for joint in range(NUM_JOINTS)}
+    for child, parent in enumerate(PARENTS):
+        if parent >= 0:
+            children[parent].append(child)
+    triplets: list[tuple[int, int, int]] = []
+    for center in centers:
+        if not 0 <= center < NUM_JOINTS:
+            raise ValueError(f"angle joint id {center} is outside [0, {NUM_JOINTS - 1}]")
+        parent = PARENTS[center]
+        if parent < 0 or len(children[center]) != 1:
+            raise ValueError(
+                f"angle joint {center} must have exactly one parent and one child; "
+                f"found parent={parent}, children={children[center]}"
+            )
+        triplets.append((parent, center, children[center][0]))
+    return torch.tensor(triplets, dtype=torch.long, device=device)
 
 
 def torch_load(path: str | Path, map_location: str | torch.device = "cpu") -> dict:
@@ -390,12 +481,137 @@ def trajectory_errors(motion: Tensor, target_root: Tensor, anchor_mask: Tensor, 
     }
 
 
+def build_joint_constraint(
+    real_motion: Tensor,
+    generated_motion: Tensor,
+    real_joints: Tensor,
+    generated_joints: Tensor,
+    anchor_mask: Tensor,
+    joint_ids: list[int],
+    *,
+    target_space: str,
+) -> JointPositionConstraint:
+    for joint_id in joint_ids:
+        if not 0 <= joint_id < NUM_JOINTS:
+            raise ValueError(f"joint id {joint_id} is outside [0, {NUM_JOINTS - 1}]")
+    targets = real_joints.clone()
+    if target_space == "root-relative":
+        # Convert GT pelvis-relative offsets back into the root-facing frame,
+        # then rotate them into the generated heading and place them on the
+        # generated pelvis path. Translation alone is wrong when headings differ.
+        real_root_quat = root_quat_from_features(real_motion)
+        generated_root_quat = root_quat_from_features(generated_motion)
+        real_to_root = real_root_quat.unsqueeze(-2).expand(-1, -1, NUM_JOINTS, -1)
+        root_to_generated = quat_inv(generated_root_quat).unsqueeze(-2).expand_as(real_to_root)
+        root_facing_offsets = quat_rotate(real_to_root, real_joints - real_joints[:, :, :1])
+        targets = generated_joints[:, :, :1] + quat_rotate(
+            root_to_generated,
+            root_facing_offsets,
+        )
+    elif target_space != "global":
+        raise ValueError(f"unknown joint target space: {target_space}")
+    mask = torch.zeros(
+        *real_joints.shape[:-1], dtype=torch.bool, device=real_joints.device
+    )
+    mask[:, :, joint_ids] = anchor_mask.unsqueeze(-1)
+    return JointPositionConstraint(targets=targets, mask=mask)
+
+
+def build_angle_constraint(
+    real_joints: Tensor,
+    anchor_mask: Tensor,
+    triplets: Tensor,
+    tolerance_degrees: float,
+) -> tuple[BendAngleConstraint, Tensor]:
+    if not 0.0 <= tolerance_degrees < 180.0:
+        raise ValueError("--angle-tolerance-deg must lie in [0, 180)")
+    target = bend_angles_from_joints(real_joints, triplets)
+    tolerance = math.radians(tolerance_degrees)
+    mask = anchor_mask.unsqueeze(-1).expand_as(target)
+    return (
+        BendAngleConstraint(
+            triplets=triplets,
+            mask=mask,
+            min_radians=(target - tolerance).clamp_min(0.0),
+            max_radians=(target + tolerance).clamp_max(math.pi),
+        ),
+        target,
+    )
+
+
+@torch.no_grad()
+def control_statistics(
+    joints: Tensor,
+    *,
+    position_constraint: JointPositionConstraint | None,
+    angle_constraint: BendAngleConstraint | None,
+    angle_target: Tensor | None,
+    angle_tolerance_degrees: float,
+) -> dict[str, float]:
+    stats: dict[str, float] = {}
+    if position_constraint is not None:
+        active = position_constraint.mask.to(joints.device, torch.bool)
+        delta = joints - position_constraint.targets.to(joints.device, joints.dtype)
+        if position_constraint.axis_mask is not None:
+            axis_mask = position_constraint.axis_mask.to(joints.device, torch.bool)
+            delta = delta * axis_mask.to(delta.dtype)
+            active = active & axis_mask.any(dim=-1)
+        errors = torch.linalg.vector_norm(delta, dim=-1)[active]
+        stats["joint_error_sum_m"] = float(errors.sum().cpu())
+        stats["joint_within_5cm_count"] = float((errors <= 0.05).sum().cpu())
+        stats["joint_within_10cm_count"] = float((errors <= 0.10).sum().cpu())
+        stats["joint_constraint_count"] = float(errors.numel())
+    if angle_constraint is not None:
+        if angle_target is None:
+            raise ValueError("angle_target is required with an angle constraint")
+        active = angle_constraint.mask.to(joints.device, torch.bool)
+        angles = bend_angles_from_joints(joints, angle_constraint.triplets)
+        errors_degrees = torch.rad2deg(
+            (angles - angle_target.to(joints.device, joints.dtype)).abs()
+        )[active]
+        stats["angle_error_sum_deg"] = float(errors_degrees.sum().cpu())
+        stats["angle_within_tolerance_count"] = float(
+            (errors_degrees <= angle_tolerance_degrees + 1e-5).sum().cpu()
+        )
+        stats["angle_constraint_count"] = float(errors_degrees.numel())
+    return stats
+
+
+def accumulate_statistics(total: dict[str, float], current: dict[str, float]) -> None:
+    for key, value in current.items():
+        total[key] = total.get(key, 0.0) + value
+
+
+def summarize_control_statistics(stats: dict[str, float]) -> dict[str, float | int]:
+    result: dict[str, float | int] = {}
+    joint_count = stats.get("joint_constraint_count", 0.0)
+    if joint_count:
+        result.update(
+            {
+                "joint_position_l2_m": stats["joint_error_sum_m"] / joint_count,
+                "joint_success_5cm": stats["joint_within_5cm_count"] / joint_count,
+                "joint_success_10cm": stats["joint_within_10cm_count"] / joint_count,
+                "joint_constraint_count": int(joint_count),
+            }
+        )
+    angle_count = stats.get("angle_constraint_count", 0.0)
+    if angle_count:
+        result.update(
+            {
+                "angle_abs_error_deg": stats["angle_error_sum_deg"] / angle_count,
+                "angle_within_tolerance": stats["angle_within_tolerance_count"] / angle_count,
+                "angle_constraint_count": int(angle_count),
+            }
+        )
+    return result
+
+
 @torch.no_grad()
 def generate_full(
     *,
     vqvae: MotionRVQVAE,
     masked: MaskedMotionTransformer,
-    residual: ResidualTransformer,
+    residual: ResidualTransformer | CodebookResidualTransformer,
     normalizer: H3DNormalizer,
     cond: Tensor,
     real_x: Tensor,
@@ -406,7 +622,7 @@ def generate_full(
     topk_filter_thres: float,
     sample: bool,
     remask_kept_tokens: bool,
-) -> Tensor:
+) -> tuple[Tensor, Tensor, Tensor]:
     x_norm = normalize_motion(real_x, frame_mask, normalizer)
     true_tokens = vqvae.encode_to_tokens(x_norm)
     token_mask = token_mask_from_frame_mask(frame_mask, true_tokens.shape[-1], vqvae.downsample)
@@ -430,9 +646,10 @@ def generate_full(
         sample=sample,
         mask=token_mask,
     )
-    return normalizer.inverse(
+    motion = normalizer.inverse(
         vqvae.decode_from_tokens(tokens, target_len=real_x.shape[1], token_mask=token_mask)
     )
+    return motion, tokens, token_mask
 
 
 @torch.no_grad()
@@ -458,6 +675,17 @@ def encode_motion(evaluator, motion: Tensor, lengths: Tensor) -> np.ndarray:
 
 def main() -> None:
     args = parse_args()
+    latent_variants = parse_latent_variants(args.latent_variants)
+    joint_ids = (
+        parse_csv_ints(args.joint_ids, name="--joint-ids") if "joint" in latent_variants else []
+    )
+    angle_centers = (
+        parse_csv_ints(args.angle_joints, name="--angle-joints")
+        if "angle" in latent_variants
+        else []
+    )
+    if args.anchor_stride < 1:
+        raise ValueError("--anchor-stride must be positive")
     random.seed(args.seed)
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -478,6 +706,11 @@ def main() -> None:
     max_seq_len = int(args.max_seq_len or saved_args.get("max_seq_len", 80))
     text_encoder = build_text_encoder(args, saved_args)
     vqvae, masked, residual = build_models(ckpt, device)
+    angle_triplets = (
+        angle_triplets_from_centers(angle_centers, device)
+        if angle_centers
+        else torch.empty(0, 3, dtype=torch.long, device=device)
+    )
     evaluator = build_evaluator(args, device)
     caption_tokens = None
     if args.evaluator == "real" and args.vip_tokens:
@@ -496,13 +729,15 @@ def main() -> None:
     )
     loader = DataLoader(ds, batch_size=args.batch_size, shuffle=False, collate_fn=collate, num_workers=0)
 
-    buckets: dict[str, list[np.ndarray]] = {"real": [], "unconstrained": [], "traj_projected": [], "traj_vq": []}
+    variant_names = ["unconstrained", "traj_projected", "traj_vq"]
+    if "joint" in latent_variants:
+        variant_names.append("joint_latent")
+    if "angle" in latent_variants:
+        variant_names.append("angle_latent")
+    buckets: dict[str, list[np.ndarray]] = {name: [] for name in ["real", *variant_names]}
     text_embs: list[np.ndarray] = []
-    traj_sums: dict[str, dict[str, float]] = {
-        "unconstrained": {},
-        "traj_projected": {},
-        "traj_vq": {},
-    }
+    traj_sums: dict[str, dict[str, float]] = {name: {} for name in variant_names}
+    control_sums: dict[str, dict[str, float]] = {name: {} for name in variant_names}
     n_seen = 0
     n_text_fallback = 0
     t0 = time.perf_counter()
@@ -515,6 +750,14 @@ def main() -> None:
         f"model_input={model_input_source} sample={args.sample} topk={args.topk_filter_thres}",
         flush=True,
     )
+    if latent_variants:
+        print(
+            f"[constraints] latent_variants={','.join(latent_variants)} "
+            f"joint_ids={joint_ids} joint_space={args.joint_target_space} "
+            f"angle_centers={angle_centers} angle_tolerance={args.angle_tolerance_deg:g}deg "
+            f"refinement_steps={args.refinement_steps} refinement_lr={args.refinement_lr:g}",
+            flush=True,
+        )
 
     for batch in tqdm(loader, desc="evaluate constrained MoMask"):
         take = batch.x1.shape[0]
@@ -546,7 +789,7 @@ def main() -> None:
         model_lengths = eval_lengths if model_input_source == "canonical" else lengths
         model_frame_mask = torch.arange(model_real_x.shape[1], device=device).unsqueeze(0) < model_lengths.to(device).unsqueeze(1)
 
-        gen = generate_full(
+        gen, generated_tokens, token_mask = generate_full(
             vqvae=vqvae,
             masked=masked,
             residual=residual,
@@ -563,18 +806,113 @@ def main() -> None:
         )
         real_root = root_xz(model_real_x)
         target_root, anchor_mask = interpolate_anchor_trajectory(real_root, model_lengths.to(device), args.anchor_stride)
+        decoded_lengths = (token_mask.sum(dim=1) * vqvae.downsample).clamp(
+            max=model_real_x.shape[1]
+        )
+        _, latent_anchor_mask = interpolate_anchor_trajectory(
+            real_root,
+            decoded_lengths,
+            args.anchor_stride,
+        )
         projected = project_root_trajectory(gen, target_root, model_lengths.to(device))
         traj_vq = vq_project(vqvae, normalizer, projected, model_frame_mask)
+        motions: dict[str, Tensor] = {
+            "unconstrained": gen,
+            "traj_projected": projected,
+            "traj_vq": traj_vq,
+        }
 
-        for name, motion in (("unconstrained", gen), ("traj_projected", projected), ("traj_vq", traj_vq)):
+        position_constraint: JointPositionConstraint | None = None
+        angle_constraint: BendAngleConstraint | None = None
+        angle_target: Tensor | None = None
+        if latent_variants:
+            with torch.no_grad():
+                real_joints = recover_joints_from_ric(model_real_x.float())
+                generated_joints = recover_joints_from_ric(gen.float())
+                initial_latents = vqvae.quantizer.decode(generated_tokens)
+            if "joint" in latent_variants:
+                position_constraint = build_joint_constraint(
+                    model_real_x,
+                    gen,
+                    real_joints,
+                    generated_joints,
+                    latent_anchor_mask,
+                    joint_ids,
+                    target_space=args.joint_target_space,
+                )
+                joint_result = refine_motion_latents(
+                    vqvae,
+                    initial_latents,
+                    mean=normalizer.mean,
+                    std=normalizer.std,
+                    target_len=model_real_x.shape[1],
+                    token_mask=token_mask,
+                    frame_mask=model_frame_mask,
+                    position_constraint=position_constraint,
+                    config=LatentRefinementConfig(
+                        steps=args.refinement_steps,
+                        learning_rate=args.refinement_lr,
+                        position_weight=args.position_weight,
+                        angle_weight=0.0,
+                        latent_weight=args.latent_weight,
+                        dynamics_weight=args.dynamics_weight,
+                        root_weight=args.root_weight,
+                        bone_weight=args.bone_weight,
+                        max_delta_norm=args.max_delta_norm,
+                        grad_clip_norm=args.grad_clip_norm,
+                    ),
+                )
+                motions["joint_latent"] = joint_result.motion
+            if "angle" in latent_variants:
+                angle_constraint, angle_target = build_angle_constraint(
+                    real_joints,
+                    latent_anchor_mask,
+                    angle_triplets,
+                    args.angle_tolerance_deg,
+                )
+                angle_result = refine_motion_latents(
+                    vqvae,
+                    initial_latents,
+                    mean=normalizer.mean,
+                    std=normalizer.std,
+                    target_len=model_real_x.shape[1],
+                    token_mask=token_mask,
+                    frame_mask=model_frame_mask,
+                    angle_constraint=angle_constraint,
+                    config=LatentRefinementConfig(
+                        steps=args.refinement_steps,
+                        learning_rate=args.refinement_lr,
+                        position_weight=0.0,
+                        angle_weight=args.angle_weight,
+                        latent_weight=args.latent_weight,
+                        dynamics_weight=args.dynamics_weight,
+                        root_weight=args.root_weight,
+                        bone_weight=args.bone_weight,
+                        max_delta_norm=args.max_delta_norm,
+                        grad_clip_norm=args.grad_clip_norm,
+                    ),
+                )
+                motions["angle_latent"] = angle_result.motion
+
+        for name, motion in motions.items():
             errs = trajectory_errors(motion, target_root, anchor_mask, model_lengths.to(device))
             for key, value in errs.items():
                 traj_sums[name][key] = traj_sums[name].get(key, 0.0) + value * take
+            if name == "unconstrained" or name.endswith("_latent"):
+                accumulate_statistics(
+                    control_sums[name],
+                    control_statistics(
+                        recover_joints_from_ric(motion.float()),
+                        position_constraint=position_constraint,
+                        angle_constraint=angle_constraint,
+                        angle_target=angle_target,
+                        angle_tolerance_degrees=args.angle_tolerance_deg,
+                    ),
+                )
 
         buckets["real"].append(encode_motion(evaluator, eval_real_x, eval_lengths))
-        buckets["unconstrained"].append(encode_motion(evaluator, gen, eval_lengths))
-        buckets["traj_projected"].append(encode_motion(evaluator, projected, eval_lengths))
-        buckets["traj_vq"].append(encode_motion(evaluator, traj_vq, eval_lengths))
+        for name, motion in motions.items():
+            buckets[name].append(encode_motion(evaluator, motion, eval_lengths))
         text_np, n_missing = encode_text_batch(evaluator, texts, clip_ids, caption_tokens)
         text_embs.append(text_np)
         n_text_fallback += n_missing
@@ -600,6 +938,27 @@ def main() -> None:
             "sample": args.sample,
             "remask_kept_tokens": args.remask_kept_tokens,
             "anchor_stride": args.anchor_stride,
+            "latent_variants": list(latent_variants),
+            "joint_ids": joint_ids if "joint" in latent_variants else [],
+            "joint_target_space": args.joint_target_space,
+            "angle_centers": angle_centers if "angle" in latent_variants else [],
+            "angle_triplets": angle_triplets.detach().cpu().tolist()
+            if "angle" in latent_variants
+            else [],
+            "angle_tolerance_deg": args.angle_tolerance_deg,
+            "angle_definition": "unsigned bend: 0 degrees straight, 180 degrees folded",
+            "refinement": {
+                "steps": args.refinement_steps,
+                "learning_rate": args.refinement_lr,
+                "position_weight": args.position_weight,
+                "angle_weight": args.angle_weight,
+                "latent_weight": args.latent_weight,
+                "dynamics_weight": args.dynamics_weight,
+                "root_weight": args.root_weight,
+                "bone_weight": args.bone_weight,
+                "max_delta_norm": args.max_delta_norm,
+                "grad_clip_norm": args.grad_clip_norm,
+            },
             "real_feature_source": "canonical" if real_h3d_dir is not None else "packed",
             "real_h3d_dir": str(real_h3d_dir) if real_h3d_dir is not None else None,
             "model_input_source": model_input_source,
@@ -616,14 +975,21 @@ def main() -> None:
     if caption_tokens is not None:
         print(f"[constraints] VIP token fallbacks={n_text_fallback}", flush=True)
     print(f"\n[diagnostics]\n{json.dumps(results['_diagnostics'], indent=2)}", flush=True)
-    for name in ("unconstrained", "traj_projected", "traj_vq"):
+    for name in variant_names:
         emb = np.concatenate(buckets[name], axis=0)
         quality = compute_quality(real, emb, text, args.diversity_times, args.seed)
         traj = {k: v / max(n_seen, 1) for k, v in traj_sums[name].items()}
-        results[name] = {**quality, **traj}
+        control = summarize_control_statistics(control_sums[name])
+        results[name] = {**quality, **traj, **control}
         print(f"\n[{name}]\n{json.dumps(results[name], indent=2)}", flush=True)
 
-    output = Path(args.output) if args.output else Path(args.checkpoint).parent / "constraints" / "trajectory.json"
+    checkpoint_dir = Path(args.checkpoint).parent
+    run_dir = checkpoint_dir.parent if checkpoint_dir.name == "checkpoints" else checkpoint_dir
+    output = (
+        Path(args.output)
+        if args.output
+        else run_dir / "constraints" / "trajectory_joint_angle.json"
+    )
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(results, indent=2), encoding="utf-8")
     print(f"\n[constraints] wrote {output}", flush=True)
