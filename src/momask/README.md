@@ -52,6 +52,41 @@ wrappers are `slurm/*_momask*.sbatch`.
 - `shared.geometry.{H3D_FEATURE_DIM, PARENTS, recover_joints_from_ric, ...}`
 - `shared.utils.{EMA, Logger, save_checkpoint, load_checkpoint, set_seed, ...}`
 
+## Inference-time joint constraints
+
+`momask.constraints` supports sparse joint-position targets and exact/ranged
+bend-angle targets without retraining. The constraint path keeps token sampling
+unchanged, converts the generated RVQ tokens to their summed continuous latent,
+and optimizes that latent through the frozen decoder and differentiable
+HumanML3D joint recovery.
+
+```python
+from momask import JointPositionConstraint, LatentRefinementConfig
+from momask.tasks import generate_h3d263_constrained
+
+result = generate_h3d263_constrained(
+    vqvae=vqvae,
+    masked_transformer=masked,
+    residual_transformer=residual,
+    cond=text_embedding,
+    seq_len=token_length,
+    target_len=frame_length,
+    mean=checkpoint["normalizer"]["mean"],
+    std=checkpoint["normalizer"]["std"],
+    position_constraint=JointPositionConstraint(targets, mask),
+    refinement=LatentRefinementConfig(steps=50),
+)
+
+print(result.metrics)  # initial/final error and latent drift
+```
+
+Targets use clip-canonical HumanML3D coordinates, not an absolute scene frame.
+The refined latent is close to but not guaranteed to remain on the exact RVQ
+codebook manifold, so constraint error and motion-quality metrics must both be
+reported. Integer token ids themselves are not differentiable. Set
+`LatentRefinementConfig(root_weight=0.0)` when the constraint is intentionally
+supposed to change the root trajectory.
+
 ## Do not reuse
 
 - Anything under `rmg.*`. MoMask operates on flat 263-D HumanML3D features and

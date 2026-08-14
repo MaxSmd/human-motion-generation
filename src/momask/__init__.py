@@ -14,6 +14,18 @@ from .models import (
     ResidualVectorQuantizer,
     TokenTransformerConfig,
 )
+from .constraints import (
+    BendAngleConstraint,
+    JointPositionConstraint,
+    LatentRefinementConfig,
+    LatentRefinementResult,
+    bend_angle_loss,
+    bend_angle_violation,
+    bend_angles_from_joints,
+    joint_position_error,
+    joint_position_loss,
+    refine_motion_latents,
+)
 
 __all__ = [
     "ResidualVectorQuantizer",
@@ -22,4 +34,14 @@ __all__ = [
     "MaskedMotionTransformer",
     "ResidualTransformer",
     "CodebookResidualTransformer",
+    "JointPositionConstraint",
+    "BendAngleConstraint",
+    "LatentRefinementConfig",
+    "LatentRefinementResult",
+    "bend_angles_from_joints",
+    "joint_position_loss",
+    "joint_position_error",
+    "bend_angle_loss",
+    "bend_angle_violation",
+    "refine_motion_latents",
 ]
