@@ -43,6 +43,9 @@ from shared.text import CLIPTextEncoder, RandomTextEncoder, TextEncoder
 from shared.geometry import H3D_FEATURE_DIM, recover_joints_from_ric
 
 
+TOKEN_VALIDATION_VERSION = 1
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument(
@@ -134,7 +137,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--freeze-masked-transformer",
         action="store_true",
-        help="Train only the residual transformer after loading/freezing the masked transformer.",
+        help="Legacy alias for --token-stage residual.",
+    )
+    p.add_argument(
+        "--token-stage",
+        choices=["joint", "masked", "residual"],
+        default="joint",
+        help=(
+            "Token model to optimize. Paper-faithful training uses separate masked and residual runs; "
+            "joint preserves the historical combined-loss behavior."
+        ),
     )
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--adam-beta1", type=float, default=0.9)
@@ -153,6 +165,18 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--log-every", type=int, default=10)
     p.add_argument("--eval-batches", type=int, default=4)
+    p.add_argument(
+        "--validate-every",
+        type=int,
+        default=0,
+        help="Validate token training every N steps and save the best stage checkpoint. 0 disables.",
+    )
+    p.add_argument(
+        "--val-eval-batches",
+        type=int,
+        default=32,
+        help="Maximum number of fixed validation batches used for token checkpoint selection.",
+    )
     p.add_argument("--output-dir", default="runs/momask-smoke")
     p.add_argument(
         "--save-every",
@@ -454,16 +478,17 @@ def evaluate_vq(
 @torch.no_grad()
 def evaluate_tokens(
     masked_model: MaskedMotionTransformer,
-    residual_model: ResidualTransformer,
+    residual_model: ResidualTransformer | CodebookResidualTransformer,
     cached_batches: list[dict[str, torch.Tensor | list[str]]],
     device: torch.device,
     max_batches: int,
     generation_steps: int,
+    token_stage: str = "joint",
 ) -> dict[str, float]:
     was_training = (masked_model.training, residual_model.training)
     masked_model.eval()
     residual_model.eval()
-    base_losses, residual_losses = [], []
+    base_losses, residual_losses, sampled_residual_losses = [], [], []
     full_mask_losses, full_mask_accs, generated_base_accs = [], [], []
     full_generation_acc_by_level: dict[int, list[float]] = {}
     teacher_residual_acc_by_level: dict[int, list[float]] = {}
@@ -474,59 +499,102 @@ def evaluate_tokens(
         tok = batch["tokens"].to(device)  # type: ignore[index, union-attr]
         token_mask = batch["token_mask"].to(device)  # type: ignore[index, union-attr]
         cond = batch["cond"].to(device)  # type: ignore[index, union-attr]
-        base = masked_model.training_loss(tok[:, 0], cond=cond, valid_mask=token_mask, cond_drop_prob=0.0)
-        full_masked = torch.full_like(tok[:, 0], masked_model.mask_token_id)
-        full_logits = masked_model(full_masked, cond=cond, mask=token_mask)
-        full_pred = full_logits.argmax(dim=-1)
-        full_mask_losses.append(float(F.cross_entropy(full_logits[token_mask], tok[:, 0][token_mask])))
-        full_mask_accs.append(float((full_pred[token_mask] == tok[:, 0][token_mask]).float().mean()))
-        generated_base = masked_model.generate(
-            cond=cond,
-            seq_len=tok.shape[-1],
-            steps=generation_steps,
-            guidance_scale=1.0,
-            mask=token_mask,
-        )
-        generated_base_accs.append(float((generated_base[token_mask] == tok[:, 0][token_mask]).float().mean()))
-        generated_tokens = residual_model.generate_residuals(
-            generated_base,
-            cond=cond,
-            guidance_scale=1.0,
-            mask=token_mask,
-        )
-        teacher_residual_tokens = residual_model.generate_residuals(
-            tok[:, 0],
-            cond=cond,
-            guidance_scale=1.0,
-            mask=token_mask,
-        )
-        for level in range(tok.shape[1]):
-            full_generation_acc_by_level.setdefault(level, []).append(
-                float((generated_tokens[:, level][token_mask] == tok[:, level][token_mask]).float().mean())
+        if token_stage in {"joint", "masked"}:
+            base = masked_model.training_loss(
+                tok[:, 0], cond=cond, valid_mask=token_mask, cond_drop_prob=0.0
             )
-            teacher_residual_acc_by_level.setdefault(level, []).append(
-                float((teacher_residual_tokens[:, level][token_mask] == tok[:, level][token_mask]).float().mean())
+            full_masked = torch.full_like(tok[:, 0], masked_model.mask_token_id)
+            full_logits = masked_model(full_masked, cond=cond, mask=token_mask)
+            full_pred = full_logits.argmax(dim=-1)
+            full_mask_losses.append(float(F.cross_entropy(full_logits[token_mask], tok[:, 0][token_mask])))
+            full_mask_accs.append(float((full_pred[token_mask] == tok[:, 0][token_mask]).float().mean()))
+            generated_base = masked_model.generate(
+                cond=cond,
+                seq_len=tok.shape[-1],
+                steps=generation_steps,
+                guidance_scale=1.0,
+                mask=token_mask,
             )
-        res_parts = [
-            residual_model.training_loss(tok, level, cond=cond, valid_mask=token_mask, cond_drop_prob=0.0)
-            for level in range(1, tok.shape[1])
-        ]
-        for level, loss in zip(range(1, tok.shape[1]), res_parts):
-            residual_by_level.setdefault(level, []).append(float(loss))
-        residual = torch.stack(res_parts).mean() if res_parts else base.new_tensor(0.0)
-        base_losses.append(float(base))
-        residual_losses.append(float(residual))
+            generated_base_accs.append(
+                float((generated_base[token_mask] == tok[:, 0][token_mask]).float().mean())
+            )
+            base_losses.append(float(base))
+        else:
+            generated_base = None
+
+        if token_stage in {"joint", "residual"}:
+            if (
+                isinstance(residual_model, CodebookResidualTransformer)
+                and residual_model.cfg.architecture == "paper"
+            ):
+                sampled_residual, _ = residual_model.sampled_training_loss(
+                    tok,
+                    cond=cond,
+                    valid_mask=token_mask,
+                    cond_drop_prob=0.0,
+                )
+                sampled_residual_losses.append(float(sampled_residual))
+            teacher_residual_tokens = residual_model.generate_residuals(
+                tok[:, 0],
+                cond=cond,
+                guidance_scale=1.0,
+                mask=token_mask,
+            )
+            for level in range(tok.shape[1]):
+                teacher_residual_acc_by_level.setdefault(level, []).append(
+                    float(
+                        (teacher_residual_tokens[:, level][token_mask] == tok[:, level][token_mask])
+                        .float()
+                        .mean()
+                    )
+                )
+            if generated_base is not None:
+                generated_tokens = residual_model.generate_residuals(
+                    generated_base,
+                    cond=cond,
+                    guidance_scale=1.0,
+                    mask=token_mask,
+                )
+                for level in range(tok.shape[1]):
+                    full_generation_acc_by_level.setdefault(level, []).append(
+                        float(
+                            (generated_tokens[:, level][token_mask] == tok[:, level][token_mask])
+                            .float()
+                            .mean()
+                        )
+                    )
+            res_parts = [
+                residual_model.training_loss(tok, level, cond=cond, valid_mask=token_mask, cond_drop_prob=0.0)
+                for level in range(1, tok.shape[1])
+            ]
+            for level, loss in zip(range(1, tok.shape[1]), res_parts):
+                residual_by_level.setdefault(level, []).append(float(loss))
+            residual = (
+                torch.stack(res_parts).mean()
+                if res_parts
+                else tok.new_tensor(0.0, dtype=torch.float32)
+            )
+            residual_losses.append(float(residual))
     if was_training[0]:
         masked_model.train()
     if was_training[1]:
         residual_model.train()
-    out = {
-        "base_ce": sum(base_losses) / max(len(base_losses), 1),
-        "residual_ce": sum(residual_losses) / max(len(residual_losses), 1),
-        "base_full_mask_ce": sum(full_mask_losses) / max(len(full_mask_losses), 1),
-        "base_full_mask_acc": sum(full_mask_accs) / max(len(full_mask_accs), 1),
-        "base_generate_acc": sum(generated_base_accs) / max(len(generated_base_accs), 1),
-    }
+    out = {}
+    if base_losses:
+        out.update(
+            {
+                "base_ce": sum(base_losses) / len(base_losses),
+                "base_full_mask_ce": sum(full_mask_losses) / len(full_mask_losses),
+                "base_full_mask_acc": sum(full_mask_accs) / len(full_mask_accs),
+                "base_generate_acc": sum(generated_base_accs) / len(generated_base_accs),
+            }
+        )
+    if residual_losses:
+        out["residual_ce"] = sum(residual_losses) / len(residual_losses)
+    if sampled_residual_losses:
+        out["residual_sampled_ce"] = sum(sampled_residual_losses) / len(
+            sampled_residual_losses
+        )
     for level, values in residual_by_level.items():
         out[f"residual_ce_l{level}"] = sum(values) / max(len(values), 1)
     for level, values in full_generation_acc_by_level.items():
@@ -682,6 +750,118 @@ def set_optimizer_lr(optimizer: torch.optim.Optimizer, lr: float) -> None:
         group["lr"] = lr
 
 
+def resolve_token_stage(args: argparse.Namespace) -> str:
+    stage = str(args.token_stage)
+    if args.freeze_masked_transformer:
+        if stage == "masked":
+            raise ValueError("--freeze-masked-transformer conflicts with --token-stage masked")
+        stage = "residual"
+    args.token_stage = stage
+    return stage
+
+
+def configure_token_training_stage(
+    masked_model: torch.nn.Module,
+    residual_model: torch.nn.Module,
+    stage: str,
+) -> list[torch.nn.Parameter]:
+    if stage not in {"joint", "masked", "residual"}:
+        raise ValueError(f"unknown token training stage: {stage}")
+
+    train_masked = stage in {"joint", "masked"}
+    train_residual = stage in {"joint", "residual"}
+    for param in masked_model.parameters():
+        param.requires_grad_(train_masked)
+    for param in residual_model.parameters():
+        param.requires_grad_(train_residual)
+    masked_model.train(train_masked)
+    residual_model.train(train_residual)
+
+    params = [
+        param
+        for model in (masked_model, residual_model)
+        for param in model.parameters()
+        if param.requires_grad
+    ]
+    if not params:
+        raise RuntimeError(f"token stage {stage!r} has no trainable parameters")
+    return params
+
+
+def token_validation_metric(stage: str, metrics: dict[str, float]) -> tuple[str, float]:
+    residual_metric = (
+        "residual_sampled_ce" if "residual_sampled_ce" in metrics else "residual_ce"
+    )
+    if stage == "joint":
+        required = ("base_ce", residual_metric)
+        missing = [name for name in required if name not in metrics]
+        if missing:
+            raise KeyError(f"validation metrics do not contain {missing}")
+        return "combined_ce", sum(float(metrics[name]) for name in required)
+    if stage not in {"masked", "residual"}:
+        raise ValueError(f"unknown token training stage: {stage}")
+    metric_name = "base_ce" if stage == "masked" else residual_metric
+    if metric_name not in metrics:
+        raise KeyError(f"validation metrics do not contain {metric_name!r}")
+    return metric_name, float(metrics[metric_name])
+
+
+def expected_token_validation_metric_name(
+    stage: str,
+    transformer_arch: str,
+    residual_arch: str,
+) -> str:
+    if stage == "masked":
+        return "base_ce"
+    if stage == "residual":
+        if transformer_arch == "paper" and residual_arch == "codebook":
+            return "residual_sampled_ce"
+        return "residual_ce"
+    if stage == "joint":
+        return "combined_ce"
+    raise ValueError(f"unknown token training stage: {stage}")
+
+
+def best_validation_metadata_matches(
+    checkpoint: dict,
+    expected_metric_name: str,
+    best_path_exists: bool,
+) -> bool:
+    return (
+        best_path_exists
+        and checkpoint.get("best_val_metric_name") == expected_metric_name
+        and checkpoint.get("token_validation_version") == TOKEN_VALIDATION_VERSION
+    )
+
+
+def build_token_train_checkpoint(
+    *,
+    step: int,
+    args: argparse.Namespace,
+    normalizer: H3DNormalizer,
+    vqvae: MotionRVQVAE,
+    masked_model: torch.nn.Module,
+    residual_model: torch.nn.Module,
+    vq_opt: torch.optim.Optimizer,
+    token_opt: torch.optim.Optimizer,
+    best_val_metric: float,
+    best_val_metric_name: str | None,
+) -> dict:
+    return {
+        "step": step,
+        "args": vars(args),
+        "normalizer": normalizer.state_dict(),
+        "vqvae": vqvae.state_dict(),
+        "masked_transformer": masked_model.state_dict(),
+        "residual_transformer": residual_model.state_dict(),
+        "vq_optimizer": vq_opt.state_dict(),
+        "token_optimizer": token_opt.state_dict(),
+        "best_val_metric": best_val_metric,
+        "best_val_metric_name": best_val_metric_name,
+        "token_validation_version": TOKEN_VALIDATION_VERSION,
+    }
+
+
 def save_vq_train_checkpoint(
     output_dir: Path,
     step: int,
@@ -708,6 +888,7 @@ def save_vq_train_checkpoint(
 
 def main() -> None:
     args = parse_args()
+    token_stage = resolve_token_stage(args)
     torch.manual_seed(args.seed)
     random.seed(args.seed)
     device = torch.device(args.device)
@@ -1018,7 +1199,7 @@ def main() -> None:
     print(f"[momask-smoke] text_encoder={args.text_encoder} text_dim={args.text_dim}", flush=True)
     print(
         f"[momask-smoke] residual_arch={args.residual_arch} "
-        f"residual_share_weight={args.residual_share_weight}",
+        f"residual_share_weight={args.residual_share_weight} token_stage={token_stage}",
         flush=True,
     )
     cached_batches = cache_token_batches(
@@ -1029,6 +1210,59 @@ def main() -> None:
         normalizer,
         max_batches=args.eval_batches if args.live_token_crops else None,
     )
+    validation_batches = None
+    if args.validate_every > 0:
+        if args.val_eval_batches <= 0:
+            raise ValueError("--val-eval-batches must be positive when validation is enabled")
+        if args.paper_transformer_data:
+            val_ds = CanonicalHumanML3DText2MotionDataset(
+                root=Path(args.data_root),
+                canonical_dir=Path(args.canonical_h3d_dir),
+                texts_zip=Path(args.humanml3d_texts_zip),
+                split="val",
+                max_seq_len=args.max_seq_len,
+                min_seq_len=args.min_seq_len,
+                unit_length=args.downsample,
+                subset_n=args.max_clips,
+            )
+        elif args.canonical_h3d_dir:
+            val_ds = CanonicalHumanML3DDataset(
+                root=Path(args.data_root),
+                canonical_dir=Path(args.canonical_h3d_dir),
+                split="val",
+                max_seq_len=args.max_seq_len,
+                min_seq_len=args.min_seq_len,
+            )
+        else:
+            val_ds = H3D263Dataset(
+                root=Path(args.data_root),
+                split="val",
+                max_seq_len=args.max_seq_len,
+                min_seq_len=args.min_seq_len,
+                mirror_augment=False,
+            )
+        val_loader = DataLoader(
+            val_ds,
+            batch_size=args.batch_size,
+            shuffle=False,
+            collate_fn=collate,
+            num_workers=0,
+            pin_memory=device.type == "cuda",
+            drop_last=False,
+        )
+        validation_batches = cache_token_batches(
+            vqvae,
+            text_encoder,
+            val_loader,
+            device,
+            normalizer,
+            max_batches=args.val_eval_batches,
+        )
+        print(
+            f"[token validation] split=val fixed_batches={len(validation_batches)} "
+            f"samples={sum(int(batch['tokens'].shape[0]) for batch in validation_batches)}",
+            flush=True,
+        )
     token_batch_size = args.token_batch_size or args.batch_size
     token_cache = None
     if args.live_token_crops:
@@ -1077,7 +1311,21 @@ def main() -> None:
         masked_model.load_state_dict(loaded_token_ckpt["masked_transformer"])
         residual_model.load_state_dict(loaded_token_ckpt["residual_transformer"])
         if "token_optimizer" in loaded_token_ckpt:
-            optimizer_state = loaded_token_ckpt["token_optimizer"]
+            saved_stage = str(loaded_token_ckpt.get("args", {}).get("token_stage", "joint"))
+            if saved_stage != token_stage:
+                if args.freeze_masked_transformer and token_stage == "residual":
+                    print(
+                        f"[momask-smoke] discarding {saved_stage!r} optimizer for legacy "
+                        "residual-only continuation",
+                        flush=True,
+                    )
+                else:
+                    raise ValueError(
+                        f"cannot resume {token_stage!r} training with a {saved_stage!r} optimizer; "
+                        "use the matching stage checkpoint"
+                    )
+            else:
+                optimizer_state = loaded_token_ckpt["token_optimizer"]
         start_token_step = int(loaded_token_ckpt.get("step", 0))
         print(
             f"[momask-smoke] restored token transformers from step={start_token_step} "
@@ -1087,16 +1335,16 @@ def main() -> None:
     if args.load_masked_checkpoint:
         masked_ckpt = torch_load(args.load_masked_checkpoint, map_location=device)
         masked_model.load_state_dict(masked_ckpt["masked_transformer"])
-        print(f"[momask-smoke] restored masked transformer only from {args.load_masked_checkpoint}", flush=True)
-    if args.freeze_masked_transformer:
-        for param in masked_model.parameters():
-            param.requires_grad_(False)
-        masked_model.eval()
-        optimizer_state = None
-        print("[momask-smoke] frozen masked transformer; optimizer trains residual transformer only", flush=True)
-    token_params = [param for param in residual_model.parameters() if param.requires_grad]
-    if not args.freeze_masked_transformer:
-        token_params = [param for param in masked_model.parameters() if param.requires_grad] + token_params
+        print(
+            f"[momask-smoke] restored masked transformer only from {args.load_masked_checkpoint}",
+            flush=True,
+        )
+    token_params = configure_token_training_stage(masked_model, residual_model, token_stage)
+    print(
+        f"[momask-smoke] token_stage={token_stage} "
+        f"trainable_params={sum(param.numel() for param in token_params):,}",
+        flush=True,
+    )
     token_opt = torch.optim.AdamW(
         token_params,
         lr=args.lr,
@@ -1105,8 +1353,46 @@ def main() -> None:
     )
     if optimizer_state is not None:
         token_opt.load_state_dict(optimizer_state)
+    best_val_metric = (
+        float(loaded_token_ckpt.get("best_val_metric", float("inf")))
+        if loaded_token_ckpt is not None
+        else float("inf")
+    )
+    best_val_metric_name = (
+        loaded_token_ckpt.get("best_val_metric_name")
+        if loaded_token_ckpt is not None
+        else None
+    )
+    best_path = output_dir / "checkpoints" / "tokens_best_val.pt"
+    expected_val_metric_name = expected_token_validation_metric_name(
+        token_stage,
+        args.transformer_arch,
+        args.residual_arch,
+    )
+    best_metadata_matches = (
+        best_validation_metadata_matches(
+            loaded_token_ckpt,
+            expected_val_metric_name,
+            best_path.exists(),
+        )
+        if loaded_token_ckpt is not None
+        else False
+    )
+    if loaded_token_ckpt is not None and (
+        not math.isfinite(best_val_metric) or not best_metadata_matches
+    ):
+        print(
+            "[token validation] the resumed best-checkpoint metadata does not match the current "
+            "validation objective or output directory; resetting the baseline",
+            flush=True,
+        )
+        best_val_metric = float("inf")
+        best_val_metric_name = None
+    last_val_eval = None
 
     vqvae.eval()
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
     for step in range(start_token_step + 1, args.token_steps + 1):
         current_lr = scheduled_lr(args.lr, step, args.warmup_steps, args.lr_milestones, args.lr_gamma)
         set_optimizer_lr(token_opt, current_lr)
@@ -1130,16 +1416,8 @@ def main() -> None:
             tok = tok.long()
             token_mask = token_mask.bool()
             cond = cond.float()
-        if args.freeze_masked_transformer:
-            with torch.no_grad():
-                base_loss = masked_model.training_loss(
-                    tok[:, 0],
-                    cond=cond,
-                    valid_mask=token_mask,
-                    cond_drop_prob=0.0,
-                    force_full_mask=True,
-                )
-        else:
+        base_loss = None
+        if token_stage in {"joint", "masked"}:
             base_loss = masked_model.training_loss(
                 tok[:, 0],
                 cond=cond,
@@ -1147,36 +1425,60 @@ def main() -> None:
                 cond_drop_prob=args.base_cond_drop,
                 force_full_mask=bool(torch.rand(()) < args.base_full_mask_prob),
             )
-        if args.transformer_arch == "paper" and isinstance(residual_model, CodebookResidualTransformer):
-            res_loss, sampled_levels = residual_model.sampled_training_loss(
-                tok,
-                cond=cond,
-                valid_mask=token_mask,
-                cond_drop_prob=args.residual_cond_drop,
-            )
-            residual_parts = [res_loss]
-        else:
-            sampled_levels = None
-            residual_parts = [
-                residual_model.training_loss(
+        res_loss = None
+        sampled_levels = None
+        residual_parts = []
+        if token_stage in {"joint", "residual"}:
+            if args.transformer_arch == "paper" and isinstance(residual_model, CodebookResidualTransformer):
+                res_loss, sampled_levels = residual_model.sampled_training_loss(
                     tok,
-                    level,
                     cond=cond,
                     valid_mask=token_mask,
                     cond_drop_prob=args.residual_cond_drop,
                 )
-                for level in range(1, tok.shape[1])
-            ]
-            res_loss = torch.stack(residual_parts).mean() if residual_parts else base_loss.new_tensor(0.0)
-        loss = res_loss if args.freeze_masked_transformer else base_loss + res_loss
+                residual_parts = [res_loss]
+            else:
+                residual_parts = [
+                    residual_model.training_loss(
+                        tok,
+                        level,
+                        cond=cond,
+                        valid_mask=token_mask,
+                        cond_drop_prob=args.residual_cond_drop,
+                    )
+                    for level in range(1, tok.shape[1])
+                ]
+                res_loss = (
+                    torch.stack(residual_parts).mean()
+                    if residual_parts
+                    else tok.new_tensor(0.0, dtype=torch.float32)
+                )
+        if token_stage == "masked":
+            if base_loss is None:
+                raise RuntimeError("masked token stage did not produce a base loss")
+            loss = base_loss
+        elif token_stage == "residual":
+            if res_loss is None:
+                raise RuntimeError("residual token stage did not produce a residual loss")
+            loss = res_loss
+        else:
+            if base_loss is None or res_loss is None:
+                raise RuntimeError("joint token stage requires both losses")
+            loss = base_loss + res_loss
         token_opt.zero_grad(set_to_none=True)
         loss.backward()
         if args.token_grad_clip > 0.0:
-            torch.nn.utils.clip_grad_norm_(
-                list(masked_model.parameters()) + list(residual_model.parameters()),
-                args.token_grad_clip,
-            )
+            torch.nn.utils.clip_grad_norm_(token_params, args.token_grad_clip)
         token_opt.step()
+        if step == start_token_step + 1 and device.type == "cuda":
+            torch.cuda.synchronize(device)
+            print(
+                "[token cuda_memory] "
+                f"allocated={torch.cuda.memory_allocated(device) / (1024 ** 3):.2f}GiB "
+                f"reserved={torch.cuda.memory_reserved(device) / (1024 ** 3):.2f}GiB "
+                f"peak={torch.cuda.max_memory_allocated(device) / (1024 ** 3):.2f}GiB",
+                flush=True,
+            )
         if step == 1 or step == args.token_steps or step % args.log_every == 0:
             if sampled_levels is not None:
                 counts = torch.bincount(sampled_levels, minlength=tok.shape[1]).tolist()
@@ -1186,27 +1488,82 @@ def main() -> None:
                     f"res_l{level}={level_loss.item():.5f}"
                     for level, level_loss in zip(range(1, tok.shape[1]), residual_parts)
                 )
+            loss_parts = [f"loss={loss.item():.5f}"]
+            if base_loss is not None:
+                loss_parts.append(f"base_ce={base_loss.item():.5f}")
+            if res_loss is not None:
+                loss_parts.append(f"residual_ce={res_loss.item():.5f}")
             print(
-                f"[tok {step:04d}] loss={loss.item():.5f} "
-                f"base_ce={base_loss.item():.5f} residual_ce={res_loss.item():.5f} "
-                f"lr={current_lr:.3e} {res_levels}",
+                f"[tok {step:04d} {token_stage}] {' '.join(loss_parts)} "
+                f"lr={current_lr:.3e} {res_levels}".rstrip(),
                 flush=True,
             )
+        should_validate = validation_batches is not None and (
+            step == args.token_steps or step % args.validate_every == 0
+        )
+        if should_validate:
+            rng_devices = (
+                [device.index if device.index is not None else torch.cuda.current_device()]
+                if device.type == "cuda"
+                else []
+            )
+            with torch.random.fork_rng(devices=rng_devices):
+                torch.manual_seed(args.seed + 104729)
+                last_val_eval = evaluate_tokens(
+                    masked_model,
+                    residual_model,
+                    validation_batches,
+                    device,
+                    args.val_eval_batches,
+                    args.generation_steps,
+                    token_stage=token_stage,
+                )
+            metric_name, metric_value = token_validation_metric(token_stage, last_val_eval)
+            improved = metric_value < best_val_metric
+            print(
+                f"[token validation {token_stage}] step={step} {metric_name}={metric_value:.6f} "
+                f"best={best_val_metric:.6f} improved={improved}",
+                flush=True,
+            )
+            if improved:
+                best_val_metric = metric_value
+                best_val_metric_name = metric_name
+                best_ckpt = build_token_train_checkpoint(
+                    step=step,
+                    args=args,
+                    normalizer=normalizer,
+                    vqvae=vqvae,
+                    masked_model=masked_model,
+                    residual_model=residual_model,
+                    vq_opt=vq_opt,
+                    token_opt=token_opt,
+                    best_val_metric=best_val_metric,
+                    best_val_metric_name=best_val_metric_name,
+                )
+                best_ckpt["val_eval"] = last_val_eval
+                best_ckpt["checkpoint_role"] = "best_validation"
+                best_path.parent.mkdir(parents=True, exist_ok=True)
+                torch.save(best_ckpt, best_path)
+                print(f"[save best] {best_path}", flush=True)
         if args.save_every > 0 and step % args.save_every == 0:
             ckpt_dir = output_dir / "checkpoints"
             ckpt_dir.mkdir(parents=True, exist_ok=True)
             step_path = ckpt_dir / f"tokens_step_{step:07d}.pt"
             latest_path = ckpt_dir / "tokens_latest_train.pt"
-            ckpt = {
-                "step": step,
-                "args": vars(args),
-                "normalizer": normalizer.state_dict(),
-                "vqvae": vqvae.state_dict(),
-                "masked_transformer": masked_model.state_dict(),
-                "residual_transformer": residual_model.state_dict(),
-                "vq_optimizer": vq_opt.state_dict(),
-                "token_optimizer": token_opt.state_dict(),
-            }
+            ckpt = build_token_train_checkpoint(
+                step=step,
+                args=args,
+                normalizer=normalizer,
+                vqvae=vqvae,
+                masked_model=masked_model,
+                residual_model=residual_model,
+                vq_opt=vq_opt,
+                token_opt=token_opt,
+                best_val_metric=best_val_metric,
+                best_val_metric_name=best_val_metric_name,
+            )
+            if last_val_eval is not None:
+                ckpt["val_eval"] = last_val_eval
             torch.save(ckpt, step_path)
             torch.save(ckpt, latest_path)
             print(f"[save] {step_path}", flush=True)
@@ -1218,14 +1575,20 @@ def main() -> None:
         device,
         args.eval_batches,
         args.generation_steps,
+        token_stage=token_stage,
     )
-    print(
-        f"[tok summary] eval_base_ce={token_eval['base_ce']:.5f} "
-        f"eval_residual_ce={token_eval['residual_ce']:.5f} "
-        f"full_mask_ce={token_eval['base_full_mask_ce']:.5f} "
-        f"full_mask_acc={token_eval['base_full_mask_acc']:.3f} "
-        f"generate_base_acc={token_eval['base_generate_acc']:.3f}"
-    )
+    summary_parts = []
+    for key, label, precision in (
+        ("base_ce", "eval_base_ce", 5),
+        ("residual_ce", "eval_residual_ce", 5),
+        ("residual_sampled_ce", "eval_residual_sampled_ce", 5),
+        ("base_full_mask_ce", "full_mask_ce", 5),
+        ("base_full_mask_acc", "full_mask_acc", 3),
+        ("base_generate_acc", "generate_base_acc", 3),
+    ):
+        if key in token_eval:
+            summary_parts.append(f"{label}={token_eval[key]:.{precision}f}")
+    print(f"[tok summary {token_stage}] {' '.join(summary_parts)}")
     level_summary = " ".join(
         f"{k}={v:.5f}" for k, v in sorted(token_eval.items()) if k.startswith("residual_ce_l")
     )
@@ -1239,54 +1602,76 @@ def main() -> None:
     if acc_summary:
         print(f"[tok summary acc] {acc_summary}")
 
+    base = None
+    base_only = None
+    gen_tokens = None
+    gen = None
+    teacher_residual_tokens = None
+    teacher_residual = None
     with torch.no_grad():
         cond = text_encoder.encode(eval_batch.texts, device=device)
         recon = normalizer.inverse(vqvae(eval_x, mask=eval_mask).recon)
-        base = masked_model.generate(
-            cond=cond,
-            seq_len=tokens.shape[-1],
-            steps=args.generation_steps,
-            guidance_scale=1.0,
-            mask=eval_token_mask,
-        )
-        base_only = normalizer.inverse(
-            vqvae.decode_from_tokens(
-                base.unsqueeze(1),
-                target_len=eval_x.shape[1],
-                token_mask=eval_token_mask,
+        if token_stage in {"joint", "masked"}:
+            base = masked_model.generate(
+                cond=cond,
+                seq_len=tokens.shape[-1],
+                steps=args.generation_steps,
+                guidance_scale=1.0,
+                mask=eval_token_mask,
             )
-        )
-        gen_tokens = residual_model.generate_residuals(base, cond=cond, guidance_scale=1.0, mask=eval_token_mask)
-        gen = normalizer.inverse(
-            vqvae.decode_from_tokens(gen_tokens, target_len=eval_x.shape[1], token_mask=eval_token_mask)
-        )
-        teacher_residual_tokens = residual_model.generate_residuals(
-            tokens[:, 0],
-            cond=cond,
-            guidance_scale=1.0,
-            mask=eval_token_mask,
-        )
-        teacher_residual = normalizer.inverse(
-            vqvae.decode_from_tokens(
-                teacher_residual_tokens,
-                target_len=eval_x.shape[1],
-                token_mask=eval_token_mask,
+            base_only = normalizer.inverse(
+                vqvae.decode_from_tokens(
+                    base.unsqueeze(1),
+                    target_len=eval_x.shape[1],
+                    token_mask=eval_token_mask,
+                )
             )
+        if token_stage in {"joint", "residual"}:
+            teacher_residual_tokens = residual_model.generate_residuals(
+                tokens[:, 0],
+                cond=cond,
+                guidance_scale=1.0,
+                mask=eval_token_mask,
+            )
+            teacher_residual = normalizer.inverse(
+                vqvae.decode_from_tokens(
+                    teacher_residual_tokens,
+                    target_len=eval_x.shape[1],
+                    token_mask=eval_token_mask,
+                )
+            )
+        if token_stage == "joint":
+            if base is None:
+                raise RuntimeError("joint token stage did not generate base tokens")
+            gen_tokens = residual_model.generate_residuals(
+                base, cond=cond, guidance_scale=1.0, mask=eval_token_mask
+            )
+            gen = normalizer.inverse(
+                vqvae.decode_from_tokens(
+                    gen_tokens,
+                    target_len=eval_x.shape[1],
+                    token_mask=eval_token_mask,
+                )
+            )
+    if gen_tokens is not None and gen is not None:
+        print(
+            f"[generate] tokens={tuple(gen_tokens.shape)} motion={tuple(gen.shape)} "
+            f"finite={bool(torch.isfinite(gen).all())}"
         )
-    print(
-        f"[generate] tokens={tuple(gen_tokens.shape)} motion={tuple(gen.shape)} "
-        f"finite={bool(torch.isfinite(gen).all())}"
-    )
 
-    ckpt = {
-        "step": args.token_steps,
-        "args": vars(args),
-        "normalizer": normalizer.state_dict(),
-        "vqvae": vqvae.state_dict(),
-        "masked_transformer": masked_model.state_dict(),
-        "residual_transformer": residual_model.state_dict(),
-        "vq_optimizer": vq_opt.state_dict(),
-        "token_optimizer": token_opt.state_dict(),
+    ckpt = build_token_train_checkpoint(
+        step=args.token_steps,
+        args=args,
+        normalizer=normalizer,
+        vqvae=vqvae,
+        masked_model=masked_model,
+        residual_model=residual_model,
+        vq_opt=vq_opt,
+        token_opt=token_opt,
+        best_val_metric=best_val_metric,
+        best_val_metric_name=best_val_metric_name,
+    )
+    ckpt.update({
         "vq_eval": vq_eval,
         "token_eval": token_eval,
         "sample_texts": eval_batch.texts,
@@ -1294,14 +1679,19 @@ def main() -> None:
         "sample_token_mask": eval_token_mask.detach().cpu(),
         "sample_real": eval_raw_x.detach().cpu(),
         "sample_reconstruction": recon.detach().cpu(),
-        "sample_base_only": base_only.detach().cpu(),
-        "sample_teacher_residual": teacher_residual.detach().cpu(),
-        "sample_generated": gen.detach().cpu(),
         "sample_true_tokens": tokens.detach().cpu(),
-        "sample_base_tokens": base.detach().cpu(),
-        "sample_tokens": gen_tokens.detach().cpu(),
-        "sample_teacher_residual_tokens": teacher_residual_tokens.detach().cpu(),
-    }
+    })
+    if last_val_eval is not None:
+        ckpt["val_eval"] = last_val_eval
+    if base is not None and base_only is not None:
+        ckpt["sample_base_only"] = base_only.detach().cpu()
+        ckpt["sample_base_tokens"] = base.detach().cpu()
+    if teacher_residual is not None and teacher_residual_tokens is not None:
+        ckpt["sample_teacher_residual"] = teacher_residual.detach().cpu()
+        ckpt["sample_teacher_residual_tokens"] = teacher_residual_tokens.detach().cpu()
+    if gen is not None and gen_tokens is not None:
+        ckpt["sample_generated"] = gen.detach().cpu()
+        ckpt["sample_tokens"] = gen_tokens.detach().cpu()
     out_path = output_dir / "momask_smoke_latest.pt"
     torch.save(ckpt, out_path)
     print(f"[save] {out_path}")

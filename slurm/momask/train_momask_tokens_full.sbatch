@@ -42,6 +42,8 @@ TOKEN_EPOCHS="${TOKEN_EPOCHS:-0}"
 SAVE_EVERY="${SAVE_EVERY:-5000}"
 LOG_EVERY="${LOG_EVERY:-1000}"
 EVAL_BATCHES="${EVAL_BATCHES:-32}"
+VALIDATE_EVERY="${VALIDATE_EVERY:-0}"
+VAL_EVAL_BATCHES="${VAL_EVAL_BATCHES:-32}"
 MAX_CLIPS="${MAX_CLIPS:-999999}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 NUM_WORKERS="${NUM_WORKERS:-0}"
@@ -68,6 +70,7 @@ RESIDUAL_COND_DROP="${RESIDUAL_COND_DROP:-0.2}"
 RESIDUAL_ARCH="${RESIDUAL_ARCH:-simple}"
 RESIDUAL_SHARE_WEIGHT="${RESIDUAL_SHARE_WEIGHT:-0}"
 FREEZE_MASKED="${FREEZE_MASKED:-0}"
+TOKEN_STAGE="${TOKEN_STAGE:-joint}"
 BASE_FULL_MASK_PROB="${BASE_FULL_MASK_PROB:-0.3}"
 GENERATION_STEPS="${GENERATION_STEPS:-10}"
 CACHE_TOKEN_DEVICE="${CACHE_TOKEN_DEVICE:-cuda}"
@@ -104,9 +107,10 @@ echo "[momask-tokens] token_ckpt=${TOKEN_CKPT:-<none>}"
 echo "[momask-tokens] masked_ckpt=${MASKED_CKPT:-<none>}"
 echo "[momask-tokens] output_dir=${OUTPUT_DIR}"
 echo "[momask-tokens] token_steps=${TOKEN_STEPS} token_epochs=${TOKEN_EPOCHS} max_clips=${MAX_CLIPS} batch_size=${BATCH_SIZE} token_batch_size=${TOKEN_BATCH_SIZE} num_workers=${NUM_WORKERS} max_seq_len=${MAX_SEQ_LEN} min_seq_len=${MIN_SEQ_LEN}"
+echo "[momask-tokens] validate_every=${VALIDATE_EVERY} val_eval_batches=${VAL_EVAL_BATCHES}"
 echo "[momask-tokens] text_encoder=${TEXT_ENCODER} clip_model=${CLIP_MODEL} clip_backend=${CLIP_BACKEND} clip_l2_normalize=${CLIP_L2_NORMALIZE}"
 echo "[momask-tokens] transformer arch=${TRANSFORMER_ARCH} hidden=${TRANSFORMER_HIDDEN_DIM} depth=${TRANSFORMER_DEPTH} heads=${TRANSFORMER_HEADS} ffn=${TRANSFORMER_FFN_DIM} dropout=${TRANSFORMER_DROPOUT}"
-echo "[momask-tokens] lr=${TOKEN_LR} adam_beta2=${ADAM_BETA2} weight_decay=${WEIGHT_DECAY} grad_clip=${TOKEN_GRAD_CLIP} residual_arch=${RESIDUAL_ARCH} residual_share_weight=${RESIDUAL_SHARE_WEIGHT} freeze_masked=${FREEZE_MASKED} live_token_crops=${LIVE_TOKEN_CROPS} paper_data=${PAPER_TRANSFORMER_DATA} base_full_mask_prob=${BASE_FULL_MASK_PROB} generation_steps=${GENERATION_STEPS}"
+echo "[momask-tokens] token_stage=${TOKEN_STAGE} lr=${TOKEN_LR} adam_beta2=${ADAM_BETA2} weight_decay=${WEIGHT_DECAY} grad_clip=${TOKEN_GRAD_CLIP} residual_arch=${RESIDUAL_ARCH} residual_share_weight=${RESIDUAL_SHARE_WEIGHT} freeze_masked=${FREEZE_MASKED} live_token_crops=${LIVE_TOKEN_CROPS} paper_data=${PAPER_TRANSFORMER_DATA} base_full_mask_prob=${BASE_FULL_MASK_PROB} generation_steps=${GENERATION_STEPS}"
 echo "[momask-tokens] warmup_steps=${WARMUP_STEPS} lr_milestones=${LR_MILESTONES:-<none>} lr_gamma=${LR_GAMMA}"
 
 RESIDUAL_SHARE_ARG=""
@@ -192,12 +196,15 @@ enroot start \
             --residual-arch ${RESIDUAL_ARCH} \\
             ${RESIDUAL_SHARE_ARG} \\
             ${FREEZE_MASKED_ARG} \\
+            --token-stage ${TOKEN_STAGE} \\
             ${LIVE_TOKEN_CROPS_ARG} \\
             --base-full-mask-prob ${BASE_FULL_MASK_PROB} \\
             --generation-steps ${GENERATION_STEPS} \\
             --cache-token-device ${CACHE_TOKEN_DEVICE} \\
             --log-every ${LOG_EVERY} \\
             --eval-batches ${EVAL_BATCHES} \\
+            --validate-every ${VALIDATE_EVERY} \\
+            --val-eval-batches ${VAL_EVAL_BATCHES} \\
             --save-every ${SAVE_EVERY} \\
             --output-dir '${OUTPUT_DIR}'
     "

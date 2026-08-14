@@ -10,6 +10,7 @@ import zipfile
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 from torch.utils.data import DataLoader
 
@@ -22,11 +23,18 @@ from momask.models import (
     TokenTransformerConfig,
 )
 from momask.data_utils import normalize_motion, token_mask_from_frame_mask
+from momask.scripts.assemble_token_checkpoints import assemble_token_checkpoints
 from momask.scripts.train_momask import (
     FixedWindowTensorBatcher,
     H3DNormalizer,
+    best_validation_metadata_matches,
+    configure_token_training_stage,
     cycle_loader,
+    evaluate_tokens,
+    expected_token_validation_metric_name,
+    resolve_token_stage,
     stack_token_cache,
+    token_validation_metric,
 )
 from momask.tasks import generate_h3d263
 from shared.data import (
@@ -209,6 +217,203 @@ def test_cycle_loader_restarts_iterable_instead_of_replaying_first_epoch() -> No
     batches = cycle_loader(FreshEpochs())
     assert next(batches) == 1
     assert next(batches) == 2
+
+
+def test_token_training_stages_select_only_the_requested_model() -> None:
+    masked = torch.nn.Linear(3, 4)
+    residual = torch.nn.Linear(4, 5)
+
+    params = configure_token_training_stage(masked, residual, "masked")
+    assert masked.training
+    assert not residual.training
+    assert all(parameter.requires_grad for parameter in masked.parameters())
+    assert all(not parameter.requires_grad for parameter in residual.parameters())
+    assert {id(parameter) for parameter in params} == {
+        id(parameter) for parameter in masked.parameters()
+    }
+
+    params = configure_token_training_stage(masked, residual, "residual")
+    assert not masked.training
+    assert residual.training
+    assert all(not parameter.requires_grad for parameter in masked.parameters())
+    assert all(parameter.requires_grad for parameter in residual.parameters())
+    assert {id(parameter) for parameter in params} == {
+        id(parameter) for parameter in residual.parameters()
+    }
+
+
+def test_token_stage_optimizer_updates_only_the_selected_model() -> None:
+    torch.manual_seed(11)
+    masked = torch.nn.Linear(3, 3)
+    residual = torch.nn.Linear(3, 3)
+    residual_before = {name: value.detach().clone() for name, value in residual.state_dict().items()}
+
+    params = configure_token_training_stage(masked, residual, "masked")
+    optimizer = torch.optim.AdamW(params, lr=1e-2)
+    loss = masked(torch.ones(2, 3)).sum()
+    optimizer.zero_grad(set_to_none=True)
+    loss.backward()
+    optimizer.step()
+
+    assert all(torch.equal(residual.state_dict()[name], value) for name, value in residual_before.items())
+
+
+def test_token_validation_metric_is_stage_specific() -> None:
+    metrics = {"base_ce": 0.5, "residual_ce": 0.25, "residual_sampled_ce": 0.2}
+    assert token_validation_metric("masked", metrics) == ("base_ce", 0.5)
+    assert token_validation_metric("residual", metrics) == ("residual_sampled_ce", 0.2)
+    assert token_validation_metric("joint", metrics) == ("combined_ce", 0.7)
+    assert expected_token_validation_metric_name("masked", "paper", "codebook") == "base_ce"
+    assert (
+        expected_token_validation_metric_name("residual", "paper", "codebook")
+        == "residual_sampled_ce"
+    )
+
+
+def test_old_or_missing_best_validation_metadata_is_rejected() -> None:
+    current = {
+        "best_val_metric_name": "base_ce",
+        "token_validation_version": 1,
+    }
+    assert best_validation_metadata_matches(current, "base_ce", best_path_exists=True)
+    assert not best_validation_metadata_matches(current, "base_ce", best_path_exists=False)
+    assert not best_validation_metadata_matches(current, "residual_sampled_ce", True)
+    assert not best_validation_metadata_matches(
+        {"best_val_metric_name": "base_ce"},
+        "base_ce",
+        True,
+    )
+
+
+def test_paper_residual_validation_reports_sampled_training_objective() -> None:
+    torch.manual_seed(9)
+    cfg = TokenTransformerConfig(
+        vocab_size=8,
+        text_dim=4,
+        code_dim=6,
+        hidden_dim=12,
+        depth=1,
+        num_heads=3,
+        ffn_dim=24,
+        max_seq_len=5,
+        dropout=0.0,
+        architecture="paper",
+    )
+    masked = MaskedMotionTransformer(cfg)
+    residual = CodebookResidualTransformer(
+        cfg,
+        num_quantizers=3,
+        code_dim=6,
+        share_weight=True,
+    )
+    cached = [
+        {
+            "tokens": torch.randint(0, cfg.vocab_size, (2, 3, 5)),
+            "token_mask": torch.ones(2, 5, dtype=torch.bool),
+            "cond": torch.randn(2, cfg.text_dim),
+            "texts": ["first", "second"],
+        }
+    ]
+
+    metrics = evaluate_tokens(
+        masked,
+        residual,
+        cached,
+        torch.device("cpu"),
+        max_batches=1,
+        generation_steps=1,
+        token_stage="residual",
+    )
+
+    assert torch.isfinite(torch.tensor(metrics["residual_sampled_ce"]))
+    assert torch.isfinite(torch.tensor(metrics["residual_ce"]))
+
+
+def test_legacy_freeze_masked_flag_resolves_to_residual_stage() -> None:
+    args = types.SimpleNamespace(token_stage="joint", freeze_masked_transformer=True)
+    assert resolve_token_stage(args) == "residual"
+    assert args.token_stage == "residual"
+
+
+def test_independent_token_checkpoints_assemble_trained_components() -> None:
+    common = {
+        "normalizer": {"mean": torch.tensor([1.0]), "std": torch.tensor([2.0])},
+        "vqvae": {"weight": torch.tensor([3.0])},
+    }
+    masked = {
+        **common,
+        "step": 10,
+        "args": {
+            "token_stage": "masked",
+            "max_seq_len": 196,
+            "transformer_arch": "paper",
+            "residual_arch": "codebook",
+        },
+        "checkpoint_role": "best_validation",
+        "token_validation_version": 1,
+        "best_val_metric_name": "base_ce",
+        "best_val_metric": 0.2,
+        "val_eval": {"base_ce": 0.2},
+        "masked_transformer": {"weight": torch.tensor([4.0])},
+        "residual_transformer": {"weight": torch.tensor([-1.0])},
+        "token_optimizer": {"state": "masked"},
+        "token_eval": {"base_ce": 0.1},
+        "sample_generated": torch.tensor([0.0]),
+    }
+    residual = {
+        **common,
+        "step": 12,
+        "args": {
+            "token_stage": "residual",
+            "max_seq_len": 196,
+            "transformer_arch": "paper",
+            "residual_arch": "codebook",
+        },
+        "checkpoint_role": "best_validation",
+        "token_validation_version": 1,
+        "best_val_metric_name": "residual_sampled_ce",
+        "best_val_metric": 0.1,
+        "val_eval": {"residual_sampled_ce": 0.1},
+        "masked_transformer": {"weight": torch.tensor([-2.0])},
+        "residual_transformer": {"weight": torch.tensor([5.0])},
+        "token_optimizer": {"state": "residual"},
+    }
+
+    assembled = assemble_token_checkpoints(masked, residual)
+    assert torch.equal(assembled["masked_transformer"]["weight"], torch.tensor([4.0]))
+    assert torch.equal(assembled["residual_transformer"]["weight"], torch.tensor([5.0]))
+    assert assembled["args"]["token_stage"] == "assembled"
+    assert assembled["component_steps"] == {"masked": 10, "residual": 12}
+    assert assembled["component_validation"]["masked"] == {
+        "name": "base_ce",
+        "value": 0.2,
+        "step": 10,
+    }
+    assert assembled["component_validation"]["residual"] == {
+        "name": "residual_sampled_ce",
+        "value": 0.1,
+        "step": 12,
+    }
+    assert assembled["checkpoint_role"] == "assembled"
+    assert "token_optimizer" not in assembled
+    assert "token_eval" not in assembled
+    assert "best_val_metric" not in assembled
+    assert "val_eval" not in assembled
+    assert "sample_generated" not in assembled
+
+
+def test_assembly_rejects_unvalidated_component_checkpoints() -> None:
+    common = {
+        "normalizer": {"mean": torch.tensor([1.0])},
+        "vqvae": {"weight": torch.tensor([2.0])},
+        "masked_transformer": {"weight": torch.tensor([3.0])},
+        "residual_transformer": {"weight": torch.tensor([4.0])},
+    }
+    masked = {**common, "args": {"token_stage": "masked"}}
+    residual = {**common, "args": {"token_stage": "residual"}}
+
+    with pytest.raises(ValueError, match="best-validation"):
+        assemble_token_checkpoints(masked, residual)
 
 
 def test_canonical_window_dataset_preloads_and_indexes_all_windows(tmp_path: Path, monkeypatch) -> None:

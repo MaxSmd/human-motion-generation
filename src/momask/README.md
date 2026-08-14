@@ -52,6 +52,43 @@ wrappers are `slurm/*_momask*.sbatch`.
 - `shared.geometry.{H3D_FEATURE_DIM, PARENTS, recover_joints_from_ric, ...}`
 - `shared.utils.{EMA, Logger, save_checkpoint, load_checkpoint, set_seed, ...}`
 
+## Independent transformer training
+
+The paper-style pipeline trains the M-Transformer and R-Transformer with
+independent objectives. Both consume canonical motions cropped to at most 196
+frames and tokens from the same frozen RVQ checkpoint. The R-Transformer uses
+ground-truth lower RVQ levels during training, so the two jobs can run in
+parallel.
+
+The stage jobs use the 12 GB partition with its compute-capability filter; the
+current PyTorch image cannot run on the older Titan X nodes in that partition.
+First submit short stage-specific probes and inspect the reported
+CUDA peak memory. These are compute jobs; the launcher itself performs no
+training on the head node:
+
+```bash
+bash slurm/momask/submit_momask_transformer_probes.sh
+```
+
+Once both probes show acceptable cluster utilization, submit both full jobs and
+an automatic dependent assembly job:
+
+```bash
+bash slurm/momask/submit_momask_transformers_paperstyle.sh
+```
+
+The default assembled, evaluation-ready checkpoint is written to
+`runs/momask-canonical-tokens-paperfaithful196-clip500e/momask_smoke_latest.pt`.
+Each component is selected using a fixed validation cache and repeatable
+corruptions: masked-token CE for the M-Transformer and the same sampled-level
+residual-token CE used to train the R-Transformer. The assembly job consumes
+each run's `checkpoints/tokens_best_val.pt`, not its final
+training checkpoint. FID still needs to be measured on the assembled model.
+The launcher only submits SLURM jobs; training and checkpoint assembly do not
+run on the head node. To resume a cancelled component independently, pass its
+stage checkpoint as `TOKEN_CKPT` when submitting the corresponding masked or
+residual wrapper.
+
 ## Inference-time joint constraints
 
 `momask.constraints` supports sparse joint-position targets and exact/ranged
