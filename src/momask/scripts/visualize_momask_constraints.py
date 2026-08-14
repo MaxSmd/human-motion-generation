@@ -542,6 +542,18 @@ def control_error_series(
     return joint_error, angle_error
 
 
+def natural_joint_names(joint_ids: list[int]) -> str:
+    names = [
+        JOINT_NAMES[joint].replace("L_", "left ").replace("R_", "right ").replace("_", " ").lower()
+        for joint in joint_ids
+    ]
+    if len(names) == 1:
+        return f"the {names[0]}"
+    if len(names) == 2:
+        return f"the {names[0]} and {names[1]}"
+    return "the " + ", ".join(names[:-1]) + f", and {names[-1]}"
+
+
 def draw_latent_pose_frame(
     ax,
     *,
@@ -706,7 +718,6 @@ def render_latent_constraint_comparison(
     anchor_mask: Tensor,
     angle_tolerance_deg: float,
     anchor_stride: int,
-    joint_target_space: str,
     prompt: str,
     sample_idx: int,
     seed: int,
@@ -734,25 +745,19 @@ def render_latent_constraint_comparison(
     angle_ylim = angle_max * 1.2 + 1.0
     n_cols = len(series)
     fig = plt.figure(figsize=(max(13.5, 4.5 * n_cols), 9.8))
-    joint_names = ", ".join(JOINT_NAMES[joint].replace("_", " ") for joint in joint_ids)
-    angle_names = (
-        ", ".join(JOINT_NAMES[int(joint)].replace("_", " ") for joint in angle_triplets[:, 1])
-        if angle_triplets is not None
-        else ""
-    )
-    constraint_parts = [f"Sparse anchors every {anchor_stride} frames."]
+    rules: list[str] = []
     if joint_ids:
-        constraint_parts.append(
-            f"Joint target: {joint_names} reproduce the reference {joint_target_space} positions."
-        )
+        rules.append(f"keep {natural_joint_names(joint_ids)} at their reference positions")
     if angle_triplets is not None:
-        constraint_parts.append(
-            f"Angle target: {angle_names} remain within +/-{angle_tolerance_deg:g} deg of the reference bend."
+        angle_centers = [int(joint) for joint in angle_triplets[:, 1]]
+        rules.append(
+            f"keep {natural_joint_names(angle_centers)} within +/-{angle_tolerance_deg:g} deg "
+            "of their reference bend"
         )
-    constraint_parts.append(
-        "Green stars/diamonds mark active targets; green bone chains identify angle-controlled joints."
+    constraint_text = (
+        f"Constraint: {'; '.join(rules)} at keyframes every {anchor_stride} frames. "
+        "Green markers show the active targets."
     )
-    constraint_text = " ".join(constraint_parts)
     title = f"Sample {sample_idx} | Seed {seed} | Prompt: {prompt}\n{constraint_text}"
     fig.suptitle("\n".join(textwrap.wrap(title, width=150)), fontsize=14, fontweight="semibold", y=0.985)
     grid = fig.add_gridspec(2, n_cols, height_ratios=[2.3, 1.0], hspace=0.24, wspace=0.32)
@@ -1044,7 +1049,6 @@ def main() -> None:
             anchor_mask=latent_anchor_mask[:decoded_length].detach().cpu(),
             angle_tolerance_deg=args.angle_tolerance_deg,
             anchor_stride=args.anchor_stride,
-            joint_target_space=args.joint_target_space,
             prompt=text,
             sample_idx=sample_idx,
             seed=args.seed,
