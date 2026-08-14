@@ -135,6 +135,13 @@ sbatch slurm/momask/evaluate_momask_constraints.sbatch
 # Render ground truth, generated motion, and the torso-relative result.
 SAMPLES="0 500" \
 sbatch slurm/momask/visualize_momask_body_fixed_constraints.sbatch
+
+# Keep the right knee (joint 5) fixed relative to the moving torso.
+BODY_FIXED_JOINT_IDS=5 \
+CONSTRAINT_TEXT="Right knee must stay fixed relative to the torso." \
+BODY_OUTPUT_PREFIX=body_fixed_right_knee \
+SAMPLES="0 500" \
+sbatch slurm/momask/visualize_momask_body_fixed_constraints.sbatch
 ```
 
 The evaluator reports `torso_relative_l2_m`, success within 5/10 cm, FID,

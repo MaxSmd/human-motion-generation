@@ -34,6 +34,8 @@ SAMPLE_TOKENS="${SAMPLE_TOKENS:-0}"
 REMASK_KEPT_TOKENS="${REMASK_KEPT_TOKENS:-1}"
 BODY_FIXED_JOINT_IDS="${BODY_FIXED_JOINT_IDS:-17,19,21}"
 BODY_REFERENCE_FRAME="${BODY_REFERENCE_FRAME:-0}"
+CONSTRAINT_TEXT="${CONSTRAINT_TEXT:-}"
+BODY_OUTPUT_PREFIX="${BODY_OUTPUT_PREFIX:-body_fixed}"
 REFINEMENT_STEPS="${REFINEMENT_STEPS:-100}"
 REFINEMENT_LR="${REFINEMENT_LR:-0.01}"
 TORSO_RELATIVE_WEIGHT="${TORSO_RELATIVE_WEIGHT:-5.0}"
@@ -54,13 +56,14 @@ RUN_DIR="$(dirname "${CKPT}")"
 if [ "$(basename "${RUN_DIR}")" = "checkpoints" ]; then
     RUN_DIR="$(dirname "${RUN_DIR}")"
 fi
-OUT_DIR="${OUT_DIR:-${RUN_DIR}/constraints/viz_body_fixed_right_arm}"
+OUT_DIR="${OUT_DIR:-${RUN_DIR}/constraints/viz_${BODY_OUTPUT_PREFIX}}"
 
 echo "[momask-body-fixed-viz] host=$(hostname)"
 echo "[momask-body-fixed-viz] repo=${REPO}"
 echo "[momask-body-fixed-viz] ckpt=${CKPT}"
 echo "[momask-body-fixed-viz] samples=${SAMPLES} seeds=${SEEDS}"
 echo "[momask-body-fixed-viz] joints=${BODY_FIXED_JOINT_IDS} reference_frame=${BODY_REFERENCE_FRAME}"
+echo "[momask-body-fixed-viz] constraint_text=${CONSTRAINT_TEXT:-<automatic>} output_prefix=${BODY_OUTPUT_PREFIX}"
 echo "[momask-body-fixed-viz] refinement_steps=${REFINEMENT_STEPS} torso_relative_weight=${TORSO_RELATIVE_WEIGHT}"
 echo "[momask-body-fixed-viz] out_dir=${OUT_DIR}"
 
@@ -109,6 +112,8 @@ enroot start \
                     --constraint-variant body-fixed \
                     --body-fixed-joint-ids '${BODY_FIXED_JOINT_IDS}' \
                     --body-reference-frame ${BODY_REFERENCE_FRAME} \
+                    --constraint-text '${CONSTRAINT_TEXT}' \
+                    --body-output-prefix '${BODY_OUTPUT_PREFIX}' \
                     --refinement-steps ${REFINEMENT_STEPS} \
                     --refinement-lr ${REFINEMENT_LR} \
                     --torso-relative-weight ${TORSO_RELATIVE_WEIGHT} \

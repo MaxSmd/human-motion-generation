@@ -119,6 +119,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--angle-tolerance-deg", type=float, default=5.0)
     p.add_argument("--body-fixed-joint-ids", default="17,19,21")
     p.add_argument("--body-reference-frame", type=int, default=0)
+    p.add_argument("--constraint-text", default=None)
+    p.add_argument("--body-output-prefix", default="body_fixed")
     p.add_argument("--refinement-steps", type=int, default=50)
     p.add_argument("--refinement-lr", type=float, default=0.01)
     p.add_argument("--position-weight", type=float, default=1.0)
@@ -1178,7 +1180,7 @@ def main() -> None:
                     generated_targets[0].detach().cpu(),
                 ),
                 (
-                    "right-arm fixed",
+                    f"{natural_joint_names(body_fixed_joint_ids)} fixed",
                     body_fixed_joints[0].detach().cpu(),
                     body_fixed_targets[0].detach().cpu(),
                 ),
@@ -1191,13 +1193,14 @@ def main() -> None:
                 anchor_mask=decoded_frame_mask[0, :decoded_length].detach().cpu(),
                 angle_tolerance_deg=args.angle_tolerance_deg,
                 anchor_stride=1,
-                constraint_text_override=(
+                constraint_text_override=args.constraint_text
+                or (
                     f"Constraint: keep {natural_joint_names(body_fixed_joint_ids)} fixed "
                     "relative to the torso throughout the motion. Green markers show the "
                     "moving torso-relative targets."
                 ),
                 dense_constraint=True,
-                output_prefix="body_fixed_right_arm",
+                output_prefix=args.body_output_prefix,
                 prompt=text,
                 sample_idx=sample_idx,
                 seed=args.seed,
