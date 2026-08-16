@@ -11,9 +11,10 @@ Typical quick run on the cluster:
         --variants full,base
 
 Variants:
-  full  = text -> base tokens -> residual tokens -> RVQ decoder
-  base  = text -> base tokens only -> RVQ decoder
-  recon = real motion -> RVQ encode/decode
+  full             = text -> base tokens -> residual tokens -> RVQ decoder
+  base             = text -> base tokens only -> RVQ decoder
+  teacher_residual = real base tokens -> predicted residual tokens -> RVQ decoder
+  recon            = real motion -> RVQ encode/decode
 """
 
 from __future__ import annotations
@@ -82,7 +83,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--max-seq-len", type=int, default=None, help="Defaults to checkpoint args.max_seq_len.")
     p.add_argument("--min-seq-len", type=int, default=40)
-    p.add_argument("--variants", default="full,base", help="Comma list from: full,base,recon")
+    p.add_argument(
+        "--variants",
+        default="full,base",
+        help="Comma list from: full,base,teacher_residual,recon",
+    )
     p.add_argument("--generation-steps", type=int, default=None, help="Defaults to checkpoint args.generation_steps.")
     p.add_argument("--guidance-scale", type=float, default=1.0)
     p.add_argument("--temperature", type=float, default=1.0)
@@ -387,17 +392,28 @@ def generate_variant(
 
     true_tokens = vqvae.encode_to_tokens(x_norm)
     token_mask = token_mask_from_frame_mask(frame_mask, true_tokens.shape[-1], vqvae.downsample)
-    base = masked.generate(
-        cond=cond,
-        seq_len=true_tokens.shape[-1],
-        steps=steps,
-        guidance_scale=guidance_scale,
-        temperature=temperature,
-        topk_filter_thres=topk_filter_thres,
-        sample=sample,
-        remask_kept_tokens=remask_kept_tokens,
-        mask=token_mask,
-    )
+    if variant == "teacher_residual":
+        tokens = residual.generate_residuals(
+            true_tokens[:, 0],
+            cond=cond,
+            guidance_scale=guidance_scale,
+            temperature=temperature,
+            topk_filter_thres=topk_filter_thres,
+            sample=sample,
+            mask=token_mask,
+        )
+    else:
+        base = masked.generate(
+            cond=cond,
+            seq_len=true_tokens.shape[-1],
+            steps=steps,
+            guidance_scale=guidance_scale,
+            temperature=temperature,
+            topk_filter_thres=topk_filter_thres,
+            sample=sample,
+            remask_kept_tokens=remask_kept_tokens,
+            mask=token_mask,
+        )
 
     if variant == "base":
         tokens = base.unsqueeze(1)
@@ -411,7 +427,7 @@ def generate_variant(
             sample=sample,
             mask=token_mask,
         )
-    else:
+    elif variant != "teacher_residual":
         raise ValueError(f"unknown variant {variant!r}")
 
     return normalizer.inverse(
@@ -447,10 +463,10 @@ def main() -> None:
         require_path(real_h3d_dir, "canonical HumanML3D new_joint_vecs dir")
 
     variants = [v.strip() for v in args.variants.split(",") if v.strip()]
-    unknown = sorted(set(variants) - {"full", "base", "recon"})
+    unknown = sorted(set(variants) - {"full", "base", "teacher_residual", "recon"})
     if unknown:
         raise ValueError(f"unknown variants: {unknown}")
-    needs_generation = any(v in {"full", "base"} for v in variants)
+    needs_generation = any(v in {"full", "base", "teacher_residual"} for v in variants)
 
     ckpt = torch_load(ckpt_path, map_location=device)
     normalizer = H3DNormalizer.from_state_dict(ckpt["normalizer"])
@@ -589,6 +605,7 @@ def main() -> None:
             "topk_filter_thres": args.topk_filter_thres,
             "sample": args.sample,
             "remask_kept_tokens": args.remask_kept_tokens,
+            "seed": args.seed,
             "evaluator": args.evaluator,
             "real_feature_source": "canonical" if real_h3d_dir is not None else "packed",
             "real_h3d_dir": str(real_h3d_dir) if real_h3d_dir is not None else None,

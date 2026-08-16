@@ -90,6 +90,32 @@ run on the head node. To resume a cancelled component independently, pass its
 stage checkpoint as `TOKEN_CKPT` when submitting the corresponding masked or
 residual wrapper.
 
+The official implementation selects transformer checkpoints using generated
+motion FID, while the training jobs above use validation token CE so they can
+remain lightweight. After both 500-epoch stages finish, run the canonical
+196-frame FID selector:
+
+```bash
+sbatch slurm/momask/select_momask_transformer_checkpoints.sbatch
+```
+
+This is a compute job. It follows the official components' independent FID
+selection protocols over the complete validation split. M-Transformer candidates
+are decoded with base tokens only, using 18 generation iterations and guidance
+4. R-Transformer candidates receive ground-truth VQ base tokens and predict only
+the residual layers, using guidance 2. Both use maximum length 196, temperature
+1, top-k 0.9, sampling, and the official no-remasking behavior. Periodic,
+CE-best, latest-periodic, and true final stage checkpoints are included.
+
+Candidate assembly reuses one temporary file. Completed evaluations are reused
+only when both checkpoint identities and the complete evaluation protocol match.
+After selecting both components, the job assembles `momask_best_val_fid.pt` and
+reports its normal full-generation validation metrics in
+`selected_full_validation.json`. Results are written under
+`runs/momask-canonical-tokens-paperfaithful196-valfidselection-full/`. The test
+split remains untouched. Set `CHECKPOINT_STRIDE=2` or higher for a quicker coarse
+sweep, then use stride 1 for final selection.
+
 ## Inference-time joint constraints
 
 `momask.constraints` supports sparse joint-position targets and exact/ranged

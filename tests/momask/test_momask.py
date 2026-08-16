@@ -24,6 +24,16 @@ from momask.models import (
 )
 from momask.data_utils import normalize_motion, token_mask_from_frame_mask
 from momask.scripts.assemble_token_checkpoints import assemble_token_checkpoints
+from momask.scripts.evaluate_momask import generate_variant
+from momask.scripts.select_transformer_checkpoints import (
+    Candidate,
+    annotate_result,
+    build_candidates,
+    rank_candidates,
+    read_manifest,
+    result_matches_candidate,
+    write_manifest,
+)
 from momask.scripts.train_momask import (
     FixedWindowTensorBatcher,
     H3DNormalizer,
@@ -414,6 +424,130 @@ def test_assembly_rejects_unvalidated_component_checkpoints() -> None:
 
     with pytest.raises(ValueError, match="best-validation"):
         assemble_token_checkpoints(masked, residual)
+
+
+def test_transformer_checkpoint_selection_discovers_and_ranks_candidates(tmp_path: Path) -> None:
+    masked_dir = tmp_path / "masked"
+    masked_dir.mkdir()
+    residual = tmp_path / "residual_best.pt"
+    residual.touch()
+    for step in (5000, 10000, 15000):
+        (masked_dir / f"tokens_step_{step:07d}.pt").touch()
+    (masked_dir / "tokens_best_val.pt").touch()
+    (masked_dir / "tokens_latest_train.pt").touch()
+    (tmp_path / "momask_smoke_latest.pt").touch()
+
+    candidates = build_candidates(
+        vary="masked",
+        checkpoint_dir=masked_dir,
+        fixed_checkpoint=residual,
+        stride=2,
+        include_best_val=True,
+        include_latest=True,
+    )
+    assert [candidate.label for candidate in candidates] == [
+        "m_step_0005000",
+        "m_step_0015000",
+        "m_best_val",
+        "m_latest",
+        "m_final",
+    ]
+
+    manifest = tmp_path / "manifest.tsv"
+    write_manifest(manifest, candidates)
+    assert read_manifest(manifest) == candidates
+
+    eval_dir = tmp_path / "eval"
+    eval_dir.mkdir()
+    for index, candidate in enumerate(candidates):
+        result = {
+            "_meta": {
+                "split": "val",
+                "max_seq_len": 196,
+                "generation_steps": 10,
+                "guidance_scale": 4.0,
+                "temperature": 1.0,
+                "topk_filter_thres": 0.9,
+                "sample": True,
+            },
+            "full": {
+                "fid": float(len(candidates) - index),
+                "r_precision": [0.1, 0.2, 0.3],
+                "mm_dist": 4.0,
+                "diversity": 9.0,
+                "num_clips": 512,
+            },
+        }
+        result_path = eval_dir / f"{candidate.label}.json"
+        result_path.write_text(json.dumps(result))
+        annotate_result(result_path, candidate, "paper-validation-v1")
+        assert result_matches_candidate(result_path, candidate, "paper-validation-v1")
+        assert not result_matches_candidate(result_path, candidate, "changed-protocol")
+
+    rows = rank_candidates(candidates, eval_dir, "full", "paper-validation-v1")
+    assert rows[0]["label"] == "m_final"
+    assert rows[0]["fid"] == 1.0
+    assert rows[0]["split"] == "val"
+
+
+def test_teacher_residual_evaluation_uses_ground_truth_base_tokens() -> None:
+    class IdentityNormalizer:
+        def transform(self, x: torch.Tensor) -> torch.Tensor:
+            return x
+
+        def inverse(self, x: torch.Tensor) -> torch.Tensor:
+            return x
+
+    class FakeVQ:
+        downsample = 1
+
+        def encode_to_tokens(self, x: torch.Tensor) -> torch.Tensor:
+            return torch.zeros((x.shape[0], 2, x.shape[1]), dtype=torch.long)
+
+        def decode_from_tokens(
+            self,
+            tokens: torch.Tensor,
+            *,
+            target_len: int,
+            token_mask: torch.Tensor,
+        ) -> torch.Tensor:
+            del tokens, token_mask
+            return torch.zeros((2, target_len, 263))
+
+    class FailMasked:
+        def generate(self, **kwargs: object) -> torch.Tensor:
+            del kwargs
+            raise AssertionError("teacher-residual evaluation must not call the M-Transformer")
+
+    class FakeResidual:
+        observed_base: torch.Tensor | None = None
+
+        def generate_residuals(self, base: torch.Tensor, **kwargs: object) -> torch.Tensor:
+            del kwargs
+            self.observed_base = base.clone()
+            return torch.stack((base, base), dim=1)
+
+    residual = FakeResidual()
+    real = torch.randn(2, 5, 263)
+    generated = generate_variant(
+        "teacher_residual",
+        vqvae=FakeVQ(),  # type: ignore[arg-type]
+        masked=FailMasked(),  # type: ignore[arg-type]
+        residual=residual,  # type: ignore[arg-type]
+        normalizer=IdentityNormalizer(),  # type: ignore[arg-type]
+        cond=torch.randn(2, 512),
+        real_x=real,
+        frame_mask=torch.ones(2, 5, dtype=torch.bool),
+        steps=1,
+        guidance_scale=2.0,
+        temperature=1.0,
+        topk_filter_thres=0.9,
+        sample=True,
+        remask_kept_tokens=False,
+    )
+    assert residual.observed_base is not None
+    assert torch.equal(residual.observed_base, torch.zeros((2, 5), dtype=torch.long))
+    assert generated.shape == real.shape
 
 
 def test_canonical_window_dataset_preloads_and_indexes_all_windows(tmp_path: Path, monkeypatch) -> None:
