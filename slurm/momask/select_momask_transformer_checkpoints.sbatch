@@ -24,12 +24,13 @@ IMAGE="${IMAGE:-${HOME}/rmg-momask.sqsh}"
 HF_CACHE="${HF_CACHE:-${HOME}/hf-cache}"
 DATA_ROOT="${DATA_ROOT:-/mnt/projects/drl4cvb/human-motion-representation/data/data/humanml3d_packed}"
 HUMANML3D_REPO="${HUMANML3D_REPO:-external/HumanML3D}"
-HUMANML3D_TEXTS_ZIP="${HUMANML3D_TEXTS_ZIP:-/mnt/projects/drl4cvb/human-motion-representation/data/HumanML3D/HumanML3D/texts.zip}"
+HUMANML3D_DIR="${HUMANML3D_DIR:-/mnt/projects/drl4cvb/human-motion-representation/data/HumanML3D/HumanML3D}"
+HUMANML3D_TEXTS_ZIP="${HUMANML3D_TEXTS_ZIP:-${HUMANML3D_DIR}/texts.zip}"
 REAL_H3D_DIR="${REAL_H3D_DIR:-${HOME}/rmg-runs/h3d-canonical/new_joint_vecs}"
 
-MASKED_CHECKPOINT_DIR="${MASKED_CHECKPOINT_DIR:-runs/momask-canonical-mtrans-paperfaithful196-clip500e/checkpoints}"
-RESIDUAL_CHECKPOINT_DIR="${RESIDUAL_CHECKPOINT_DIR:-runs/momask-canonical-rtrans-paperfaithful196-clip500e/checkpoints}"
-OUTPUT_DIR="${OUTPUT_DIR:-runs/momask-canonical-tokens-paperfaithful196-valfidselection-full}"
+MASKED_CHECKPOINT_DIR="${MASKED_CHECKPOINT_DIR:-runs/momask-canonical-mtrans-officialsplits196-clip500e/checkpoints}"
+RESIDUAL_CHECKPOINT_DIR="${RESIDUAL_CHECKPOINT_DIR:-runs/momask-canonical-rtrans-officialsplits196-clip500e/checkpoints}"
+OUTPUT_DIR="${OUTPUT_DIR:-runs/momask-canonical-tokens-officialsplits196-valfidselection-full}"
 CHECKPOINT_STRIDE="${CHECKPOINT_STRIDE:-1}"
 OVERWRITE="${OVERWRITE:-0}"
 
@@ -48,7 +49,7 @@ TEMPERATURE="${TEMPERATURE:-1.0}"
 TOPK_FILTER_THRES="${TOPK_FILTER_THRES:-0.9}"
 SAMPLE="${SAMPLE:-1}"
 REMASK_KEPT_TOKENS="${REMASK_KEPT_TOKENS:-0}"
-SEED="${SEED:-0}"
+SEED="${SEED:-3407}"
 
 echo "[momask-fidsel] host=$(hostname)"
 echo "[momask-fidsel] repo=${REPO}"
@@ -56,6 +57,7 @@ echo "[momask-fidsel] masked_dir=${MASKED_CHECKPOINT_DIR}"
 echo "[momask-fidsel] residual_dir=${RESIDUAL_CHECKPOINT_DIR}"
 echo "[momask-fidsel] output_dir=${OUTPUT_DIR} stride=${CHECKPOINT_STRIDE} overwrite=${OVERWRITE}"
 echo "[momask-fidsel] split=${SPLIT} max_clips=${MAX_CLIPS} max_seq_len=${MAX_SEQ_LEN}"
+echo "[momask-fidsel] humanml3d_dir=${HUMANML3D_DIR} data_view=official_text2motion"
 echo "[momask-fidsel] masked_steps=${MASKED_GENERATION_STEPS} masked_guidance=${MASKED_GUIDANCE_SCALE}"
 echo "[momask-fidsel] residual_guidance=${RESIDUAL_GUIDANCE_SCALE} final_steps=${FINAL_GENERATION_STEPS}"
 echo "[momask-fidsel] temp=${TEMPERATURE} topk=${TOPK_FILTER_THRES} sample=${SAMPLE} remask=${REMASK_KEPT_TOKENS} seed=${SEED}"
@@ -114,6 +116,8 @@ enroot start \
                     --data-root '${DATA_ROOT}' \\
                     --humanml3d-repo '${HUMANML3D_REPO}' \\
                     --humanml3d-texts-zip '${HUMANML3D_TEXTS_ZIP}' \\
+                    --humanml3d-split-dir '${HUMANML3D_DIR}' \\
+                    --paper-transformer-data \\
                     --real-h3d-dir '${REAL_H3D_DIR}' \\
                     --split '${SPLIT}' \\
                     --max-clips ${MAX_CLIPS} \\
@@ -149,6 +153,7 @@ enroot start \
         common_protocol=\"\${common_protocol};sample=${SAMPLE};remask=${REMASK_KEPT_TOKENS};seed=${SEED}\"
         common_protocol=\"\${common_protocol};data_root=${DATA_ROOT}\"
         common_protocol=\"\${common_protocol};texts=${HUMANML3D_TEXTS_ZIP};real=${REAL_H3D_DIR}\"
+        common_protocol=\"\${common_protocol};splits=${HUMANML3D_DIR};view=official_text2motion\"
         masked_protocol=\"phase=masked;variant=base;steps=${MASKED_GENERATION_STEPS}\"
         masked_protocol=\"\${masked_protocol};guidance=${MASKED_GUIDANCE_SCALE};\${common_protocol}\"
         residual_protocol='phase=residual;variant=teacher_residual'
@@ -220,6 +225,8 @@ enroot start \
                 --data-root '${DATA_ROOT}' \\
                 --humanml3d-repo '${HUMANML3D_REPO}' \\
                 --humanml3d-texts-zip '${HUMANML3D_TEXTS_ZIP}' \\
+                --humanml3d-split-dir '${HUMANML3D_DIR}' \\
+                --paper-transformer-data \\
                 --real-h3d-dir '${REAL_H3D_DIR}' \\
                 --split '${SPLIT}' \\
                 --max-clips ${MAX_CLIPS} \\

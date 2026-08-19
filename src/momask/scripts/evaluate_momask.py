@@ -42,7 +42,7 @@ from momask.models import (
     TokenTransformerConfig,
 )
 from momask.data_utils import normalize_motion, token_mask_from_frame_mask
-from shared.data import H3D263Dataset, collate
+from shared.data import CanonicalHumanML3DText2MotionDataset, H3D263Dataset, collate
 from shared.text import CLIPTextEncoder, RandomTextEncoder, TextEncoder
 from shared.geometry import H3D_FEATURE_DIM
 from shared.eval import RandomGuoEvaluator, RealGuoEvaluator, diversity, fid, mm_distance, r_precision
@@ -136,6 +136,19 @@ def parse_args() -> argparse.Namespace:
         "--humanml3d-texts-zip",
         default=None,
         help="Optional direct path to HumanML3D/HumanML3D/texts.zip for VIP caption tokens.",
+    )
+    p.add_argument(
+        "--humanml3d-split-dir",
+        default=None,
+        help="Directory containing the original HumanML3D train.txt/val.txt/test.txt files.",
+    )
+    p.add_argument(
+        "--paper-transformer-data",
+        action="store_true",
+        help=(
+            "Evaluate the official Text2MotionDataset population, including M* mirrors and tagged "
+            "caption segments, instead of the reduced packed split view."
+        ),
     )
     p.add_argument(
         "--vip-tokens",
@@ -314,7 +327,8 @@ def encode_text_batch(
 ) -> tuple[np.ndarray, int]:
     if caption_tokens is None:
         return evaluator.encode_text_from_strings(texts).cpu().numpy(), 0
-    tokens = [caption_tokens.get(cid, {}).get(text) for cid, text in zip(clip_ids, texts)]
+    lookup_ids = [cid.split(":segment", 1)[0] for cid in clip_ids]
+    tokens = [caption_tokens.get(cid, {}).get(text) for cid, text in zip(lookup_ids, texts)]
     missing_idxs = [i for i, tok in enumerate(tokens) if tok is None]
     present_idxs = [i for i, tok in enumerate(tokens) if tok is not None]
     out = np.empty((len(texts), evaluator.text_dim), dtype=np.float32)
@@ -455,9 +469,10 @@ def main() -> None:
     device = torch.device(args.device)
 
     ckpt_path = require_path(args.checkpoint, "MoMask checkpoint")
-    require_path(Path(args.data_root) / "humanml3d.zip", "packed HumanML3D zip")
-    require_path(Path(args.data_root) / "splits.json", "HumanML3D splits")
-    require_path(Path(args.data_root) / "target_offsets.pt", "HumanML3D target offsets")
+    if not args.paper_transformer_data:
+        require_path(Path(args.data_root) / "humanml3d.zip", "packed HumanML3D zip")
+        require_path(Path(args.data_root) / "splits.json", "HumanML3D splits")
+        require_path(Path(args.data_root) / "target_offsets.pt", "HumanML3D target offsets")
     real_h3d_dir = Path(args.real_h3d_dir) if args.real_h3d_dir else None
     if real_h3d_dir is not None:
         require_path(real_h3d_dir, "canonical HumanML3D new_joint_vecs dir")
@@ -473,9 +488,16 @@ def main() -> None:
     saved_args = ckpt_args(ckpt)
     model_input_source = args.model_input_source
     if model_input_source == "auto":
-        model_input_source = "canonical" if saved_args.get("canonical_h3d_dir") and real_h3d_dir is not None else "packed"
+        model_input_source = (
+            "canonical"
+            if args.paper_transformer_data
+            or (saved_args.get("canonical_h3d_dir") and real_h3d_dir is not None)
+            else "packed"
+        )
     if model_input_source == "canonical" and real_h3d_dir is None:
         raise ValueError("--model-input-source canonical requires --real-h3d-dir")
+    if args.paper_transformer_data and model_input_source != "canonical":
+        raise ValueError("--paper-transformer-data requires canonical model input")
     steps = int(args.generation_steps or saved_args.get("generation_steps", 10))
     max_seq_len = int(args.max_seq_len or saved_args.get("max_seq_len", 80))
     vqvae = build_vqvae(ckpt, device)
@@ -491,13 +513,31 @@ def main() -> None:
             )
         masked, residual = build_token_models(ckpt, device)
 
-    ds = H3D263Dataset(
-        root=args.data_root,
-        split=args.split,
-        max_seq_len=max_seq_len,
-        min_seq_len=args.min_seq_len,
-        mirror_augment=False,
-    )
+    if args.paper_transformer_data:
+        if not args.humanml3d_split_dir:
+            raise ValueError("--paper-transformer-data requires --humanml3d-split-dir")
+        if real_h3d_dir is None:
+            raise ValueError("--paper-transformer-data requires --real-h3d-dir")
+        texts_zip = require_path(resolve_texts_zip(args), "HumanML3D texts.zip")
+        ds = CanonicalHumanML3DText2MotionDataset(
+            root=args.data_root,
+            canonical_dir=real_h3d_dir,
+            texts_zip=texts_zip,
+            split=args.split,
+            max_seq_len=max_seq_len,
+            min_seq_len=args.min_seq_len,
+            unit_length=vqvae.downsample,
+            split_dir=args.humanml3d_split_dir,
+            subset_n=0,
+        )
+    else:
+        ds = H3D263Dataset(
+            root=args.data_root,
+            split=args.split,
+            max_seq_len=max_seq_len,
+            min_seq_len=args.min_seq_len,
+            mirror_augment=False,
+        )
     loader = DataLoader(ds, batch_size=args.batch_size, shuffle=False, collate_fn=collate, num_workers=0, drop_last=False)
     evaluator = build_evaluator(args, device)
     caption_tokens = None
@@ -514,7 +554,9 @@ def main() -> None:
         f"text_encoder={saved_args.get('text_encoder', 'random') if needs_generation else '<unused>'} "
         f"text_tokens={'vip' if caption_tokens is not None else 'spacy'} "
         f"real_features={'canonical' if real_h3d_dir is not None else 'packed'} "
-        f"model_input={model_input_source} device={device}",
+        f"model_input={model_input_source} "
+        f"data_view={'official_text2motion' if args.paper_transformer_data else 'packed'} "
+        f"device={device}",
         flush=True,
     )
 
@@ -542,7 +584,7 @@ def main() -> None:
 
         eval_real_x = real_x
         eval_lengths = lengths
-        if real_h3d_dir is not None:
+        if real_h3d_dir is not None and not args.paper_transformer_data:
             packed_real_embs.append(encode_motion(evaluator, real_x, lengths))
             eval_real_x, eval_lengths, n_missing_real = load_canonical_motion_batch(
                 real_h3d_dir,
@@ -610,6 +652,8 @@ def main() -> None:
             "real_feature_source": "canonical" if real_h3d_dir is not None else "packed",
             "real_h3d_dir": str(real_h3d_dir) if real_h3d_dir is not None else None,
             "model_input_source": model_input_source,
+            "data_view": "official_text2motion" if args.paper_transformer_data else "packed",
+            "humanml3d_split_dir": args.humanml3d_split_dir,
             "text_token_source": "vip" if caption_tokens is not None else "spacy",
             "vip_token_fallbacks": int(n_text_fallback),
             "elapsed_sec": time.perf_counter() - t0,

@@ -60,6 +60,19 @@ frames and tokens from the same frozen RVQ checkpoint. The R-Transformer uses
 ground-truth lower RVQ levels during training, so the two jobs can run in
 parallel.
 
+Paper-style runs read the original HumanML3D `train.txt`, `val.txt`, and
+`test.txt` files, including the `M*` mirrored motions. They do not use the
+smaller packed `splits.json` population. Before launching a full run, submit the
+data audit and confirm that the official split has roughly twice as many IDs as
+the packed split, includes mirrors, and reports no missing motion/text assets:
+
+```bash
+sbatch slurm/momask/audit_momask_transformer_data.sbatch
+```
+
+The report is written to
+`runs/momask_diagnostics/paper_transformer_data_audit.json`.
+
 The stage jobs use the 12 GB partition with its compute-capability filter; the
 current PyTorch image cannot run on the older Titan X nodes in that partition.
 First submit short stage-specific probes and inspect the reported
@@ -77,7 +90,7 @@ bash slurm/momask/submit_momask_transformers_paperstyle.sh
 ```
 
 The default assembled, evaluation-ready checkpoint is written to
-`runs/momask-canonical-tokens-paperfaithful196-clip500e/momask_smoke_latest.pt`.
+`runs/momask-canonical-tokens-officialsplits196-clip500e/momask_smoke_latest.pt`.
 Each component is selected using a fixed validation cache and repeatable
 corruptions: masked-token CE for the M-Transformer and the same sampled-level
 residual-token CE used to train the R-Transformer. The assembly job consumes
@@ -112,7 +125,7 @@ only when both checkpoint identities and the complete evaluation protocol match.
 After selecting both components, the job assembles `momask_best_val_fid.pt` and
 reports its normal full-generation validation metrics in
 `selected_full_validation.json`. Results are written under
-`runs/momask-canonical-tokens-paperfaithful196-valfidselection-full/`. The test
+`runs/momask-canonical-tokens-officialsplits196-valfidselection-full/`. The test
 split remains untouched. Set `CHECKPOINT_STRIDE=2` or higher for a quicker coarse
 sweep, then use stride 1 for final selection.
 

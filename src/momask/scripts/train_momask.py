@@ -77,6 +77,15 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Original HumanML3D texts.zip; required by --paper-transformer-data.",
     )
+    p.add_argument(
+        "--humanml3d-split-dir",
+        default=None,
+        help=(
+            "Directory containing the original HumanML3D train.txt/val.txt/test.txt files. "
+            "Paper-style training should set this so mirrored M* motions are not lost through "
+            "a reduced packed split."
+        ),
+    )
     p.add_argument("--vq-steps", type=int, default=30)
     p.add_argument(
         "--vq-epochs",
@@ -493,6 +502,27 @@ def evaluate_tokens(
     full_generation_acc_by_level: dict[int, list[float]] = {}
     teacher_residual_acc_by_level: dict[int, list[float]] = {}
     residual_by_level: dict[int, list[float]] = {}
+    base_position_valid = torch.zeros(0, dtype=torch.float64)
+    base_position_full_correct = torch.zeros(0, dtype=torch.float64)
+    base_position_generated_correct = torch.zeros(0, dtype=torch.float64)
+    base_position_full_ce = torch.zeros(0, dtype=torch.float64)
+
+    def ensure_position_capacity(length: int) -> None:
+        nonlocal base_position_valid
+        nonlocal base_position_full_correct
+        nonlocal base_position_generated_correct
+        nonlocal base_position_full_ce
+        missing = length - base_position_valid.numel()
+        if missing <= 0:
+            return
+        padding = torch.zeros(missing, dtype=torch.float64)
+        base_position_valid = torch.cat([base_position_valid, padding])
+        base_position_full_correct = torch.cat([base_position_full_correct, padding.clone()])
+        base_position_generated_correct = torch.cat(
+            [base_position_generated_correct, padding.clone()]
+        )
+        base_position_full_ce = torch.cat([base_position_full_ce, padding.clone()])
+
     for i, batch in enumerate(cached_batches):
         if i >= max_batches:
             break
@@ -518,6 +548,24 @@ def evaluate_tokens(
             generated_base_accs.append(
                 float((generated_base[token_mask] == tok[:, 0][token_mask]).float().mean())
             )
+            ensure_position_capacity(tok.shape[-1])
+            valid_cpu = token_mask.detach().to(device="cpu", dtype=torch.float64)
+            full_correct_cpu = (
+                (full_pred == tok[:, 0]) & token_mask
+            ).detach().to(device="cpu", dtype=torch.float64)
+            generated_correct_cpu = (
+                (generated_base == tok[:, 0]) & token_mask
+            ).detach().to(device="cpu", dtype=torch.float64)
+            full_ce = F.cross_entropy(
+                full_logits.reshape(-1, full_logits.shape[-1]),
+                tok[:, 0].reshape(-1),
+                reduction="none",
+            ).reshape_as(token_mask)
+            full_ce_cpu = (full_ce * token_mask).detach().to(device="cpu", dtype=torch.float64)
+            base_position_valid[: tok.shape[-1]] += valid_cpu.sum(dim=0)
+            base_position_full_correct[: tok.shape[-1]] += full_correct_cpu.sum(dim=0)
+            base_position_generated_correct[: tok.shape[-1]] += generated_correct_cpu.sum(dim=0)
+            base_position_full_ce[: tok.shape[-1]] += full_ce_cpu.sum(dim=0)
             base_losses.append(float(base))
         else:
             generated_base = None
@@ -601,7 +649,33 @@ def evaluate_tokens(
         out[f"generated_acc_l{level}"] = sum(values) / max(len(values), 1)
     for level, values in teacher_residual_acc_by_level.items():
         out[f"teacher_residual_acc_l{level}"] = sum(values) / max(len(values), 1)
+    for position, valid_count in enumerate(base_position_valid.tolist()):
+        if valid_count <= 0:
+            continue
+        suffix = f"pos_{position:02d}"
+        out[f"base_valid_count_{suffix}"] = valid_count
+        out[f"base_full_mask_acc_{suffix}"] = (
+            float(base_position_full_correct[position]) / valid_count
+        )
+        out[f"base_generate_acc_{suffix}"] = (
+            float(base_position_generated_correct[position]) / valid_count
+        )
+        out[f"base_full_mask_ce_{suffix}"] = float(base_position_full_ce[position]) / valid_count
     return out
+
+
+def format_base_position_metrics(metrics: dict[str, float]) -> str:
+    position_ids = sorted(
+        int(key.rsplit("_", 1)[-1])
+        for key in metrics
+        if key.startswith("base_valid_count_pos_")
+    )
+    return " ".join(
+        f"p{position:02d}:n={int(metrics[f'base_valid_count_pos_{position:02d}'])},"
+        f"full={metrics[f'base_full_mask_acc_pos_{position:02d}']:.3f},"
+        f"gen={metrics[f'base_generate_acc_pos_{position:02d}']:.3f}"
+        for position in position_ids
+    )
 
 
 @torch.no_grad()
@@ -941,11 +1015,12 @@ def main() -> None:
             max_seq_len=args.max_seq_len,
             min_seq_len=args.min_seq_len,
             unit_length=args.downsample,
+            split_dir=args.humanml3d_split_dir,
             subset_n=args.max_clips,
         )
         feature_source = (
             f"canonical-paper-t2m:{args.canonical_h3d_dir} "
-            f"texts={args.humanml3d_texts_zip}"
+            f"texts={args.humanml3d_texts_zip} splits={ds.split_source}"
         )
     elif args.canonical_h3d_dir:
         ds = CanonicalHumanML3DDataset(
@@ -1033,6 +1108,15 @@ def main() -> None:
 
     print(f"[momask-smoke] data_root={args.data_root}")
     print(f"[momask-smoke] feature_source={feature_source}")
+    if isinstance(ds, CanonicalHumanML3DText2MotionDataset):
+        print(
+            "[momask-smoke] paper_split "
+            f"source_ids={ds.num_source_ids} source_mirrors={ds.num_source_mirror_ids} "
+            f"retained_clips={ds.num_clips} retained_mirrors={ds.num_mirror_clips} "
+            f"entries={len(ds)} missing_motion={ds.num_missing_motion} "
+            f"missing_text={ds.num_missing_text} filtered_length={ds.num_filtered_motion_length}",
+            flush=True,
+        )
     print(
         f"[momask-smoke] clips={n_clips} items={n_items} "
         f"batches_per_epoch={len(loader)} batch_size={args.batch_size} "
@@ -1223,6 +1307,7 @@ def main() -> None:
                 max_seq_len=args.max_seq_len,
                 min_seq_len=args.min_seq_len,
                 unit_length=args.downsample,
+                split_dir=args.humanml3d_split_dir,
                 subset_n=args.max_clips,
             )
         elif args.canonical_h3d_dir:
@@ -1525,6 +1610,12 @@ def main() -> None:
                 f"best={best_val_metric:.6f} improved={improved}",
                 flush=True,
             )
+            position_summary = format_base_position_metrics(last_val_eval)
+            if position_summary:
+                print(
+                    f"[token validation positions] step={step} {position_summary}",
+                    flush=True,
+                )
             if improved:
                 best_val_metric = metric_value
                 best_val_metric_name = metric_name
@@ -1601,6 +1692,9 @@ def main() -> None:
     )
     if acc_summary:
         print(f"[tok summary acc] {acc_summary}")
+    position_summary = format_base_position_metrics(token_eval)
+    if position_summary:
+        print(f"[tok summary positions] {position_summary}")
 
     base = None
     base_only = None

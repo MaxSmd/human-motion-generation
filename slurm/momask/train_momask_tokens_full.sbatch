@@ -32,6 +32,7 @@ HF_CACHE="${HF_CACHE:-${HOME}/hf-cache}"
 DATA_ROOT="${DATA_ROOT:-/mnt/projects/drl4cvb/human-motion-representation/data/data/humanml3d_packed}"
 CANONICAL_H3D_DIR="${CANONICAL_H3D_DIR:-}"
 HUMANML3D_TEXTS_ZIP="${HUMANML3D_TEXTS_ZIP:-}"
+HUMANML3D_SPLIT_DIR="${HUMANML3D_SPLIT_DIR:-}"
 VQ_CKPT="${VQ_CKPT:-runs/momask-full-vq-raw-12668/momask_vq_latest.pt}"
 TOKEN_CKPT="${TOKEN_CKPT:-}"
 MASKED_CKPT="${MASKED_CKPT:-}"
@@ -82,6 +83,7 @@ PAPER_TRANSFORMER_DATA="${PAPER_TRANSFORMER_DATA:-0}"
 WARMUP_STEPS="${WARMUP_STEPS:-0}"
 LR_MILESTONES="${LR_MILESTONES:-}"
 LR_GAMMA="${LR_GAMMA:-0.1}"
+SEED="${SEED:-0}"
 
 TOKEN_CKPT_ARG=""
 if [ -n "${TOKEN_CKPT}" ]; then
@@ -105,6 +107,7 @@ echo "[momask-tokens] hf_cache=${HF_CACHE}"
 echo "[momask-tokens] data_root=${DATA_ROOT}"
 echo "[momask-tokens] canonical_h3d_dir=${CANONICAL_H3D_DIR:-<checkpoint-or-packed-derived>}"
 echo "[momask-tokens] humanml3d_texts_zip=${HUMANML3D_TEXTS_ZIP:-<unused>}"
+echo "[momask-tokens] humanml3d_split_dir=${HUMANML3D_SPLIT_DIR:-<packed-splits.json>}"
 echo "[momask-tokens] vq_ckpt=${VQ_CKPT}"
 echo "[momask-tokens] token_ckpt=${TOKEN_CKPT:-<none>}"
 echo "[momask-tokens] masked_ckpt=${MASKED_CKPT:-<none>}"
@@ -118,6 +121,7 @@ echo "[momask-tokens] text_encoder=${TEXT_ENCODER} clip_model=${CLIP_MODEL} clip
 echo "[momask-tokens] transformer arch=${TRANSFORMER_ARCH} hidden=${TRANSFORMER_HIDDEN_DIM} depth=${TRANSFORMER_DEPTH} heads=${TRANSFORMER_HEADS} ffn=${TRANSFORMER_FFN_DIM} dropout=${TRANSFORMER_DROPOUT}"
 echo "[momask-tokens] token_stage=${TOKEN_STAGE} lr=${TOKEN_LR} adam_beta2=${ADAM_BETA2} weight_decay=${WEIGHT_DECAY} grad_clip=${TOKEN_GRAD_CLIP} residual_arch=${RESIDUAL_ARCH} residual_share_weight=${RESIDUAL_SHARE_WEIGHT} freeze_masked=${FREEZE_MASKED} live_token_crops=${LIVE_TOKEN_CROPS} paper_data=${PAPER_TRANSFORMER_DATA} base_full_mask_prob=${BASE_FULL_MASK_PROB} generation_steps=${GENERATION_STEPS}"
 echo "[momask-tokens] warmup_steps=${WARMUP_STEPS} lr_milestones=${LR_MILESTONES:-<none>} lr_gamma=${LR_GAMMA}"
+echo "[momask-tokens] seed=${SEED}"
 
 RESIDUAL_SHARE_ARG=""
 if [ "${RESIDUAL_SHARE_WEIGHT}" = "1" ]; then
@@ -138,6 +142,9 @@ if [ "${PAPER_TRANSFORMER_DATA}" = "1" ]; then
         exit 2
     fi
     PAPER_DATA_ARG="--paper-transformer-data --humanml3d-texts-zip '${HUMANML3D_TEXTS_ZIP}'"
+    if [ -n "${HUMANML3D_SPLIT_DIR}" ]; then
+        PAPER_DATA_ARG="${PAPER_DATA_ARG} --humanml3d-split-dir '${HUMANML3D_SPLIT_DIR}'"
+    fi
 fi
 CLIP_NORMALIZE_ARG="--clip-l2-normalize"
 if [ "${CLIP_L2_NORMALIZE}" = "0" ]; then
@@ -190,6 +197,7 @@ enroot start \
             --warmup-steps ${WARMUP_STEPS} \\
             ${LR_MILESTONES_ARG} \\
             --lr-gamma ${LR_GAMMA} \\
+            --seed ${SEED} \\
             --text-dim 64 \\
             --transformer-arch ${TRANSFORMER_ARCH} \\
             --transformer-hidden-dim ${TRANSFORMER_HIDDEN_DIM} \\

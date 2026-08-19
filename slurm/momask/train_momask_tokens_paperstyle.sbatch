@@ -4,7 +4,6 @@
 #SBATCH --qos=students_normal
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
-#SBATCH --cpus-per-task=4
 #SBATCH --output=slurm/logs/momask-tokens-paperstyle-%j.out
 #SBATCH --error=slurm/logs/momask-tokens-paperstyle-%j.err
 #
@@ -21,8 +20,10 @@ set -euo pipefail
 
 export VQ_CKPT="${VQ_CKPT:-runs/momask-canonical-vq-paper-gumbelfix64-50e/momask_vq_latest.pt}"
 export CANONICAL_H3D_DIR="${CANONICAL_H3D_DIR:-${HOME}/rmg-runs/h3d-canonical/new_joint_vecs}"
-export HUMANML3D_TEXTS_ZIP="${HUMANML3D_TEXTS_ZIP:-/mnt/projects/drl4cvb/human-motion-representation/data/HumanML3D/HumanML3D/texts.zip}"
-export RUN_NAME="${RUN_NAME:-momask-canonical-tokens-paperfaithful196-clip500e}"
+export HUMANML3D_DIR="${HUMANML3D_DIR:-/mnt/projects/drl4cvb/human-motion-representation/data/HumanML3D/HumanML3D}"
+export HUMANML3D_TEXTS_ZIP="${HUMANML3D_TEXTS_ZIP:-${HUMANML3D_DIR}/texts.zip}"
+export HUMANML3D_SPLIT_DIR="${HUMANML3D_SPLIT_DIR:-${HUMANML3D_DIR}}"
+export RUN_NAME="${RUN_NAME:-momask-canonical-tokens-officialsplits196-clip500e}"
 export TOKEN_STAGE="${TOKEN_STAGE:-joint}"
 export TOKEN_STEPS="${TOKEN_STEPS:-0}"
 export TOKEN_EPOCHS="${TOKEN_EPOCHS:-500}"
@@ -51,6 +52,7 @@ export TOKEN_GRAD_CLIP="${TOKEN_GRAD_CLIP:-0.0}"
 export WARMUP_STEPS="${WARMUP_STEPS:-2000}"
 export LR_MILESTONES="${LR_MILESTONES:-50000}"
 export LR_GAMMA="${LR_GAMMA:-0.1}"
+export SEED="${SEED:-3407}"
 
 export TRANSFORMER_HIDDEN_DIM="${TRANSFORMER_HIDDEN_DIM:-384}"
 export TRANSFORMER_DEPTH="${TRANSFORMER_DEPTH:-8}"

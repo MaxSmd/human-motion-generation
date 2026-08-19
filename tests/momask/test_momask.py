@@ -24,7 +24,7 @@ from momask.models import (
 )
 from momask.data_utils import normalize_motion, token_mask_from_frame_mask
 from momask.scripts.assemble_token_checkpoints import assemble_token_checkpoints
-from momask.scripts.evaluate_momask import generate_variant
+from momask.scripts.evaluate_momask import encode_text_batch, generate_variant
 from momask.scripts.select_transformer_checkpoints import (
     Candidate,
     annotate_result,
@@ -339,6 +339,60 @@ def test_paper_residual_validation_reports_sampled_training_objective() -> None:
     assert torch.isfinite(torch.tensor(metrics["residual_ce"]))
 
 
+def test_masked_validation_reports_position_support_and_accuracy() -> None:
+    torch.manual_seed(11)
+    cfg = TokenTransformerConfig(
+        vocab_size=8,
+        text_dim=4,
+        code_dim=6,
+        hidden_dim=12,
+        depth=1,
+        num_heads=3,
+        ffn_dim=24,
+        max_seq_len=4,
+        dropout=0.0,
+        architecture="paper",
+    )
+    masked = MaskedMotionTransformer(cfg)
+    residual = CodebookResidualTransformer(
+        cfg,
+        num_quantizers=3,
+        code_dim=6,
+        share_weight=True,
+    )
+    cached = [
+        {
+            "tokens": torch.randint(0, cfg.vocab_size, (2, 3, 4)),
+            "token_mask": torch.tensor(
+                [[True, True, True, True], [True, True, False, False]]
+            ),
+            "cond": torch.randn(2, cfg.text_dim),
+            "texts": ["first", "second"],
+        }
+    ]
+
+    metrics = evaluate_tokens(
+        masked,
+        residual,
+        cached,
+        torch.device("cpu"),
+        max_batches=1,
+        generation_steps=1,
+        token_stage="masked",
+    )
+
+    assert [metrics[f"base_valid_count_pos_{position:02d}"] for position in range(4)] == [
+        2.0,
+        2.0,
+        1.0,
+        1.0,
+    ]
+    for position in range(4):
+        assert 0.0 <= metrics[f"base_full_mask_acc_pos_{position:02d}"] <= 1.0
+        assert 0.0 <= metrics[f"base_generate_acc_pos_{position:02d}"] <= 1.0
+        assert metrics[f"base_full_mask_ce_pos_{position:02d}"] >= 0.0
+
+
 def test_legacy_freeze_masked_flag_resolves_to_residual_stage() -> None:
     args = types.SimpleNamespace(token_stage="joint", freeze_masked_transformer=True)
     assert resolve_token_stage(args) == "residual"
@@ -635,6 +689,66 @@ def test_paper_text_motion_dataset_preserves_caption_spans_and_196_padding(
     assert segment.text == "segment caption"
     assert torch.equal(segment.x1[:48], torch.from_numpy(motion[20:68]))
     assert not segment.x1[48:].any()
+
+
+def test_paper_text_motion_dataset_uses_official_split_mirrors(tmp_path: Path) -> None:
+    canonical = tmp_path / "new_joint_vecs"
+    canonical.mkdir()
+    split_dir = tmp_path / "official_splits"
+    split_dir.mkdir()
+    (split_dir / "train.txt").write_text("000001\nM000001\n000999\n")
+    (tmp_path / "splits.json").write_text(
+        json.dumps({"train": ["000001"], "val": [], "test": []})
+    )
+    motion = np.zeros((80, H3D_FEATURE_DIM), dtype=np.float32)
+    np.save(canonical / "000001.npy", motion)
+    np.save(canonical / "M000001.npy", motion)
+    with zipfile.ZipFile(tmp_path / "texts.zip", "w") as zf:
+        zf.writestr("texts/000001.txt", "walks left#walk/VERB left/ADV#0#0\n")
+        zf.writestr("texts/M000001.txt", "walks right#walk/VERB right/ADV#0#0\n")
+
+    ds = CanonicalHumanML3DText2MotionDataset(
+        tmp_path,
+        canonical,
+        tmp_path / "texts.zip",
+        split="train",
+        split_dir=split_dir,
+        max_seq_len=196,
+        min_seq_len=40,
+        unit_length=4,
+        subset_n=999999,
+        preload_motions=False,
+    )
+
+    assert ds.num_source_ids == 3
+    assert ds.num_source_mirror_ids == 1
+    assert ds.num_missing_motion == 1
+    assert ds.num_clips == 2
+    assert ds.num_mirror_clips == 1
+    assert {entry.clip_id for entry in ds.entries} == {"000001", "M000001"}
+    assert ds[1].text == "walks right"
+
+
+def test_evaluator_uses_parent_vip_tokens_for_caption_segments() -> None:
+    class FakeEvaluator:
+        text_dim = 2
+
+        def encode_text_from_tokens(self, tokens: list[list[str]]) -> torch.Tensor:
+            assert tokens == [["walk/VERB", "left/ADV"]]
+            return torch.tensor([[1.0, 2.0]])
+
+        def encode_text_from_strings(self, texts: list[str]) -> torch.Tensor:
+            raise AssertionError(f"unexpected VIP token fallback for {texts}")
+
+    encoded, fallbacks = encode_text_batch(
+        FakeEvaluator(),
+        texts=["walks left"],
+        clip_ids=["000001:segment2"],
+        caption_tokens={"000001": {"walks left": ["walk/VERB", "left/ADV"]}},
+    )
+
+    np.testing.assert_array_equal(encoded, np.array([[1.0, 2.0]], dtype=np.float32))
+    assert fallbacks == 0
 
 
 def test_paper_transformers_use_official_shapes_and_sample_one_residual_level() -> None:

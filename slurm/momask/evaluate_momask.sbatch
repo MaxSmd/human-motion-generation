@@ -27,9 +27,11 @@ IMAGE="${IMAGE:-${HOME}/rmg-momask.sqsh}"
 HF_CACHE="${HF_CACHE:-${HOME}/hf-cache}"
 DATA_ROOT="${DATA_ROOT:-/mnt/projects/drl4cvb/human-motion-representation/data/data/humanml3d_packed}"
 HUMANML3D_REPO="${HUMANML3D_REPO:-external/HumanML3D}"
-HUMANML3D_TEXTS_ZIP="${HUMANML3D_TEXTS_ZIP:-/mnt/projects/drl4cvb/human-motion-representation/data/HumanML3D/HumanML3D/texts.zip}"
+HUMANML3D_DIR="${HUMANML3D_DIR:-/mnt/projects/drl4cvb/human-motion-representation/data/HumanML3D/HumanML3D}"
+HUMANML3D_TEXTS_ZIP="${HUMANML3D_TEXTS_ZIP:-${HUMANML3D_DIR}/texts.zip}"
 REAL_H3D_DIR="${REAL_H3D_DIR:-${HOME}/rmg-runs/h3d-canonical/new_joint_vecs}"
 CKPT="${CKPT:-runs/momask-full-tokens-12858/momask_smoke_latest.pt}"
+SPLIT="${SPLIT:-test}"
 MAX_CLIPS="${MAX_CLIPS:-512}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 MAX_SEQ_LEN="${MAX_SEQ_LEN:-}"
@@ -46,6 +48,8 @@ CLIP_MODEL="${CLIP_MODEL:-}"
 CLIP_CACHE_DIR="${CLIP_CACHE_DIR:-${HF_CACHE}}"
 CLIP_BACKEND="${CLIP_BACKEND:-auto}"
 EVALUATOR="${EVALUATOR:-real}"
+PAPER_TRANSFORMER_DATA="${PAPER_TRANSFORMER_DATA:-0}"
+SEED="${SEED:-0}"
 OUTPUT="${OUTPUT:-}"
 
 if [ -z "${OUTPUT}" ]; then
@@ -59,9 +63,11 @@ echo "[momask-eval] hf_cache=${HF_CACHE}"
 echo "[momask-eval] data_root=${DATA_ROOT}"
 echo "[momask-eval] humanml3d_repo=${HUMANML3D_REPO}"
 echo "[momask-eval] humanml3d_texts_zip=${HUMANML3D_TEXTS_ZIP:-<auto>}"
+echo "[momask-eval] humanml3d_dir=${HUMANML3D_DIR} paper_transformer_data=${PAPER_TRANSFORMER_DATA}"
 echo "[momask-eval] real_h3d_dir=${REAL_H3D_DIR:-<packed>}"
 echo "[momask-eval] ckpt=${CKPT}"
 echo "[momask-eval] max_clips=${MAX_CLIPS} batch_size=${BATCH_SIZE} variants=${VARIANTS}"
+echo "[momask-eval] split=${SPLIT} seed=${SEED}"
 echo "[momask-eval] max_seq_len=${MAX_SEQ_LEN:-checkpoint-default}"
 echo "[momask-eval] generation_steps=${GENERATION_STEPS:-checkpoint-default}"
 echo "[momask-eval] sample=${SAMPLE} topk_filter_thres=${TOPK_FILTER_THRES} remask_kept_tokens=${REMASK_KEPT_TOKENS}"
@@ -91,6 +97,11 @@ fi
 MAX_SEQ_LEN_ARG=""
 if [ -n "${MAX_SEQ_LEN}" ]; then
     MAX_SEQ_LEN_ARG="--max-seq-len ${MAX_SEQ_LEN}"
+fi
+
+PAPER_DATA_ARG=""
+if [ "${PAPER_TRANSFORMER_DATA}" = "1" ]; then
+    PAPER_DATA_ARG="--paper-transformer-data --humanml3d-split-dir '${HUMANML3D_DIR}'"
 fi
 
 SAMPLING_ARGS=""
@@ -126,7 +137,8 @@ enroot start \
             --humanml3d-repo '${HUMANML3D_REPO}' \
             ${TEXTS_ZIP_ARG} \
             ${REAL_H3D_ARG} \
-            --split test \
+            ${PAPER_DATA_ARG} \
+            --split '${SPLIT}' \
             --max-clips ${MAX_CLIPS} \
             --batch-size ${BATCH_SIZE} \
             ${MAX_SEQ_LEN_ARG} \
@@ -141,6 +153,7 @@ enroot start \
             --temperature ${TEMPERATURE} \
             --topk-filter-thres ${TOPK_FILTER_THRES} \
             ${SAMPLING_ARGS} \
+            --seed ${SEED} \
             --evaluator '${EVALUATOR}' \
             --output '${OUTPUT}'
     "

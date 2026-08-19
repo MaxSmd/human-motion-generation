@@ -204,9 +204,11 @@ class CanonicalHumanML3DText2MotionDataset(Dataset):
         min_seq_len: int = 40,
         unit_length: int = 4,
         splits_name: str = "splits.json",
+        split_dir: str | Path | None = None,
         subset_fraction: float = 1.0,
         subset_seed: int = 0,
         subset_n: int = 0,
+        preload_motions: bool = True,
     ) -> None:
         if split not in ("train", "val", "test"):
             raise ValueError(f"split must be one of train/val/test, got {split}")
@@ -218,6 +220,7 @@ class CanonicalHumanML3DText2MotionDataset(Dataset):
         self.root = Path(root)
         self.canonical_dir = Path(canonical_dir)
         self.texts_zip = Path(texts_zip)
+        self.split_dir = Path(split_dir) if split_dir is not None else None
         self.split = split
         self.max_seq_len = max_seq_len
         self.min_seq_len = min_seq_len
@@ -227,9 +230,20 @@ class CanonicalHumanML3DText2MotionDataset(Dataset):
         if not self.texts_zip.exists():
             raise FileNotFoundError(f"HumanML3D texts.zip not found: {self.texts_zip}")
 
-        with open(self.root / splits_name) as f:
-            splits = json.load(f)
-        split_ids = list(splits[split])
+        if self.split_dir is not None:
+            split_path = self.split_dir / f"{split}.txt"
+            if not split_path.exists():
+                raise FileNotFoundError(f"HumanML3D split file not found: {split_path}")
+            split_ids = [line.strip() for line in split_path.read_text().splitlines() if line.strip()]
+            self.split_source = str(split_path)
+        else:
+            split_path = self.root / splits_name
+            with open(split_path) as f:
+                splits = json.load(f)
+            split_ids = list(splits[split])
+            self.split_source = f"{split_path}:{split}"
+        self.num_source_ids = len(split_ids)
+        self.num_source_mirror_ids = sum(clip_id.startswith("M") for clip_id in split_ids)
         effective_subset_n = subset_n if 0 < subset_n < len(split_ids) else 0
         clip_ids = select_clip_ids(
             split_ids,
@@ -241,14 +255,16 @@ class CanonicalHumanML3DText2MotionDataset(Dataset):
 
         entries: list[_Text2MotionEntry] = []
         retained_clips: set[str] = set()
+        missing_motion = 0
+        missing_text = 0
+        filtered_motion_length = 0
         with zipfile.ZipFile(self.texts_zip) as zf:
             text_names = {Path(name).stem: name for name in zf.namelist() if name.endswith(".txt")}
             for clip_id in clip_ids:
                 motion_path = self.canonical_dir / f"{clip_id}.npy"
                 if not motion_path.exists():
-                    raise FileNotFoundError(
-                        f"canonical HumanML3D feature not found for {clip_id} in {self.canonical_dir}"
-                    )
+                    missing_motion += 1
+                    continue
                 motion = np.load(motion_path, mmap_mode="r")
                 if motion.ndim != 2 or motion.shape[1] != H3D_FEATURE_DIM:
                     raise ValueError(
@@ -257,9 +273,11 @@ class CanonicalHumanML3DText2MotionDataset(Dataset):
                 motion_len = int(motion.shape[0])
                 # The official Text2MotionDataset excludes motions >= 200.
                 if motion_len < min_seq_len or motion_len >= 200:
+                    filtered_motion_length += 1
                     continue
                 text_name = text_names.get(clip_id)
                 if text_name is None:
+                    missing_text += 1
                     continue
 
                 whole_captions: list[str] = []
@@ -308,6 +326,10 @@ class CanonicalHumanML3DText2MotionDataset(Dataset):
 
         self.entries = entries
         self.num_clips = len(retained_clips)
+        self.num_mirror_clips = sum(clip_id.startswith("M") for clip_id in retained_clips)
+        self.num_missing_motion = missing_motion
+        self.num_missing_text = missing_text
+        self.num_filtered_motion_length = filtered_motion_length
         if not self.entries:
             raise RuntimeError(
                 f"no official-style HumanML3D text-motion pairs found for split={split!r}"
@@ -315,17 +337,26 @@ class CanonicalHumanML3DText2MotionDataset(Dataset):
         # Match the official loader's in-memory data dictionary. Apart from
         # avoiding repeated NFS reads, constructing this cache before the
         # DataLoader workers fork lets Linux share the arrays copy-on-write.
-        self._motions = {
-            path: np.array(np.load(path, mmap_mode="r"), dtype=np.float32, copy=True)
-            for path in {entry.motion_path for entry in self.entries}
-        }
+        self._motions = (
+            {
+                path: np.array(np.load(path, mmap_mode="r"), dtype=np.float32, copy=True)
+                for path in {entry.motion_path for entry in self.entries}
+            }
+            if preload_motions
+            else None
+        )
 
     def __len__(self) -> int:
         return len(self.entries)
 
     def __getitem__(self, idx: int) -> HumanML3DSample:
         entry = self.entries[idx]
-        motion = self._motions[entry.motion_path][entry.start : entry.end]
+        source = (
+            self._motions[entry.motion_path]
+            if self._motions is not None
+            else np.load(entry.motion_path, mmap_mode="r")
+        )
+        motion = source[entry.start : entry.end]
         units = len(motion) // self.unit_length
         if units <= 0:
             raise RuntimeError(f"motion entry {entry.clip_id} is shorter than one unit")
