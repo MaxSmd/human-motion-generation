@@ -52,6 +52,11 @@ from momask.constraints import (
     refine_motion_latents,
 )
 from momask.data_utils import normalize_motion, token_mask_from_frame_mask
+from momask.scene_constraints import (
+    RoomGeometryConstraint,
+    SceneObstacle,
+    scene_clearance_violations,
+)
 from shared.data import H3D263Dataset, collate
 from shared.text import CLIPTextEncoder, RandomTextEncoder, TextEncoder
 from shared.geometry import (
@@ -100,7 +105,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--latent-variants",
         default="joint,angle",
-        help="Comma-separated latent-refinement variants: joint, angle, body-fixed, or none.",
+        help="Comma-separated latent-refinement variants: joint, angle, body-fixed, scene, or none.",
     )
     p.add_argument(
         "--joint-ids",
@@ -147,6 +152,30 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--bone-weight", type=float, default=0.1)
     p.add_argument("--max-delta-norm", type=float, default=1.0)
     p.add_argument("--grad-clip-norm", type=float, default=1.0)
+    p.add_argument("--scene-weight", type=float, default=10.0)
+    p.add_argument("--scene-root-weight", type=float, default=0.0)
+    p.add_argument("--scene-room-width", type=float, default=6.0)
+    p.add_argument("--scene-room-depth", type=float, default=8.0)
+    p.add_argument("--scene-room-height", type=float, default=3.0)
+    p.add_argument("--scene-spawn-x", type=float, default=0.0)
+    p.add_argument("--scene-spawn-z", type=float, default=-2.0)
+    p.add_argument("--scene-spawn-yaw", type=float, default=0.0)
+    p.add_argument("--scene-padding", type=float, default=0.02)
+    p.add_argument("--scene-body-radius", type=float, default=0.05)
+    p.add_argument("--scene-bone-samples", type=int, default=2)
+    p.add_argument(
+        "--scene-obstacle-kind",
+        choices=["box", "sphere", "cylinder"],
+        default="box",
+    )
+    p.add_argument("--scene-obstacle-x", type=float, default=0.0)
+    p.add_argument("--scene-obstacle-y", type=float, default=0.5)
+    p.add_argument("--scene-obstacle-z", type=float, default=-1.0)
+    p.add_argument("--scene-obstacle-width", type=float, default=1.0)
+    p.add_argument("--scene-obstacle-height", type=float, default=1.0)
+    p.add_argument("--scene-obstacle-depth", type=float, default=0.4)
+    p.add_argument("--scene-obstacle-radius", type=float, default=0.4)
+    p.add_argument("--scene-obstacle-yaw", type=float, default=0.0)
     p.add_argument("--text-encoder", choices=["checkpoint", "random", "clip"], default="checkpoint")
     p.add_argument("--clip-model", default=None)
     p.add_argument("--clip-cache-dir", default=None)
@@ -199,12 +228,50 @@ def parse_latent_variants(value: str) -> tuple[str, ...]:
     variants = tuple(item.strip().lower() for item in value.split(",") if item.strip())
     if variants == ("none",) or not variants:
         return ()
-    unknown = set(variants) - {"joint", "angle", "body-fixed"}
+    unknown = set(variants) - {"joint", "angle", "body-fixed", "scene"}
     if unknown:
         raise ValueError(f"unknown latent constraint variants: {sorted(unknown)}")
     if len(set(variants)) != len(variants):
         raise ValueError("--latent-variants must not contain duplicates")
     return variants
+
+
+def build_scene_constraint(args: argparse.Namespace) -> RoomGeometryConstraint:
+    center = (
+        args.scene_obstacle_x,
+        args.scene_obstacle_y,
+        args.scene_obstacle_z,
+    )
+    if args.scene_obstacle_kind == "box":
+        obstacle = SceneObstacle.box(
+            center=center,
+            size=(
+                args.scene_obstacle_width,
+                args.scene_obstacle_height,
+                args.scene_obstacle_depth,
+            ),
+            yaw_degrees=args.scene_obstacle_yaw,
+        )
+    elif args.scene_obstacle_kind == "sphere":
+        obstacle = SceneObstacle.sphere(center=center, radius=args.scene_obstacle_radius)
+    else:
+        obstacle = SceneObstacle.cylinder(
+            center=center,
+            radius=args.scene_obstacle_radius,
+            height=args.scene_obstacle_height,
+        )
+    return RoomGeometryConstraint(
+        room_size=(
+            args.scene_room_width,
+            args.scene_room_depth,
+            args.scene_room_height,
+        ),
+        obstacles=(obstacle,),
+        spawn=(args.scene_spawn_x, args.scene_spawn_z, args.scene_spawn_yaw),
+        padding=args.scene_padding,
+        body_radius=args.scene_body_radius,
+        bone_samples=args.scene_bone_samples,
+    )
 
 
 def angle_triplets_from_centers(centers: list[int], device: torch.device) -> Tensor:
@@ -648,6 +715,58 @@ def summarize_control_statistics(stats: dict[str, float]) -> dict[str, float | i
     return result
 
 
+def accumulate_scene_statistics(
+    total: dict[str, float],
+    *,
+    joints_world: Tensor,
+    constraint: RoomGeometryConstraint,
+    frame_mask: Tensor,
+) -> None:
+    violation = scene_clearance_violations(joints_world, constraint)
+    valid_frames = frame_mask.to(device=violation.device, dtype=torch.bool)
+    if valid_frames.shape != violation.shape[:2]:
+        raise ValueError("scene frame mask must match scene joints")
+    valid_points = valid_frames.unsqueeze(-1).expand_as(violation)
+    values = violation[valid_points]
+    positive = values > 0.0
+    colliding_frames = (violation > 0.0).any(dim=-1) & valid_frames
+    total["scene_max_violation_m"] = max(
+        total.get("scene_max_violation_m", 0.0),
+        float(values.max().cpu()) if values.numel() else 0.0,
+    )
+    total["scene_violation_sum_m"] = total.get("scene_violation_sum_m", 0.0) + float(
+        values[positive].sum().cpu()
+    )
+    total["scene_violating_point_count"] = total.get(
+        "scene_violating_point_count", 0.0
+    ) + float(positive.sum().cpu())
+    total["scene_valid_point_count"] = total.get("scene_valid_point_count", 0.0) + float(
+        values.numel()
+    )
+    total["scene_colliding_frame_count"] = total.get(
+        "scene_colliding_frame_count", 0.0
+    ) + float(colliding_frames.sum().cpu())
+    total["scene_valid_frame_count"] = total.get("scene_valid_frame_count", 0.0) + float(
+        valid_frames.sum().cpu()
+    )
+
+
+def summarize_scene_statistics(stats: dict[str, float]) -> dict[str, float]:
+    valid_points = stats.get("scene_valid_point_count", 0.0)
+    valid_frames = stats.get("scene_valid_frame_count", 0.0)
+    if valid_points <= 0.0 or valid_frames <= 0.0:
+        return {}
+    return {
+        "scene_max_violation_m": stats.get("scene_max_violation_m", 0.0),
+        "scene_mean_violation_m": stats.get("scene_violation_sum_m", 0.0)
+        / max(stats.get("scene_violating_point_count", 0.0), 1.0),
+        "scene_violating_point_fraction": stats.get("scene_violating_point_count", 0.0)
+        / valid_points,
+        "scene_colliding_frame_fraction": stats.get("scene_colliding_frame_count", 0.0)
+        / valid_frames,
+    }
+
+
 @torch.no_grad()
 def generate_full(
     *,
@@ -733,6 +852,7 @@ def main() -> None:
         if "body-fixed" in latent_variants
         else []
     )
+    scene_constraint = build_scene_constraint(args) if "scene" in latent_variants else None
     if args.anchor_stride < 1:
         raise ValueError("--anchor-stride must be positive")
     random.seed(args.seed)
@@ -785,6 +905,8 @@ def main() -> None:
         variant_names.append("angle_latent")
     if "body-fixed" in latent_variants:
         variant_names.append("body_fixed_latent")
+    if "scene" in latent_variants:
+        variant_names.append("scene_latent")
     buckets: dict[str, list[np.ndarray]] = {name: [] for name in ["real", *variant_names]}
     text_embs: list[np.ndarray] = []
     traj_sums: dict[str, dict[str, float]] = {name: {} for name in variant_names}
@@ -811,6 +933,8 @@ def main() -> None:
             f"refinement_steps={args.refinement_steps} refinement_lr={args.refinement_lr:g}",
             flush=True,
         )
+        if scene_constraint is not None:
+            print(f"[constraints] scene={scene_constraint.as_dict()}", flush=True)
 
     for batch in tqdm(loader, desc="evaluate constrained MoMask"):
         take = batch.x1.shape[0]
@@ -879,6 +1003,7 @@ def main() -> None:
         parent_relative_constraint: ParentRelativeJointConstraint | None = None
         angle_constraint: BendAngleConstraint | None = None
         angle_target: Tensor | None = None
+        scene_result = None
         if latent_variants:
             with torch.no_grad():
                 real_joints = recover_joints_from_ric(model_real_x.float())
@@ -983,6 +1108,48 @@ def main() -> None:
                     ),
                 )
                 motions["body_fixed_latent"] = body_fixed_result.motion
+            if "scene" in latent_variants:
+                assert scene_constraint is not None
+                scene_result = refine_motion_latents(
+                    vqvae,
+                    initial_latents,
+                    mean=normalizer.mean,
+                    std=normalizer.std,
+                    target_len=model_real_x.shape[1],
+                    token_mask=token_mask,
+                    frame_mask=model_frame_mask,
+                    scene_constraint=scene_constraint,
+                    config=LatentRefinementConfig(
+                        steps=args.refinement_steps,
+                        learning_rate=args.refinement_lr,
+                        position_weight=0.0,
+                        torso_relative_weight=0.0,
+                        parent_relative_weight=0.0,
+                        angle_weight=0.0,
+                        scene_weight=args.scene_weight,
+                        latent_weight=args.latent_weight,
+                        dynamics_weight=args.dynamics_weight,
+                        root_weight=args.scene_root_weight,
+                        bone_weight=args.bone_weight,
+                        max_delta_norm=args.max_delta_norm,
+                        grad_clip_norm=args.grad_clip_norm,
+                    ),
+                )
+                motions["scene_latent"] = scene_result.motion
+                assert scene_result.initial_scene_joints is not None
+                assert scene_result.scene_joints is not None
+                accumulate_scene_statistics(
+                    control_sums["unconstrained"],
+                    joints_world=scene_result.initial_scene_joints,
+                    constraint=scene_constraint,
+                    frame_mask=decoded_frame_mask,
+                )
+                accumulate_scene_statistics(
+                    control_sums["scene_latent"],
+                    joints_world=scene_result.scene_joints,
+                    constraint=scene_constraint,
+                    frame_mask=decoded_frame_mask,
+                )
 
         for name, motion in motions.items():
             errs = trajectory_errors(motion, target_root, anchor_mask, model_lengths.to(device))
@@ -1042,6 +1209,7 @@ def main() -> None:
             "body_fixed_constraint_space": "parent_bone_in_moving_torso_frame"
             if "body-fixed" in latent_variants
             else None,
+            "scene": scene_constraint.as_dict() if scene_constraint is not None else None,
             "angle_centers": angle_centers if "angle" in latent_variants else [],
             "angle_triplets": angle_triplets.detach().cpu().tolist()
             if "angle" in latent_variants
@@ -1058,6 +1226,8 @@ def main() -> None:
                 "dynamics_weight": args.dynamics_weight,
                 "root_weight": args.root_weight,
                 "bone_weight": args.bone_weight,
+                "scene_weight": args.scene_weight,
+                "scene_root_weight": args.scene_root_weight,
                 "max_delta_norm": args.max_delta_norm,
                 "grad_clip_norm": args.grad_clip_norm,
             },
@@ -1082,7 +1252,8 @@ def main() -> None:
         quality = compute_quality(real, emb, text, args.diversity_times, args.seed)
         traj = {k: v / max(n_seen, 1) for k, v in traj_sums[name].items()}
         control = summarize_control_statistics(control_sums[name])
-        results[name] = {**quality, **traj, **control}
+        scene = summarize_scene_statistics(control_sums[name])
+        results[name] = {**quality, **traj, **control, **scene}
         print(f"\n[{name}]\n{json.dumps(results[name], indent=2)}", flush=True)
 
     checkpoint_dir = Path(args.checkpoint).parent

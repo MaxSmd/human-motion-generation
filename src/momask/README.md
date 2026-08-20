@@ -164,6 +164,33 @@ reported. Integer token ids themselves are not differentiable. Set
 `LatentRefinementConfig(root_weight=0.0)` when the constraint is intentionally
 supposed to change the root trajectory.
 
+### Room geometry constraints
+
+`momask.scene_constraints` provides inference-time room containment and
+nonpenetration for box, sphere, and upright-cylinder obstacles. The original
+generated clip is rigidly aligned to a scene spawn marker once; that transform
+is then frozen while the RVQ latent is refined. Collision loss checks every
+joint and configurable interior samples along all 21 kinematic edges, rather
+than only checking joint endpoints.
+
+This stage enforces geometry only. It can push a motion out of an obstacle, but
+it does not by itself teach the model to climb stairs or choose a jumping action.
+Run a short compute-node probe against the validated legacy checkpoint with:
+
+```bash
+MAX_CLIPS=8 \
+LATENT_VARIANTS=scene \
+REFINEMENT_STEPS=100 \
+sbatch slurm/momask/evaluate_momask_constraints.sbatch
+```
+
+The default scene is a 6x8x3 metre room. The actor spawns at `(0, -2)` facing
+`+Z`, with a one-metre box one metre ahead at `z=-1`. `SCENE_ROOM_*`,
+`SCENE_SPAWN_*`, `SCENE_OBSTACLE_*`, `SCENE_BODY_RADIUS`, and `SCENE_WEIGHT`
+can be overridden at submission. The JSON compares `unconstrained` and
+`scene_latent` quality and reports maximum/mean clearance violation, violating
+body-point fraction, and colliding-frame fraction.
+
 The constraint evaluator compares the unconstrained sample, the existing root
 trajectory baselines, wrist-position latent refinement, and knee/elbow-angle
 latent refinement from the same generated tokens. Its SLURM wrapper defaults to

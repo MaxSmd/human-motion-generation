@@ -65,6 +65,10 @@ def test_evaluator_accepts_body_fixed_latent_variant() -> None:
     assert parse_latent_variants("body-fixed") == ("body-fixed",)
 
 
+def test_evaluator_accepts_scene_latent_variant() -> None:
+    assert parse_latent_variants("scene") == ("scene",)
+
+
 def test_root_relative_joint_targets_follow_generated_heading() -> None:
     real_motion = torch.zeros(1, 2, H3D_FEATURE_DIM)
     generated_motion = torch.zeros_like(real_motion)

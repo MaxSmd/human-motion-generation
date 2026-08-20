@@ -18,6 +18,14 @@ from torch import Tensor
 
 from shared.geometry import FOOT_CONTACT_IDX, NUM_JOINTS, PARENTS, recover_joints_from_ric
 
+from .scene_constraints import (
+    RoomGeometryConstraint,
+    build_scene_transform,
+    place_joints_in_scene,
+    scene_geometry_loss,
+    scene_geometry_metrics,
+)
+
 
 def _as_frame_mask(frame_mask: Tensor | None, batch: int, time: int, device: torch.device) -> Tensor:
     if frame_mask is None:
@@ -923,6 +931,7 @@ class LatentRefinementConfig:
     history_interval: int = 0
     torso_relative_weight: float = 1.0
     parent_relative_weight: float = 1.0
+    scene_weight: float = 1.0
 
     def __post_init__(self) -> None:
         if self.steps < 1:
@@ -940,6 +949,7 @@ class LatentRefinementConfig:
             "bone_weight",
             "foot_skate_weight",
             "jerk_weight",
+            "scene_weight",
         ):
             if getattr(self, name) < 0.0:
                 raise ValueError(f"{name} must be non-negative")
@@ -966,6 +976,8 @@ class LatentRefinementResult:
     metrics: dict[str, float]
     history: list[dict[str, float]]
     tokens: Tensor | None = None
+    initial_scene_joints: Tensor | None = None
+    scene_joints: Tensor | None = None
 
 
 def refine_motion_latents(
@@ -981,6 +993,7 @@ def refine_motion_latents(
     torso_relative_constraint: TorsoRelativeJointConstraint | None = None,
     parent_relative_constraint: ParentRelativeJointConstraint | None = None,
     angle_constraint: BendAngleConstraint | None = None,
+    scene_constraint: RoomGeometryConstraint | None = None,
     config: LatentRefinementConfig | None = None,
 ) -> LatentRefinementResult:
     """Refine continuous RVQ latents while leaving all model weights frozen."""
@@ -990,9 +1003,10 @@ def refine_motion_latents(
         and torso_relative_constraint is None
         and parent_relative_constraint is None
         and angle_constraint is None
+        and scene_constraint is None
     ):
         raise ValueError(
-            "at least one position, torso-relative, parent-relative, or angle constraint is required"
+            "at least one position, torso-relative, parent-relative, angle, or scene constraint is required"
         )
     config = config or LatentRefinementConfig()
     if initial_latents.ndim != 3 or not initial_latents.is_floating_point():
@@ -1110,11 +1124,13 @@ def refine_motion_latents(
                 active_parent_relative and config.parent_relative_weight > 0.0
             )
             weighted_angle = active_angle and config.angle_weight > 0.0
+            weighted_scene = scene_constraint is not None and config.scene_weight > 0.0
             if (
                 not weighted_position
                 and not weighted_torso_relative
                 and not weighted_parent_relative
                 and not weighted_angle
+                and not weighted_scene
             ):
                 raise ValueError("no positively weighted constraints remain after applying masks")
 
@@ -1125,6 +1141,11 @@ def refine_motion_latents(
                 std=prepared_std,
                 target_len=target_len,
                 token_mask=token_valid,
+            )
+            scene_transform = (
+                None
+                if scene_constraint is None
+                else build_scene_transform(initial_joints, scene_constraint, valid_frames)
             )
             if torso_relative_constraint is not None:
                 torso_relative_joint_errors(
@@ -1224,6 +1245,13 @@ def refine_motion_latents(
                         frame_mask=valid_frames,
                         beta=config.angle_huber_beta,
                     )
+                if scene_constraint is not None and config.scene_weight > 0.0:
+                    assert scene_transform is not None
+                    losses["scene"] = scene_geometry_loss(
+                        place_joints_in_scene(joints, scene_transform),
+                        scene_constraint,
+                        valid_frames,
+                    )
                 if config.latent_weight > 0.0:
                     latent_error = masked_delta.pow(2).sum(dim=-1)
                     losses["latent"] = _masked_mean(latent_error, token_valid)
@@ -1258,6 +1286,7 @@ def refine_motion_latents(
                     + config.bone_weight * losses.get("bone", zero)
                     + config.foot_skate_weight * losses.get("foot_skate", zero)
                     + config.jerk_weight * losses.get("jerk", zero)
+                    + config.scene_weight * losses.get("scene", zero)
                 )
                 if not bool(torch.isfinite(total)):
                     raise FloatingPointError("non-finite loss during MoMask latent refinement")
@@ -1300,6 +1329,8 @@ def refine_motion_latents(
                 token_mask=token_valid,
             )
             metrics: dict[str, float] = {}
+            initial_scene_joints = None
+            final_scene_joints = None
             if position_constraint is not None and config.position_weight > 0.0:
                 metrics["position_error_initial_m"] = float(
                     joint_position_error(
@@ -1348,6 +1379,18 @@ def refine_motion_latents(
                 metrics["angle_violation_final_rad"] = float(
                     bend_angle_violation(joints, angle_constraint, frame_mask=valid_frames).cpu()
                 )
+            if scene_constraint is not None and config.scene_weight > 0.0:
+                assert scene_transform is not None
+                initial_scene_joints = place_joints_in_scene(initial_joints, scene_transform)
+                final_scene_joints = place_joints_in_scene(joints, scene_transform)
+                for key, value in scene_geometry_metrics(
+                    initial_scene_joints, scene_constraint, valid_frames
+                ).items():
+                    metrics[f"scene_initial_{key}"] = value
+                for key, value in scene_geometry_metrics(
+                    final_scene_joints, scene_constraint, valid_frames
+                ).items():
+                    metrics[f"scene_final_{key}"] = value
             valid_delta = delta[token_valid]
             metrics["latent_delta_rms"] = float(valid_delta.pow(2).mean().sqrt().cpu())
         return LatentRefinementResult(
@@ -1359,6 +1402,10 @@ def refine_motion_latents(
             initial_joints=initial_joints.detach(),
             metrics=metrics,
             history=history,
+            initial_scene_joints=None
+            if initial_scene_joints is None
+            else initial_scene_joints.detach(),
+            scene_joints=None if final_scene_joints is None else final_scene_joints.detach(),
         )
     finally:
         vqvae.train(original_mode)

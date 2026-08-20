@@ -20,6 +20,7 @@ from momask.models import (
     MotionRVQVAE,
     ResidualTransformer,
 )
+from momask.scene_constraints import RoomGeometryConstraint
 
 ResidualGenerator = ResidualTransformer | CodebookResidualTransformer
 
@@ -112,6 +113,7 @@ def generate_h3d263_constrained(
     torso_relative_constraint: TorsoRelativeJointConstraint | None = None,
     parent_relative_constraint: ParentRelativeJointConstraint | None = None,
     angle_constraint: BendAngleConstraint | None = None,
+    scene_constraint: RoomGeometryConstraint | None = None,
     refinement: LatentRefinementConfig | None = None,
     steps: int = 10,
     guidance_scale: float = 4.0,
@@ -157,6 +159,7 @@ def generate_h3d263_constrained(
         torso_relative_constraint=torso_relative_constraint,
         parent_relative_constraint=parent_relative_constraint,
         angle_constraint=angle_constraint,
+        scene_constraint=scene_constraint,
         config=refinement,
     )
     result.tokens = tokens.detach()

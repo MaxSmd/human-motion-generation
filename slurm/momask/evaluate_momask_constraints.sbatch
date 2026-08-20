@@ -7,7 +7,7 @@
 #SBATCH --output=slurm/logs/momask-constraints-%j.out
 #SBATCH --error=slurm/logs/momask-constraints-%j.err
 #
-# Evaluate root-trajectory, joint-position, bend-angle, and body-fixed constraints.
+# Evaluate root-trajectory, pose, body-fixed, and room-geometry constraints.
 #
 # Submit from repo root, for example:
 #   MAX_CLIPS=256 LATENT_VARIANTS=joint,angle \
@@ -61,6 +61,26 @@ ROOT_WEIGHT="${ROOT_WEIGHT:-0.1}"
 BONE_WEIGHT="${BONE_WEIGHT:-0.1}"
 MAX_DELTA_NORM="${MAX_DELTA_NORM:-1.0}"
 GRAD_CLIP_NORM="${GRAD_CLIP_NORM:-1.0}"
+SCENE_WEIGHT="${SCENE_WEIGHT:-10.0}"
+SCENE_ROOT_WEIGHT="${SCENE_ROOT_WEIGHT:-0.0}"
+SCENE_ROOM_WIDTH="${SCENE_ROOM_WIDTH:-6.0}"
+SCENE_ROOM_DEPTH="${SCENE_ROOM_DEPTH:-8.0}"
+SCENE_ROOM_HEIGHT="${SCENE_ROOM_HEIGHT:-3.0}"
+SCENE_SPAWN_X="${SCENE_SPAWN_X:-0.0}"
+SCENE_SPAWN_Z="${SCENE_SPAWN_Z:--2.0}"
+SCENE_SPAWN_YAW="${SCENE_SPAWN_YAW:-0.0}"
+SCENE_PADDING="${SCENE_PADDING:-0.02}"
+SCENE_BODY_RADIUS="${SCENE_BODY_RADIUS:-0.05}"
+SCENE_BONE_SAMPLES="${SCENE_BONE_SAMPLES:-2}"
+SCENE_OBSTACLE_KIND="${SCENE_OBSTACLE_KIND:-box}"
+SCENE_OBSTACLE_X="${SCENE_OBSTACLE_X:-0.0}"
+SCENE_OBSTACLE_Y="${SCENE_OBSTACLE_Y:-0.5}"
+SCENE_OBSTACLE_Z="${SCENE_OBSTACLE_Z:--1.0}"
+SCENE_OBSTACLE_WIDTH="${SCENE_OBSTACLE_WIDTH:-1.0}"
+SCENE_OBSTACLE_HEIGHT="${SCENE_OBSTACLE_HEIGHT:-1.0}"
+SCENE_OBSTACLE_DEPTH="${SCENE_OBSTACLE_DEPTH:-0.4}"
+SCENE_OBSTACLE_RADIUS="${SCENE_OBSTACLE_RADIUS:-0.4}"
+SCENE_OBSTACLE_YAW="${SCENE_OBSTACLE_YAW:-0.0}"
 TEXT_ENCODER="${TEXT_ENCODER:-checkpoint}"
 CLIP_MODEL="${CLIP_MODEL:-}"
 CLIP_CACHE_DIR="${CLIP_CACHE_DIR:-${HF_CACHE}}"
@@ -96,6 +116,7 @@ echo "[momask-constraints] latent_variants=${LATENT_VARIANTS} joint_ids=${JOINT_
 echo "[momask-constraints] angle_joints=${ANGLE_JOINTS} angle_tolerance_deg=${ANGLE_TOLERANCE_DEG}"
 echo "[momask-constraints] body_fixed_joint_ids=${BODY_FIXED_JOINT_IDS} body_reference_frame=${BODY_REFERENCE_FRAME}"
 echo "[momask-constraints] refinement_steps=${REFINEMENT_STEPS} refinement_lr=${REFINEMENT_LR} position_weight=${POSITION_WEIGHT} parent_relative_weight=${PARENT_RELATIVE_WEIGHT} angle_weight=${ANGLE_WEIGHT}"
+echo "[momask-constraints] scene room=${SCENE_ROOM_WIDTH}x${SCENE_ROOM_DEPTH}x${SCENE_ROOM_HEIGHT} spawn=${SCENE_SPAWN_X},${SCENE_SPAWN_Z},${SCENE_SPAWN_YAW} obstacle=${SCENE_OBSTACLE_KIND}@${SCENE_OBSTACLE_X},${SCENE_OBSTACLE_Y},${SCENE_OBSTACLE_Z}"
 echo "[momask-constraints] output=${OUTPUT}"
 
 TEXTS_ZIP_ARG=""
@@ -175,6 +196,26 @@ enroot start \
             --bone-weight ${BONE_WEIGHT} \
             --max-delta-norm ${MAX_DELTA_NORM} \
             --grad-clip-norm ${GRAD_CLIP_NORM} \
+            --scene-weight ${SCENE_WEIGHT} \
+            --scene-root-weight ${SCENE_ROOT_WEIGHT} \
+            --scene-room-width ${SCENE_ROOM_WIDTH} \
+            --scene-room-depth ${SCENE_ROOM_DEPTH} \
+            --scene-room-height ${SCENE_ROOM_HEIGHT} \
+            --scene-spawn-x ${SCENE_SPAWN_X} \
+            --scene-spawn-z ${SCENE_SPAWN_Z} \
+            --scene-spawn-yaw ${SCENE_SPAWN_YAW} \
+            --scene-padding ${SCENE_PADDING} \
+            --scene-body-radius ${SCENE_BODY_RADIUS} \
+            --scene-bone-samples ${SCENE_BONE_SAMPLES} \
+            --scene-obstacle-kind ${SCENE_OBSTACLE_KIND} \
+            --scene-obstacle-x ${SCENE_OBSTACLE_X} \
+            --scene-obstacle-y ${SCENE_OBSTACLE_Y} \
+            --scene-obstacle-z ${SCENE_OBSTACLE_Z} \
+            --scene-obstacle-width ${SCENE_OBSTACLE_WIDTH} \
+            --scene-obstacle-height ${SCENE_OBSTACLE_HEIGHT} \
+            --scene-obstacle-depth ${SCENE_OBSTACLE_DEPTH} \
+            --scene-obstacle-radius ${SCENE_OBSTACLE_RADIUS} \
+            --scene-obstacle-yaw ${SCENE_OBSTACLE_YAW} \
             --text-encoder '${TEXT_ENCODER}' \
             --clip-model '${CLIP_MODEL}' \
             --clip-cache-dir '${CLIP_CACHE_DIR}' \

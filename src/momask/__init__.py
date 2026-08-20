@@ -39,6 +39,17 @@ from .constraints import (
     torso_relative_joint_loss,
     torso_relative_targets_world,
 )
+from .scene_constraints import (
+    RoomGeometryConstraint,
+    SceneObstacle,
+    SceneTransform,
+    build_scene_transform,
+    place_joints_in_scene,
+    sample_body_points,
+    scene_clearance_violations,
+    scene_geometry_loss,
+    scene_geometry_metrics,
+)
 
 __all__ = [
     "ResidualVectorQuantizer",
@@ -53,6 +64,15 @@ __all__ = [
     "BendAngleConstraint",
     "LatentRefinementConfig",
     "LatentRefinementResult",
+    "RoomGeometryConstraint",
+    "SceneObstacle",
+    "SceneTransform",
+    "build_scene_transform",
+    "place_joints_in_scene",
+    "sample_body_points",
+    "scene_clearance_violations",
+    "scene_geometry_loss",
+    "scene_geometry_metrics",
     "bend_angles_from_joints",
     "joint_position_loss",
     "joint_position_error",
