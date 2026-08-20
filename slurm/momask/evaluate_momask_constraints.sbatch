@@ -53,6 +53,7 @@ REFINEMENT_STEPS="${REFINEMENT_STEPS:-50}"
 REFINEMENT_LR="${REFINEMENT_LR:-0.01}"
 POSITION_WEIGHT="${POSITION_WEIGHT:-1.0}"
 TORSO_RELATIVE_WEIGHT="${TORSO_RELATIVE_WEIGHT:-1.0}"
+PARENT_RELATIVE_WEIGHT="${PARENT_RELATIVE_WEIGHT:-${TORSO_RELATIVE_WEIGHT}}"
 ANGLE_WEIGHT="${ANGLE_WEIGHT:-1.0}"
 LATENT_WEIGHT="${LATENT_WEIGHT:-0.01}"
 DYNAMICS_WEIGHT="${DYNAMICS_WEIGHT:-0.1}"
@@ -94,7 +95,7 @@ echo "[momask-constraints] sample=${SAMPLE} topk_filter_thres=${TOPK_FILTER_THRE
 echo "[momask-constraints] latent_variants=${LATENT_VARIANTS} joint_ids=${JOINT_IDS} joint_space=${JOINT_TARGET_SPACE}"
 echo "[momask-constraints] angle_joints=${ANGLE_JOINTS} angle_tolerance_deg=${ANGLE_TOLERANCE_DEG}"
 echo "[momask-constraints] body_fixed_joint_ids=${BODY_FIXED_JOINT_IDS} body_reference_frame=${BODY_REFERENCE_FRAME}"
-echo "[momask-constraints] refinement_steps=${REFINEMENT_STEPS} refinement_lr=${REFINEMENT_LR} position_weight=${POSITION_WEIGHT} torso_relative_weight=${TORSO_RELATIVE_WEIGHT} angle_weight=${ANGLE_WEIGHT}"
+echo "[momask-constraints] refinement_steps=${REFINEMENT_STEPS} refinement_lr=${REFINEMENT_LR} position_weight=${POSITION_WEIGHT} parent_relative_weight=${PARENT_RELATIVE_WEIGHT} angle_weight=${ANGLE_WEIGHT}"
 echo "[momask-constraints] output=${OUTPUT}"
 
 TEXTS_ZIP_ARG=""
@@ -166,7 +167,7 @@ enroot start \
             --refinement-steps ${REFINEMENT_STEPS} \
             --refinement-lr ${REFINEMENT_LR} \
             --position-weight ${POSITION_WEIGHT} \
-            --torso-relative-weight ${TORSO_RELATIVE_WEIGHT} \
+            --parent-relative-weight ${PARENT_RELATIVE_WEIGHT} \
             --angle-weight ${ANGLE_WEIGHT} \
             --latent-weight ${LATENT_WEIGHT} \
             --dynamics-weight ${DYNAMICS_WEIGHT} \

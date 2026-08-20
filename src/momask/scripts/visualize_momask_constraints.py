@@ -36,11 +36,11 @@ from momask.constraints import (
     BendAngleConstraint,
     JointPositionConstraint,
     LatentRefinementConfig,
-    TorsoRelativeJointConstraint,
+    ParentRelativeJointConstraint,
     bend_angles_from_joints,
-    build_torso_relative_joint_constraint,
+    build_parent_relative_joint_constraint,
+    parent_relative_targets_world,
     refine_motion_latents,
-    torso_relative_targets_world,
 )
 from momask.data_utils import normalize_motion, token_mask_from_frame_mask
 from momask.scripts.evaluate_momask_constraints import (
@@ -124,7 +124,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--refinement-steps", type=int, default=50)
     p.add_argument("--refinement-lr", type=float, default=0.01)
     p.add_argument("--position-weight", type=float, default=1.0)
-    p.add_argument("--torso-relative-weight", type=float, default=1.0)
+    p.add_argument(
+        "--torso-relative-weight",
+        type=float,
+        default=1.0,
+        help="Legacy fallback for --parent-relative-weight.",
+    )
+    p.add_argument("--parent-relative-weight", type=float, default=None)
     p.add_argument("--angle-weight", type=float, default=1.0)
     p.add_argument("--latent-weight", type=float, default=0.01)
     p.add_argument("--dynamics-weight", type=float, default=0.1)
@@ -869,6 +875,8 @@ def select_sample(ds: H3D263Dataset, start_idx: int, max_frames: int, min_root_s
 
 def main() -> None:
     args = parse_args()
+    if args.parent_relative_weight is None:
+        args.parent_relative_weight = args.torso_relative_weight
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -983,7 +991,7 @@ def main() -> None:
             initial_latents = vqvae.quantizer.decode(generated_tokens)
 
         position_constraint: JointPositionConstraint | None = None
-        torso_relative_constraint: TorsoRelativeJointConstraint | None = None
+        parent_relative_constraint: ParentRelativeJointConstraint | None = None
         angle_constraint: BendAngleConstraint | None = None
         angle_target: Tensor | None = None
         joint_motion: Tensor | None = None
@@ -1056,7 +1064,7 @@ def main() -> None:
             angle_motion = angle_result.motion
             print(f"[constraints-viz] angle refinement metrics={angle_result.metrics}", flush=True)
         if latent_body_fixed:
-            torso_relative_constraint = build_torso_relative_joint_constraint(
+            parent_relative_constraint = build_parent_relative_joint_constraint(
                 generated_joints,
                 decoded_frame_mask,
                 body_fixed_joint_ids,
@@ -1070,12 +1078,13 @@ def main() -> None:
                 target_len=length,
                 token_mask=token_mask,
                 frame_mask=constraint_frame_mask,
-                torso_relative_constraint=torso_relative_constraint,
+                parent_relative_constraint=parent_relative_constraint,
                 config=LatentRefinementConfig(
                     steps=args.refinement_steps,
                     learning_rate=args.refinement_lr,
                     position_weight=0.0,
-                    torso_relative_weight=args.torso_relative_weight,
+                    torso_relative_weight=0.0,
+                    parent_relative_weight=args.parent_relative_weight,
                     angle_weight=0.0,
                     latent_weight=args.latent_weight,
                     dynamics_weight=args.dynamics_weight,
@@ -1153,22 +1162,22 @@ def main() -> None:
                 out_dir=out_dir,
             )
 
-        if body_fixed_motion is not None and torso_relative_constraint is not None:
+        if body_fixed_motion is not None and parent_relative_constraint is not None:
             generated_joints_valid = generated_joints[:, :decoded_length]
             body_fixed_joints = recover_joints_from_ric(body_fixed_motion.float())[:, :decoded_length]
-            body_constraint_valid = TorsoRelativeJointConstraint(
-                reference_offsets=torso_relative_constraint.reference_offsets,
-                mask=torso_relative_constraint.mask[:, :decoded_length],
-                origin_joint=torso_relative_constraint.origin_joint,
-                left_joint=torso_relative_constraint.left_joint,
-                right_joint=torso_relative_constraint.right_joint,
-                up_joint=torso_relative_constraint.up_joint,
+            body_constraint_valid = ParentRelativeJointConstraint(
+                reference_bone_offsets=parent_relative_constraint.reference_bone_offsets,
+                mask=parent_relative_constraint.mask[:, :decoded_length],
+                origin_joint=parent_relative_constraint.origin_joint,
+                left_joint=parent_relative_constraint.left_joint,
+                right_joint=parent_relative_constraint.right_joint,
+                up_joint=parent_relative_constraint.up_joint,
             )
-            generated_targets = torso_relative_targets_world(
+            generated_targets = parent_relative_targets_world(
                 generated_joints_valid,
                 body_constraint_valid,
             )
-            body_fixed_targets = torso_relative_targets_world(
+            body_fixed_targets = parent_relative_targets_world(
                 body_fixed_joints,
                 body_constraint_valid,
             )
@@ -1196,8 +1205,8 @@ def main() -> None:
                 constraint_text_override=args.constraint_text
                 or (
                     f"Constraint: keep {natural_joint_names(body_fixed_joint_ids)} fixed "
-                    "relative to the torso throughout the motion. Green markers show the "
-                    "moving torso-relative targets."
+                    "relative to their anatomical parents throughout the motion. Green "
+                    "markers show the moving parent-relative targets."
                 ),
                 dense_constraint=True,
                 output_prefix=args.body_output_prefix,

@@ -137,6 +137,66 @@ class TorsoRelativeJointConstraint:
 
 
 @dataclass(frozen=True)
+class ParentRelativeJointConstraint:
+    """Parent-to-child bone targets expressed in a moving torso frame.
+
+    Unlike :class:`TorsoRelativeJointConstraint`, this constraint does not pin
+    every selected joint independently to the chest. For each active non-root
+    joint it preserves the reference vector from its anatomical parent to the
+    joint. Expressing those vectors in the moving torso frame keeps the result
+    invariant to world translation and global body rotation while retaining
+    the skeleton's kinematic hierarchy.
+    """
+
+    reference_bone_offsets: Tensor
+    mask: Tensor
+    origin_joint: int = 9
+    left_joint: int = 13
+    right_joint: int = 14
+    up_joint: int = 12
+
+    def __post_init__(self) -> None:
+        if self.reference_bone_offsets.ndim != 3 or self.reference_bone_offsets.shape[-2:] != (
+            NUM_JOINTS,
+            3,
+        ):
+            raise ValueError(
+                f"reference_bone_offsets must be (B, {NUM_JOINTS}, 3), "
+                f"got {tuple(self.reference_bone_offsets.shape)}"
+            )
+        if (
+            self.mask.ndim != 3
+            or self.mask.shape[0] != self.reference_bone_offsets.shape[0]
+            or self.mask.shape[2] != NUM_JOINTS
+        ):
+            raise ValueError(
+                f"mask must be (B, T, {NUM_JOINTS}) with the same batch size as "
+                "reference_bone_offsets"
+            )
+        if bool(self.mask[..., 0].any()):
+            raise ValueError("the root joint has no parent and cannot be parent-relative")
+        frame_joints = (self.origin_joint, self.left_joint, self.right_joint, self.up_joint)
+        if any(not 0 <= joint < NUM_JOINTS for joint in frame_joints):
+            raise ValueError(f"torso-frame joint ids must lie in [0, {NUM_JOINTS - 1}]")
+        if len(set(frame_joints)) != len(frame_joints):
+            raise ValueError("torso-frame joint ids must be distinct")
+        active = self.mask.bool().any(dim=1)
+        active_offsets = self.reference_bone_offsets[active]
+        if bool(active_offsets.numel()) and not bool(torch.isfinite(active_offsets).all()):
+            raise ValueError("active parent-relative bone offsets must be finite")
+
+    def to(self, device: torch.device, dtype: torch.dtype) -> "ParentRelativeJointConstraint":
+        return ParentRelativeJointConstraint(
+            reference_bone_offsets=self.reference_bone_offsets.to(device=device, dtype=dtype),
+            mask=self.mask.to(device=device, dtype=torch.bool),
+            origin_joint=self.origin_joint,
+            left_joint=self.left_joint,
+            right_joint=self.right_joint,
+            up_joint=self.up_joint,
+        )
+
+
+@dataclass(frozen=True)
 class BendAngleConstraint:
     """Exact or ranged bend-angle targets over joint triplets.
 
@@ -412,6 +472,166 @@ def torso_relative_joint_loss(
     """Smooth-L1 loss for joints fixed in the moving torso frame."""
 
     errors, active = _torso_relative_errors_and_mask(joints, constraint, frame_mask, eps)
+    if not bool(active.any()):
+        return _zero_loss(joints)
+    losses = F.smooth_l1_loss(errors, torch.zeros_like(errors), beta=beta, reduction="none")
+    return _masked_mean(losses, active)
+
+
+def build_parent_relative_joint_constraint(
+    reference_joints: Tensor,
+    frame_mask: Tensor,
+    joint_ids: list[int],
+    *,
+    reference_frame: int = 0,
+    origin_joint: int = 9,
+    left_joint: int = 13,
+    right_joint: int = 14,
+    up_joint: int = 12,
+) -> ParentRelativeJointConstraint:
+    """Preserve selected parent-to-child vectors from one reference frame."""
+
+    if reference_joints.ndim != 4 or reference_joints.shape[-2:] != (NUM_JOINTS, 3):
+        raise ValueError(
+            f"reference_joints must be (B, T, {NUM_JOINTS}, 3), "
+            f"got {tuple(reference_joints.shape)}"
+        )
+    batch, time, _, _ = reference_joints.shape
+    valid_frames = _as_frame_mask(frame_mask, batch, time, reference_joints.device)
+    if not 0 <= reference_frame < time:
+        raise ValueError(f"reference_frame must lie in [0, {time - 1}]")
+    if not bool(valid_frames[:, reference_frame].all()):
+        raise ValueError("reference_frame must be valid for every sample")
+    if not joint_ids:
+        raise ValueError("joint_ids must contain at least one joint")
+    if len(set(joint_ids)) != len(joint_ids):
+        raise ValueError("joint_ids must not contain duplicates")
+    if any(not 0 < joint < NUM_JOINTS for joint in joint_ids):
+        raise ValueError(f"parent-relative joint ids must lie in [1, {NUM_JOINTS - 1}]")
+
+    local, _, _, torso_valid = _torso_local_joint_positions(
+        reference_joints,
+        origin_joint=origin_joint,
+        left_joint=left_joint,
+        right_joint=right_joint,
+        up_joint=up_joint,
+        eps=1e-7,
+    )
+    if bool((valid_frames & ~torso_valid).any()):
+        raise ValueError("valid frames contain degenerate torso joints")
+    parents = torch.tensor(PARENTS, dtype=torch.long, device=reference_joints.device)
+    safe_parents = parents.clamp_min(0)
+    bone_offsets = local - local[:, :, safe_parents]
+    bone_offsets[:, :, 0] = 0.0
+    mask = torch.zeros(batch, time, NUM_JOINTS, dtype=torch.bool, device=reference_joints.device)
+    mask[:, :, joint_ids] = valid_frames.unsqueeze(-1)
+    return ParentRelativeJointConstraint(
+        reference_bone_offsets=bone_offsets[:, reference_frame].detach().clone(),
+        mask=mask,
+        origin_joint=origin_joint,
+        left_joint=left_joint,
+        right_joint=right_joint,
+        up_joint=up_joint,
+    )
+
+
+def parent_relative_targets_world(
+    joints: Tensor,
+    constraint: ParentRelativeJointConstraint,
+    *,
+    eps: float = 1e-7,
+) -> Tensor:
+    """Return moving world targets implied by the current parent positions."""
+
+    if constraint.mask.shape != joints.shape[:-1]:
+        raise ValueError(f"constraint mask must be {tuple(joints.shape[:-1])}")
+    if constraint.reference_bone_offsets.shape[0] != joints.shape[0]:
+        raise ValueError("constraint and joints must have the same batch size")
+    _, _, basis, valid = _torso_local_joint_positions(
+        joints,
+        origin_joint=constraint.origin_joint,
+        left_joint=constraint.left_joint,
+        right_joint=constraint.right_joint,
+        up_joint=constraint.up_joint,
+        eps=eps,
+    )
+    active_frames = constraint.mask.to(joints.device, torch.bool).any(dim=-1)
+    if bool((active_frames & ~valid).any()):
+        raise ValueError("active parent-relative constraints contain a degenerate torso frame")
+    reference = constraint.reference_bone_offsets.to(joints.device, joints.dtype)
+    world_offsets = torch.einsum("btcd,bjd->btjc", basis, reference)
+    parents = torch.tensor(PARENTS, dtype=torch.long, device=joints.device).clamp_min(0)
+    targets = joints[:, :, parents] + world_offsets
+    targets[:, :, 0] = joints[:, :, 0]
+    return targets
+
+
+def _parent_relative_errors_and_mask(
+    joints: Tensor,
+    constraint: ParentRelativeJointConstraint,
+    frame_mask: Tensor | None,
+    eps: float,
+) -> tuple[Tensor, Tensor]:
+    if constraint.mask.shape != joints.shape[:-1]:
+        raise ValueError(f"constraint mask must be {tuple(joints.shape[:-1])}")
+    valid_frames = _as_frame_mask(frame_mask, joints.shape[0], joints.shape[1], joints.device)
+    active = constraint.mask.to(joints.device, torch.bool) & valid_frames.unsqueeze(-1)
+    local, _, _, torso_valid = _torso_local_joint_positions(
+        joints,
+        origin_joint=constraint.origin_joint,
+        left_joint=constraint.left_joint,
+        right_joint=constraint.right_joint,
+        up_joint=constraint.up_joint,
+        eps=eps,
+    )
+    if bool((active & ~torso_valid.unsqueeze(-1)).any()):
+        raise ValueError("active parent-relative constraints contain a degenerate torso frame")
+    parents = torch.tensor(PARENTS, dtype=torch.long, device=joints.device).clamp_min(0)
+    current_bones = local - local[:, :, parents]
+    target = constraint.reference_bone_offsets.to(joints.device, joints.dtype).unsqueeze(1)
+    errors = torch.linalg.vector_norm(current_bones - target, dim=-1)
+    return errors, active
+
+
+def parent_relative_joint_errors(
+    joints: Tensor,
+    constraint: ParentRelativeJointConstraint,
+    *,
+    frame_mask: Tensor | None = None,
+    eps: float = 1e-7,
+) -> Tensor:
+    """Return one parent-relative Euclidean error per active joint/frame."""
+
+    errors, active = _parent_relative_errors_and_mask(joints, constraint, frame_mask, eps)
+    return errors[active]
+
+
+def parent_relative_joint_error(
+    joints: Tensor,
+    constraint: ParentRelativeJointConstraint,
+    *,
+    frame_mask: Tensor | None = None,
+    eps: float = 1e-7,
+) -> Tensor:
+    """Mean parent-relative bone-vector error in metres."""
+
+    errors, active = _parent_relative_errors_and_mask(joints, constraint, frame_mask, eps)
+    if not bool(active.any()):
+        return _zero_loss(joints)
+    return _masked_mean(errors, active)
+
+
+def parent_relative_joint_loss(
+    joints: Tensor,
+    constraint: ParentRelativeJointConstraint,
+    *,
+    frame_mask: Tensor | None = None,
+    beta: float = 0.05,
+    eps: float = 1e-7,
+) -> Tensor:
+    """Smooth-L1 loss over torso-frame parent-to-child bone vectors."""
+
+    errors, active = _parent_relative_errors_and_mask(joints, constraint, frame_mask, eps)
     if not bool(active.any()):
         return _zero_loss(joints)
     losses = F.smooth_l1_loss(errors, torch.zeros_like(errors), beta=beta, reduction="none")
@@ -702,6 +922,7 @@ class LatentRefinementConfig:
     grad_clip_norm: float | None = 1.0
     history_interval: int = 0
     torso_relative_weight: float = 1.0
+    parent_relative_weight: float = 1.0
 
     def __post_init__(self) -> None:
         if self.steps < 1:
@@ -711,6 +932,7 @@ class LatentRefinementConfig:
         for name in (
             "position_weight",
             "torso_relative_weight",
+            "parent_relative_weight",
             "angle_weight",
             "latent_weight",
             "dynamics_weight",
@@ -757,13 +979,21 @@ def refine_motion_latents(
     frame_mask: Tensor | None = None,
     position_constraint: JointPositionConstraint | None = None,
     torso_relative_constraint: TorsoRelativeJointConstraint | None = None,
+    parent_relative_constraint: ParentRelativeJointConstraint | None = None,
     angle_constraint: BendAngleConstraint | None = None,
     config: LatentRefinementConfig | None = None,
 ) -> LatentRefinementResult:
     """Refine continuous RVQ latents while leaving all model weights frozen."""
 
-    if position_constraint is None and torso_relative_constraint is None and angle_constraint is None:
-        raise ValueError("at least one position, torso-relative, or angle constraint is required")
+    if (
+        position_constraint is None
+        and torso_relative_constraint is None
+        and parent_relative_constraint is None
+        and angle_constraint is None
+    ):
+        raise ValueError(
+            "at least one position, torso-relative, parent-relative, or angle constraint is required"
+        )
     config = config or LatentRefinementConfig()
     if initial_latents.ndim != 3 or not initial_latents.is_floating_point():
         raise ValueError("initial_latents must be a floating-point (B, L, D) tensor")
@@ -835,6 +1065,17 @@ def refine_motion_latents(
                     raise ValueError(
                         "torso-relative constraints target padded or invalid decoded frames"
                     )
+            if parent_relative_constraint is not None:
+                parent_relative_constraint = parent_relative_constraint.to(z0.device, z0.dtype)
+                if parent_relative_constraint.mask.shape != (batch, target_len, NUM_JOINTS):
+                    raise ValueError(
+                        "parent-relative constraint batch/time dimensions must match target_len"
+                    )
+                impossible = parent_relative_constraint.mask & ~valid_frames.unsqueeze(-1)
+                if bool(impossible.any()):
+                    raise ValueError(
+                        "parent-relative constraints target padded or invalid decoded frames"
+                    )
             if angle_constraint is not None:
                 angle_constraint = angle_constraint.to(z0.device, z0.dtype)
                 if angle_constraint.mask.shape[:2] != (batch, target_len):
@@ -857,12 +1098,24 @@ def refine_motion_latents(
                 torso_relative_constraint is not None
                 and (torso_relative_constraint.mask & valid_frames.unsqueeze(-1)).any()
             )
+            active_parent_relative = bool(
+                parent_relative_constraint is not None
+                and (parent_relative_constraint.mask & valid_frames.unsqueeze(-1)).any()
+            )
             weighted_position = active_position and config.position_weight > 0.0
             weighted_torso_relative = (
                 active_torso_relative and config.torso_relative_weight > 0.0
             )
+            weighted_parent_relative = (
+                active_parent_relative and config.parent_relative_weight > 0.0
+            )
             weighted_angle = active_angle and config.angle_weight > 0.0
-            if not weighted_position and not weighted_torso_relative and not weighted_angle:
+            if (
+                not weighted_position
+                and not weighted_torso_relative
+                and not weighted_parent_relative
+                and not weighted_angle
+            ):
                 raise ValueError("no positively weighted constraints remain after applying masks")
 
             _, initial_motion, initial_joints = _decode_latents_to_joints_prepared(
@@ -877,6 +1130,12 @@ def refine_motion_latents(
                 torso_relative_joint_errors(
                     initial_joints,
                     torso_relative_constraint,
+                    frame_mask=valid_frames,
+                )
+            if parent_relative_constraint is not None:
+                parent_relative_joint_errors(
+                    initial_joints,
+                    parent_relative_constraint,
                     frame_mask=valid_frames,
                 )
             if angle_constraint is not None:
@@ -951,6 +1210,13 @@ def refine_motion_latents(
                         frame_mask=valid_frames,
                         beta=config.position_huber_beta,
                     )
+                if parent_relative_constraint is not None and config.parent_relative_weight > 0.0:
+                    losses["parent_relative"] = parent_relative_joint_loss(
+                        joints,
+                        parent_relative_constraint,
+                        frame_mask=valid_frames,
+                        beta=config.position_huber_beta,
+                    )
                 if angle_constraint is not None and config.angle_weight > 0.0:
                     losses["angle"] = bend_angle_loss(
                         joints,
@@ -984,6 +1250,7 @@ def refine_motion_latents(
                 total = (
                     config.position_weight * losses.get("position", zero)
                     + config.torso_relative_weight * losses.get("torso_relative", zero)
+                    + config.parent_relative_weight * losses.get("parent_relative", zero)
                     + config.angle_weight * losses.get("angle", zero)
                     + config.latent_weight * losses.get("latent", zero)
                     + config.dynamics_weight * losses.get("dynamics", zero)
@@ -1054,6 +1321,21 @@ def refine_motion_latents(
                     torso_relative_joint_error(
                         joints,
                         torso_relative_constraint,
+                        frame_mask=valid_frames,
+                    ).cpu()
+                )
+            if parent_relative_constraint is not None and config.parent_relative_weight > 0.0:
+                metrics["parent_relative_error_initial_m"] = float(
+                    parent_relative_joint_error(
+                        initial_joints,
+                        parent_relative_constraint,
+                        frame_mask=valid_frames,
+                    ).cpu()
+                )
+                metrics["parent_relative_error_final_m"] = float(
+                    parent_relative_joint_error(
+                        joints,
+                        parent_relative_constraint,
                         frame_mask=valid_frames,
                     ).cpu()
                 )

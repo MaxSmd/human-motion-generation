@@ -10,7 +10,7 @@ FID evaluator:
   5. Optionally re-encode/decode through the RVQ-VAE to pull the result back
      toward the learned motion-token manifold.
   6. Refine the same generated continuous RVQ latents against sparse joint,
-     bend-angle, or dense torso-relative targets while keeping MoMask's weights
+     bend-angle, or dense parent-relative targets while keeping MoMask's weights
      frozen.
 
 The paired real trajectory and pose are oracle targets used only for measuring
@@ -45,11 +45,11 @@ from momask.constraints import (
     BendAngleConstraint,
     JointPositionConstraint,
     LatentRefinementConfig,
-    TorsoRelativeJointConstraint,
+    ParentRelativeJointConstraint,
     bend_angles_from_joints,
-    build_torso_relative_joint_constraint,
+    build_parent_relative_joint_constraint,
+    parent_relative_joint_errors,
     refine_motion_latents,
-    torso_relative_joint_errors,
 )
 from momask.data_utils import normalize_motion, token_mask_from_frame_mask
 from shared.data import H3D263Dataset, collate
@@ -121,19 +121,25 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--body-fixed-joint-ids",
         default="17,19,21",
-        help="Dense torso-relative joints (default: right shoulder, elbow, and wrist).",
+        help="Dense parent-relative joints (default: right shoulder, elbow, and wrist).",
     )
     p.add_argument(
         "--body-reference-frame",
         type=int,
         default=0,
-        help="Generated frame whose torso-relative pose is held fixed.",
+        help="Generated frame whose parent-to-joint vectors are held fixed.",
     )
     p.add_argument("--angle-tolerance-deg", type=float, default=5.0)
     p.add_argument("--refinement-steps", type=int, default=50)
     p.add_argument("--refinement-lr", type=float, default=0.01)
     p.add_argument("--position-weight", type=float, default=1.0)
-    p.add_argument("--torso-relative-weight", type=float, default=1.0)
+    p.add_argument(
+        "--torso-relative-weight",
+        type=float,
+        default=1.0,
+        help="Legacy fallback for --parent-relative-weight.",
+    )
+    p.add_argument("--parent-relative-weight", type=float, default=None)
     p.add_argument("--angle-weight", type=float, default=1.0)
     p.add_argument("--latent-weight", type=float, default=0.01)
     p.add_argument("--dynamics-weight", type=float, default=0.1)
@@ -560,7 +566,7 @@ def control_statistics(
     joints: Tensor,
     *,
     position_constraint: JointPositionConstraint | None,
-    torso_relative_constraint: TorsoRelativeJointConstraint | None,
+    parent_relative_constraint: ParentRelativeJointConstraint | None,
     angle_constraint: BendAngleConstraint | None,
     angle_target: Tensor | None,
     angle_tolerance_degrees: float,
@@ -578,12 +584,12 @@ def control_statistics(
         stats["joint_within_5cm_count"] = float((errors <= 0.05).sum().cpu())
         stats["joint_within_10cm_count"] = float((errors <= 0.10).sum().cpu())
         stats["joint_constraint_count"] = float(errors.numel())
-    if torso_relative_constraint is not None:
-        errors = torso_relative_joint_errors(joints, torso_relative_constraint)
-        stats["torso_relative_error_sum_m"] = float(errors.sum().cpu())
-        stats["torso_relative_within_5cm_count"] = float((errors <= 0.05).sum().cpu())
-        stats["torso_relative_within_10cm_count"] = float((errors <= 0.10).sum().cpu())
-        stats["torso_relative_constraint_count"] = float(errors.numel())
+    if parent_relative_constraint is not None:
+        errors = parent_relative_joint_errors(joints, parent_relative_constraint)
+        stats["parent_relative_error_sum_m"] = float(errors.sum().cpu())
+        stats["parent_relative_within_5cm_count"] = float((errors <= 0.05).sum().cpu())
+        stats["parent_relative_within_10cm_count"] = float((errors <= 0.10).sum().cpu())
+        stats["parent_relative_constraint_count"] = float(errors.numel())
     if angle_constraint is not None:
         if angle_target is None:
             raise ValueError("angle_target is required with an angle constraint")
@@ -626,17 +632,17 @@ def summarize_control_statistics(stats: dict[str, float]) -> dict[str, float | i
                 "angle_constraint_count": int(angle_count),
             }
         )
-    torso_relative_count = stats.get("torso_relative_constraint_count", 0.0)
-    if torso_relative_count:
+    parent_relative_count = stats.get("parent_relative_constraint_count", 0.0)
+    if parent_relative_count:
         result.update(
             {
-                "torso_relative_l2_m": stats["torso_relative_error_sum_m"]
-                / torso_relative_count,
-                "torso_relative_success_5cm": stats["torso_relative_within_5cm_count"]
-                / torso_relative_count,
-                "torso_relative_success_10cm": stats["torso_relative_within_10cm_count"]
-                / torso_relative_count,
-                "torso_relative_constraint_count": int(torso_relative_count),
+                "parent_relative_l2_m": stats["parent_relative_error_sum_m"]
+                / parent_relative_count,
+                "parent_relative_success_5cm": stats["parent_relative_within_5cm_count"]
+                / parent_relative_count,
+                "parent_relative_success_10cm": stats["parent_relative_within_10cm_count"]
+                / parent_relative_count,
+                "parent_relative_constraint_count": int(parent_relative_count),
             }
         )
     return result
@@ -711,6 +717,8 @@ def encode_motion(evaluator, motion: Tensor, lengths: Tensor) -> np.ndarray:
 
 def main() -> None:
     args = parse_args()
+    if args.parent_relative_weight is None:
+        args.parent_relative_weight = args.torso_relative_weight
     latent_variants = parse_latent_variants(args.latent_variants)
     joint_ids = (
         parse_csv_ints(args.joint_ids, name="--joint-ids") if "joint" in latent_variants else []
@@ -868,7 +876,7 @@ def main() -> None:
         }
 
         position_constraint: JointPositionConstraint | None = None
-        torso_relative_constraint: TorsoRelativeJointConstraint | None = None
+        parent_relative_constraint: ParentRelativeJointConstraint | None = None
         angle_constraint: BendAngleConstraint | None = None
         angle_target: Tensor | None = None
         if latent_variants:
@@ -944,7 +952,7 @@ def main() -> None:
                 )
                 motions["angle_latent"] = angle_result.motion
             if "body-fixed" in latent_variants:
-                torso_relative_constraint = build_torso_relative_joint_constraint(
+                parent_relative_constraint = build_parent_relative_joint_constraint(
                     generated_joints,
                     decoded_frame_mask,
                     body_fixed_joint_ids,
@@ -958,12 +966,13 @@ def main() -> None:
                     target_len=model_real_x.shape[1],
                     token_mask=token_mask,
                     frame_mask=model_frame_mask,
-                    torso_relative_constraint=torso_relative_constraint,
+                    parent_relative_constraint=parent_relative_constraint,
                     config=LatentRefinementConfig(
                         steps=args.refinement_steps,
                         learning_rate=args.refinement_lr,
                         position_weight=0.0,
-                        torso_relative_weight=args.torso_relative_weight,
+                        torso_relative_weight=0.0,
+                        parent_relative_weight=args.parent_relative_weight,
                         angle_weight=0.0,
                         latent_weight=args.latent_weight,
                         dynamics_weight=args.dynamics_weight,
@@ -985,7 +994,7 @@ def main() -> None:
                     control_statistics(
                         recover_joints_from_ric(motion.float()),
                         position_constraint=position_constraint,
-                        torso_relative_constraint=torso_relative_constraint,
+                        parent_relative_constraint=parent_relative_constraint,
                         angle_constraint=angle_constraint,
                         angle_target=angle_target,
                         angle_tolerance_degrees=args.angle_tolerance_deg,
@@ -1026,7 +1035,13 @@ def main() -> None:
             "body_fixed_joint_ids": body_fixed_joint_ids
             if "body-fixed" in latent_variants
             else [],
+            "body_fixed_edges": [[PARENTS[joint], joint] for joint in body_fixed_joint_ids]
+            if "body-fixed" in latent_variants
+            else [],
             "body_reference_frame": args.body_reference_frame,
+            "body_fixed_constraint_space": "parent_bone_in_moving_torso_frame"
+            if "body-fixed" in latent_variants
+            else None,
             "angle_centers": angle_centers if "angle" in latent_variants else [],
             "angle_triplets": angle_triplets.detach().cpu().tolist()
             if "angle" in latent_variants
@@ -1037,7 +1052,7 @@ def main() -> None:
                 "steps": args.refinement_steps,
                 "learning_rate": args.refinement_lr,
                 "position_weight": args.position_weight,
-                "torso_relative_weight": args.torso_relative_weight,
+                "parent_relative_weight": args.parent_relative_weight,
                 "angle_weight": args.angle_weight,
                 "latent_weight": args.latent_weight,
                 "dynamics_weight": args.dynamics_weight,

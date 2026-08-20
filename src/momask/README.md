@@ -185,19 +185,25 @@ a knee or elbow bends, but not the side of the bending plane by themselves.
 
 ### Fixed limbs relative to the body
 
-`TorsoRelativeJointConstraint` represents commands such as “keep the right arm
-fixed relative to the torso.” It defines a moving chest frame from Spine3
-(origin), the left-to-right collar direction (lateral axis), and the
-Spine3-to-Neck direction (vertical axis). The forward axis is their cross
-product. At a reference frame, selected joint positions are converted into this
-local frame; the same local offsets are required at every valid generated
-frame. World translation, turning, and leaning therefore do not count as arm
-motion.
+`ParentRelativeJointConstraint` represents commands such as "keep the right arm
+fixed relative to the body." At a generated reference frame, it records each
+selected parent-to-child vector in a moving torso frame. For the right arm the
+controlled edges are collar-to-shoulder, shoulder-to-elbow, and elbow-to-wrist;
+for joint 5 the controlled edge is right-hip-to-right-knee. During refinement,
+each selected edge must retain that reference vector while its parent may still
+move with the body.
 
-For the right arm, the constrained joints are R_Shoulder (17), R_Elbow (19),
-and R_Wrist (21). The default reference is generated frame 0, so this
-constraint needs no paired ground-truth motion at inference time. It is dense,
-not sampled every 20 frames.
+The torso frame uses Spine3 as its origin, the left-to-right collar direction
+as its lateral axis, and the Spine3-to-Neck direction as its vertical axis.
+World translation, turning, and leaning therefore do not count as limb motion.
+This is less restrictive and more anatomically meaningful than independently
+pinning every selected joint to the chest. The legacy
+`TorsoRelativeJointConstraint` primitive remains available for experiments that
+need the old absolute torso-offset behavior.
+
+The default reference is generated frame 0, so this constraint needs no paired
+ground-truth motion at inference time. It is dense, not sampled every 20
+frames.
 
 ```bash
 # Small metric smoke test: unconstrained versus body_fixed_latent.
@@ -205,26 +211,26 @@ MAX_CLIPS=8 \
 LATENT_VARIANTS=body-fixed \
 BODY_FIXED_JOINT_IDS=17,19,21 \
 REFINEMENT_STEPS=100 \
-TORSO_RELATIVE_WEIGHT=5 \
+PARENT_RELATIVE_WEIGHT=5 \
 OUTPUT=runs/momask-canonical-tokens-clip200k/constraints/body_fixed_right_arm_smoke8.json \
 sbatch slurm/momask/evaluate_momask_constraints.sbatch
 
-# Render ground truth, generated motion, and the torso-relative result.
+# Render ground truth, generated motion, and the parent-relative result.
 SAMPLES="0 500" \
 sbatch slurm/momask/visualize_momask_body_fixed_constraints.sbatch
 
-# Keep the right knee (joint 5) fixed relative to the moving torso.
+# Keep the right knee (joint 5) fixed relative to its moving right hip.
 BODY_FIXED_JOINT_IDS=5 \
-CONSTRAINT_TEXT="Right knee must stay fixed relative to the torso." \
+CONSTRAINT_TEXT="Right knee must stay fixed relative to the body." \
 BODY_OUTPUT_PREFIX=body_fixed_right_knee \
 SAMPLES="0 500" \
 sbatch slurm/momask/visualize_momask_body_fixed_constraints.sbatch
 ```
 
-The evaluator reports `torso_relative_l2_m`, success within 5/10 cm, FID,
+The evaluator reports `parent_relative_l2_m`, success within 5/10 cm, FID,
 R-Precision, MM-Dist, diversity, and root-trajectory drift. The GIF title names
-the controlled shoulder, elbow, and wrist and states that they remain fixed
-relative to the torso. Ground truth is shown only for visual comparison.
+the controlled joints and explains that their anatomical parent-to-child
+vectors remain fixed. Ground truth is shown only for visual comparison.
 
 Render the same wrist-position and knee/elbow-angle refinements as synchronized
 GIFs. Each GIF shows the ground-truth reference, unconstrained generation,

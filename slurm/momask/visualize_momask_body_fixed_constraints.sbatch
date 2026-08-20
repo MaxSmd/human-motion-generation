@@ -39,6 +39,7 @@ BODY_OUTPUT_PREFIX="${BODY_OUTPUT_PREFIX:-body_fixed}"
 REFINEMENT_STEPS="${REFINEMENT_STEPS:-100}"
 REFINEMENT_LR="${REFINEMENT_LR:-0.01}"
 TORSO_RELATIVE_WEIGHT="${TORSO_RELATIVE_WEIGHT:-5.0}"
+PARENT_RELATIVE_WEIGHT="${PARENT_RELATIVE_WEIGHT:-${TORSO_RELATIVE_WEIGHT}}"
 LATENT_WEIGHT="${LATENT_WEIGHT:-0.005}"
 DYNAMICS_WEIGHT="${DYNAMICS_WEIGHT:-0.1}"
 ROOT_WEIGHT="${ROOT_WEIGHT:-0.1}"
@@ -64,7 +65,7 @@ echo "[momask-body-fixed-viz] ckpt=${CKPT}"
 echo "[momask-body-fixed-viz] samples=${SAMPLES} seeds=${SEEDS}"
 echo "[momask-body-fixed-viz] joints=${BODY_FIXED_JOINT_IDS} reference_frame=${BODY_REFERENCE_FRAME}"
 echo "[momask-body-fixed-viz] constraint_text=${CONSTRAINT_TEXT:-<automatic>} output_prefix=${BODY_OUTPUT_PREFIX}"
-echo "[momask-body-fixed-viz] refinement_steps=${REFINEMENT_STEPS} torso_relative_weight=${TORSO_RELATIVE_WEIGHT}"
+echo "[momask-body-fixed-viz] refinement_steps=${REFINEMENT_STEPS} parent_relative_weight=${PARENT_RELATIVE_WEIGHT}"
 echo "[momask-body-fixed-viz] out_dir=${OUT_DIR}"
 
 SAMPLING_ARGS="--no-sample-tokens"
@@ -116,7 +117,7 @@ enroot start \
                     --body-output-prefix '${BODY_OUTPUT_PREFIX}' \
                     --refinement-steps ${REFINEMENT_STEPS} \
                     --refinement-lr ${REFINEMENT_LR} \
-                    --torso-relative-weight ${TORSO_RELATIVE_WEIGHT} \
+                    --parent-relative-weight ${PARENT_RELATIVE_WEIGHT} \
                     --latent-weight ${LATENT_WEIGHT} \
                     --dynamics-weight ${DYNAMICS_WEIGHT} \
                     --root-weight ${ROOT_WEIGHT} \

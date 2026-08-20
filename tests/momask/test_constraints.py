@@ -10,14 +10,20 @@ from momask.constraints import (
     BendAngleConstraint,
     JointPositionConstraint,
     LatentRefinementConfig,
+    ParentRelativeJointConstraint,
     TorsoRelativeJointConstraint,
     bend_angle_loss,
     bend_angle_violation,
     bend_angles_from_joints,
+    build_parent_relative_joint_constraint,
     build_torso_relative_joint_constraint,
     decode_latents_to_joints,
     joint_position_error,
     joint_position_loss,
+    parent_relative_joint_error,
+    parent_relative_joint_errors,
+    parent_relative_joint_loss,
+    parent_relative_targets_world,
     refine_motion_latents,
     torso_local_joint_positions,
     torso_relative_joint_error,
@@ -155,6 +161,79 @@ def test_body_fixed_loss_has_finite_gradient() -> None:
     joints.requires_grad_(True)
 
     loss = torso_relative_joint_loss(joints, constraint)
+    loss.backward()
+
+    assert joints.grad is not None
+    assert torch.isfinite(joints.grad).all()
+    assert joints.grad.abs().sum() > 0
+
+
+def test_parent_relative_constraint_tracks_rigid_motion_and_detects_joint_motion() -> None:
+    joints = _rigidly_moving_right_arm()
+    frame_mask = torch.ones(1, 2, dtype=torch.bool)
+    constraint = build_parent_relative_joint_constraint(
+        joints,
+        frame_mask,
+        [17, 19, 21],
+        reference_frame=0,
+    )
+
+    assert isinstance(constraint, ParentRelativeJointConstraint)
+    assert constraint.mask[0, :, [17, 19, 21]].all()
+    assert int(constraint.mask.sum()) == 6
+    assert torch.allclose(
+        parent_relative_joint_error(joints, constraint), torch.tensor(0.0), atol=1e-6
+    )
+    targets = parent_relative_targets_world(joints, constraint)
+    assert torch.allclose(targets[:, :, [17, 19, 21]], joints[:, :, [17, 19, 21]], atol=1e-6)
+
+    violated = joints.clone()
+    violated[0, 1, 21, 0] += 0.3
+    errors = parent_relative_joint_errors(violated, constraint)
+
+    assert errors.shape == (6,)
+    assert float(errors.max()) > 0.29
+    assert parent_relative_joint_loss(violated, constraint) > 0.0
+
+
+def test_parent_relative_constraint_respects_the_selected_kinematic_edges() -> None:
+    reference = _rigidly_moving_right_arm()
+    frame_mask = torch.ones(1, 2, dtype=torch.bool)
+    moved = reference.clone()
+    offset = torch.tensor([0.2, -0.1, 0.05])
+    moved[0, 1, 19] += offset
+    moved[0, 1, 21] += offset
+
+    wrist_only = build_parent_relative_joint_constraint(reference, frame_mask, [21])
+    arm_chain = build_parent_relative_joint_constraint(reference, frame_mask, [19, 21])
+
+    assert torch.allclose(
+        parent_relative_joint_error(moved, wrist_only), torch.tensor(0.0), atol=1e-6
+    )
+    assert parent_relative_joint_error(moved, arm_chain) > 0.05
+
+
+def test_parent_relative_constraint_rejects_the_root_joint() -> None:
+    with pytest.raises(ValueError, match=r"root|\[1"):
+        build_parent_relative_joint_constraint(
+            _rigidly_moving_right_arm(),
+            torch.ones(1, 2, dtype=torch.bool),
+            [0],
+        )
+
+
+def test_parent_relative_loss_has_finite_gradient() -> None:
+    reference = _rigidly_moving_right_arm()
+    constraint = build_parent_relative_joint_constraint(
+        reference,
+        torch.ones(1, 2, dtype=torch.bool),
+        [17, 19, 21],
+    )
+    joints = reference.clone()
+    joints[0, 1, 19, 2] += 0.2
+    joints.requires_grad_(True)
+
+    loss = parent_relative_joint_loss(joints, constraint)
     loss.backward()
 
     assert joints.grad is not None
@@ -346,6 +425,53 @@ def test_latent_refinement_reduces_torso_relative_arm_error() -> None:
     assert after < before * 0.25
     assert result.metrics["torso_relative_error_final_m"] < result.metrics[
         "torso_relative_error_initial_m"
+    ]
+
+
+def test_latent_refinement_reduces_parent_relative_arm_error() -> None:
+    model = _IdentityDecoder()
+    reference_joints = _rigidly_moving_right_arm()
+    reference_joints[:, 1] = reference_joints[:, 0]
+    reference_features = torch.zeros(1, 2, H3D_FEATURE_DIM)
+    reference_features[..., 4 : 4 + (NUM_JOINTS - 1) * 3] = reference_joints[
+        ..., 1:, :
+    ].reshape(1, 2, -1)
+    constraint = build_parent_relative_joint_constraint(
+        reference_joints,
+        torch.ones(1, 2, dtype=torch.bool),
+        [17, 19, 21],
+    )
+    initial = reference_features.clone()
+    right_wrist_start = 4 + (21 - 1) * 3
+    initial[0, 1, right_wrist_start] += 0.4
+
+    result = refine_motion_latents(
+        model,
+        initial,
+        mean=torch.zeros(H3D_FEATURE_DIM),
+        std=torch.ones(H3D_FEATURE_DIM),
+        target_len=2,
+        parent_relative_constraint=constraint,
+        config=LatentRefinementConfig(
+            steps=60,
+            learning_rate=0.1,
+            position_weight=0.0,
+            torso_relative_weight=0.0,
+            parent_relative_weight=1.0,
+            latent_weight=0.001,
+            dynamics_weight=0.0,
+            root_weight=0.0,
+            bone_weight=0.0,
+            max_delta_norm=2.0,
+            grad_clip_norm=10.0,
+        ),
+    )
+
+    before = parent_relative_joint_error(result.initial_joints, constraint)
+    after = parent_relative_joint_error(result.joints, constraint)
+    assert after < before * 0.25
+    assert result.metrics["parent_relative_error_final_m"] < result.metrics[
+        "parent_relative_error_initial_m"
     ]
 
 
