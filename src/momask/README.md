@@ -174,11 +174,16 @@ joint and configurable interior samples along all 21 kinematic edges, rather
 than only checking joint endpoints. It also checks interpolated body samples
 between adjacent frames so a fast motion cannot tunnel through a thin obstacle.
 
-A separate worst-penetration loss prevents the optimizer from improving the
-average merely by crossing the obstacle in fewer frames. No avoidance route is
-prescribed: the frozen model prior and collision gradients determine how the
-motion changes. This is inference-time latent optimization; neither MoMask
-transformer is retrained.
+A smooth worst-penetration loss spreads useful gradients over the most deeply
+colliding body samples, preventing the optimizer from improving the average
+merely by crossing the obstacle in fewer frames. An adaptive multiplier grows
+the collision penalty while any frame or swept interval remains above the
+clearance tolerance. Motion-preservation regularizers start at a configurable
+fraction of their requested weights; after the motion becomes collision-free,
+they ramp back to full strength. If a collision returns, that restoration is
+reset. No avoidance route is prescribed: the frozen model prior and collision
+gradients determine how the motion changes. This is inference-time latent
+optimization; neither MoMask transformer is retrained.
 
 This stage enforces geometry only. It can push a motion out of an obstacle, but
 it does not by itself teach the model to climb stairs or choose a jumping action.
@@ -195,6 +200,9 @@ The default scene is a 6x8x3 metre room. The actor spawns at `(0, -2)` facing
 `+Z`, with a one-metre box one metre ahead at `z=-1`. `SCENE_ROOM_*`,
 `SCENE_SPAWN_*`, `SCENE_OBSTACLE_*`, `SCENE_BODY_RADIUS`, `SCENE_WEIGHT`,
 `SCENE_PEAK_WEIGHT`, and `SCENE_SWEPT_SAMPLES` can be overridden at submission.
+Adaptive behavior is controlled by `SCENE_PENALTY_GROWTH`,
+`SCENE_PENALTY_INTERVAL`, `SCENE_MAX_PENALTY_SCALE`,
+`SCENE_VIOLATION_TOLERANCE`, and `SCENE_REGULARIZATION_FLOOR`.
 The JSON compares `unconstrained` and
 `scene_latent` quality and reports maximum/mean clearance violation, violating
 body-point fraction, colliding-frame fraction, and swept collision metrics for

@@ -416,33 +416,72 @@ def scene_geometry_loss(
     return loss
 
 
-def scene_peak_violation_loss(
+def _scene_violation_values_and_mask(
     joints_world: Tensor,
     constraint: RoomGeometryConstraint,
-    frame_mask: Tensor | None = None,
-) -> Tensor:
-    """Squared worst penetration per sample, including swept-frame points."""
-
+    frame_mask: Tensor | None,
+) -> tuple[Tensor, Tensor]:
     violation = scene_clearance_violations(joints_world, constraint)
     valid = (
         torch.ones(violation.shape[:2], dtype=torch.bool, device=violation.device)
         if frame_mask is None
         else frame_mask.to(device=violation.device, dtype=torch.bool)
     )
-    if valid.shape != violation.shape[:2] or not bool(valid.any(dim=1).all()):
-        raise ValueError("scene frame mask must match and contain a valid frame")
-    frame_peak = violation.masked_fill(~valid.unsqueeze(-1), -1.0).amax(dim=(1, 2))
+    if valid.shape != violation.shape[:2]:
+        raise ValueError("scene frame mask must match the joint batch/time dimensions")
+
+    value_blocks = [violation.flatten(start_dim=1)]
+    mask_blocks = [valid.unsqueeze(-1).expand_as(violation).flatten(start_dim=1)]
     if constraint.swept_samples > 0 and joints_world.shape[1] > 1:
-        swept_violation = scene_swept_clearance_violations(joints_world, constraint)
+        swept = scene_swept_clearance_violations(joints_world, constraint)
         segment_valid = valid[:, :-1] & valid[:, 1:]
-        swept_peak = swept_violation.masked_fill(
-            ~segment_valid.unsqueeze(-1), -1.0
-        ).amax(dim=(1, 2))
-        swept_peak = torch.where(
-            segment_valid.any(dim=1), swept_peak, torch.zeros_like(swept_peak)
+        value_blocks.append(swept.flatten(start_dim=1))
+        mask_blocks.append(
+            segment_valid.unsqueeze(-1).expand_as(swept).flatten(start_dim=1)
         )
-        frame_peak = torch.maximum(frame_peak, swept_peak)
-    return frame_peak.clamp_min(0.0).pow(2).mean()
+    return torch.cat(value_blocks, dim=1), torch.cat(mask_blocks, dim=1)
+
+
+def scene_max_clearance_violation(
+    joints_world: Tensor,
+    constraint: RoomGeometryConstraint,
+    frame_mask: Tensor | None = None,
+) -> Tensor:
+    """Maximum frame and swept-frame penetration for each sample in metres."""
+
+    values, valid = _scene_violation_values_and_mask(
+        joints_world, constraint, frame_mask
+    )
+    return values.masked_fill(~valid, 0.0).amax(dim=1)
+
+
+def scene_peak_violation_loss(
+    joints_world: Tensor,
+    constraint: RoomGeometryConstraint,
+    frame_mask: Tensor | None = None,
+    temperature: float = 0.01,
+) -> Tensor:
+    """Smooth squared worst penetration, including swept-frame points."""
+
+    if not math.isfinite(temperature) or temperature <= 0.0:
+        raise ValueError("scene peak temperature must be positive")
+    values, valid = _scene_violation_values_and_mask(
+        joints_world, constraint, frame_mask
+    )
+    active = valid & (values > 0.0)
+    active_count = active.sum(dim=1)
+    scaled = (values / temperature).masked_fill(~active, -torch.inf)
+    # A finite dummy value keeps the all-clear row differentiable and exactly zero.
+    dummy = torch.where(
+        active_count.unsqueeze(1) > 0,
+        scaled.new_full((scaled.shape[0], 1), -torch.inf),
+        scaled.new_zeros((scaled.shape[0], 1)),
+    )
+    smooth_peak = temperature * (
+        torch.logsumexp(torch.cat((scaled, dummy), dim=1), dim=1)
+        - active_count.clamp_min(1).to(values.dtype).log()
+    )
+    return smooth_peak.pow(2).mean()
 
 
 @torch.no_grad()

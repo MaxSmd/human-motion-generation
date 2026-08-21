@@ -63,6 +63,12 @@ MAX_DELTA_NORM="${MAX_DELTA_NORM:-1.0}"
 GRAD_CLIP_NORM="${GRAD_CLIP_NORM:-1.0}"
 SCENE_WEIGHT="${SCENE_WEIGHT:-10.0}"
 SCENE_PEAK_WEIGHT="${SCENE_PEAK_WEIGHT:-50.0}"
+SCENE_PEAK_TEMPERATURE="${SCENE_PEAK_TEMPERATURE:-0.01}"
+SCENE_PENALTY_GROWTH="${SCENE_PENALTY_GROWTH:-2.0}"
+SCENE_PENALTY_INTERVAL="${SCENE_PENALTY_INTERVAL:-50}"
+SCENE_MAX_PENALTY_SCALE="${SCENE_MAX_PENALTY_SCALE:-16.0}"
+SCENE_VIOLATION_TOLERANCE="${SCENE_VIOLATION_TOLERANCE:-0.005}"
+SCENE_REGULARIZATION_FLOOR="${SCENE_REGULARIZATION_FLOOR:-0.1}"
 SCENE_ROOT_WEIGHT="${SCENE_ROOT_WEIGHT:-0.0}"
 SCENE_ROOM_WIDTH="${SCENE_ROOM_WIDTH:-6.0}"
 SCENE_ROOM_DEPTH="${SCENE_ROOM_DEPTH:-8.0}"
@@ -120,6 +126,7 @@ echo "[momask-constraints] body_fixed_joint_ids=${BODY_FIXED_JOINT_IDS} body_ref
 echo "[momask-constraints] refinement_steps=${REFINEMENT_STEPS} refinement_lr=${REFINEMENT_LR} position_weight=${POSITION_WEIGHT} parent_relative_weight=${PARENT_RELATIVE_WEIGHT} angle_weight=${ANGLE_WEIGHT}"
 echo "[momask-constraints] scene room=${SCENE_ROOM_WIDTH}x${SCENE_ROOM_DEPTH}x${SCENE_ROOM_HEIGHT} spawn=${SCENE_SPAWN_X},${SCENE_SPAWN_Z},${SCENE_SPAWN_YAW} obstacle=${SCENE_OBSTACLE_KIND}@${SCENE_OBSTACLE_X},${SCENE_OBSTACLE_Y},${SCENE_OBSTACLE_Z}"
 echo "[momask-constraints] scene weights collision=${SCENE_WEIGHT} peak=${SCENE_PEAK_WEIGHT} swept_samples=${SCENE_SWEPT_SAMPLES}"
+echo "[momask-constraints] scene adaptive temp=${SCENE_PEAK_TEMPERATURE} growth=${SCENE_PENALTY_GROWTH} interval=${SCENE_PENALTY_INTERVAL} max_scale=${SCENE_MAX_PENALTY_SCALE} tolerance=${SCENE_VIOLATION_TOLERANCE} reg_floor=${SCENE_REGULARIZATION_FLOOR}"
 echo "[momask-constraints] output=${OUTPUT}"
 
 TEXTS_ZIP_ARG=""
@@ -201,6 +208,12 @@ enroot start \
             --grad-clip-norm ${GRAD_CLIP_NORM} \
             --scene-weight ${SCENE_WEIGHT} \
             --scene-peak-weight ${SCENE_PEAK_WEIGHT} \
+            --scene-peak-temperature ${SCENE_PEAK_TEMPERATURE} \
+            --scene-penalty-growth ${SCENE_PENALTY_GROWTH} \
+            --scene-penalty-interval ${SCENE_PENALTY_INTERVAL} \
+            --scene-max-penalty-scale ${SCENE_MAX_PENALTY_SCALE} \
+            --scene-violation-tolerance ${SCENE_VIOLATION_TOLERANCE} \
+            --scene-regularization-floor ${SCENE_REGULARIZATION_FLOOR} \
             --scene-root-weight ${SCENE_ROOT_WEIGHT} \
             --scene-room-width ${SCENE_ROOM_WIDTH} \
             --scene-room-depth ${SCENE_ROOM_DEPTH} \

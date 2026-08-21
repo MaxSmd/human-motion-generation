@@ -51,6 +51,7 @@ from .scene_constraints import (
     scene_clearance_violations,
     scene_geometry_loss,
     scene_geometry_metrics,
+    scene_max_clearance_violation,
     scene_peak_violation_loss,
     scene_swept_clearance_violations,
 )
@@ -79,6 +80,7 @@ __all__ = [
     "scene_clearance_violations",
     "scene_geometry_loss",
     "scene_geometry_metrics",
+    "scene_max_clearance_violation",
     "scene_peak_violation_loss",
     "scene_swept_clearance_violations",
     "bend_angles_from_joints",

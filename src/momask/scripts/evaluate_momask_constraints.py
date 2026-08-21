@@ -155,6 +155,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--grad-clip-norm", type=float, default=1.0)
     p.add_argument("--scene-weight", type=float, default=10.0)
     p.add_argument("--scene-peak-weight", type=float, default=50.0)
+    p.add_argument("--scene-peak-temperature", type=float, default=0.01)
+    p.add_argument("--scene-penalty-growth", type=float, default=1.0)
+    p.add_argument("--scene-penalty-interval", type=int, default=50)
+    p.add_argument("--scene-max-penalty-scale", type=float, default=1.0)
+    p.add_argument("--scene-violation-tolerance", type=float, default=0.005)
+    p.add_argument("--scene-regularization-floor", type=float, default=1.0)
     p.add_argument("--scene-root-weight", type=float, default=0.0)
     p.add_argument("--scene-room-width", type=float, default=6.0)
     p.add_argument("--scene-room-depth", type=float, default=8.0)
@@ -1203,6 +1209,12 @@ def main() -> None:
                         angle_weight=0.0,
                         scene_weight=args.scene_weight,
                         scene_peak_weight=args.scene_peak_weight,
+                        scene_peak_temperature=args.scene_peak_temperature,
+                        scene_penalty_growth=args.scene_penalty_growth,
+                        scene_penalty_interval=args.scene_penalty_interval,
+                        scene_max_penalty_scale=args.scene_max_penalty_scale,
+                        scene_violation_tolerance=args.scene_violation_tolerance,
+                        scene_regularization_floor=args.scene_regularization_floor,
                         latent_weight=args.latent_weight,
                         dynamics_weight=args.dynamics_weight,
                         root_weight=args.scene_root_weight,
@@ -1304,6 +1316,12 @@ def main() -> None:
                 "bone_weight": args.bone_weight,
                 "scene_weight": args.scene_weight,
                 "scene_peak_weight": args.scene_peak_weight,
+                "scene_peak_temperature": args.scene_peak_temperature,
+                "scene_penalty_growth": args.scene_penalty_growth,
+                "scene_penalty_interval": args.scene_penalty_interval,
+                "scene_max_penalty_scale": args.scene_max_penalty_scale,
+                "scene_violation_tolerance": args.scene_violation_tolerance,
+                "scene_regularization_floor": args.scene_regularization_floor,
                 "scene_root_weight": args.scene_root_weight,
                 "max_delta_norm": args.max_delta_norm,
                 "grad_clip_norm": args.grad_clip_norm,

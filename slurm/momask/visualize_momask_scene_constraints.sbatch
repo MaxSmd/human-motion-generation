@@ -36,6 +36,12 @@ REFINEMENT_STEPS="${REFINEMENT_STEPS:-200}"
 REFINEMENT_LR="${REFINEMENT_LR:-0.02}"
 SCENE_WEIGHT="${SCENE_WEIGHT:-50.0}"
 SCENE_PEAK_WEIGHT="${SCENE_PEAK_WEIGHT:-50.0}"
+SCENE_PEAK_TEMPERATURE="${SCENE_PEAK_TEMPERATURE:-0.01}"
+SCENE_PENALTY_GROWTH="${SCENE_PENALTY_GROWTH:-2.0}"
+SCENE_PENALTY_INTERVAL="${SCENE_PENALTY_INTERVAL:-50}"
+SCENE_MAX_PENALTY_SCALE="${SCENE_MAX_PENALTY_SCALE:-16.0}"
+SCENE_VIOLATION_TOLERANCE="${SCENE_VIOLATION_TOLERANCE:-0.005}"
+SCENE_REGULARIZATION_FLOOR="${SCENE_REGULARIZATION_FLOOR:-0.1}"
 SCENE_ROOT_WEIGHT="${SCENE_ROOT_WEIGHT:-0.0}"
 LATENT_WEIGHT="${LATENT_WEIGHT:-0.001}"
 DYNAMICS_WEIGHT="${DYNAMICS_WEIGHT:-0.05}"
@@ -72,13 +78,14 @@ RUN_DIR="$(dirname "${CKPT}")"
 if [ "$(basename "${RUN_DIR}")" = "checkpoints" ]; then
     RUN_DIR="$(dirname "${RUN_DIR}")"
 fi
-OUT_DIR="${OUT_DIR:-${RUN_DIR}/constraints/viz_scene_collision_ref${REFINEMENT_STEPS}_w${SCENE_WEIGHT}}"
+OUT_DIR="${OUT_DIR:-${RUN_DIR}/constraints/viz_scene_adaptive_ref${REFINEMENT_STEPS}_w${SCENE_WEIGHT}}"
 
 echo "[momask-scene-viz] host=$(hostname)"
 echo "[momask-scene-viz] repo=${REPO}"
 echo "[momask-scene-viz] ckpt=${CKPT}"
 echo "[momask-scene-viz] samples=${SAMPLES} seeds=${SEEDS} out_dir=${OUT_DIR}"
 echo "[momask-scene-viz] refinement_steps=${REFINEMENT_STEPS} refinement_lr=${REFINEMENT_LR} collision=${SCENE_WEIGHT} peak=${SCENE_PEAK_WEIGHT}"
+echo "[momask-scene-viz] adaptive temp=${SCENE_PEAK_TEMPERATURE} growth=${SCENE_PENALTY_GROWTH} interval=${SCENE_PENALTY_INTERVAL} max_scale=${SCENE_MAX_PENALTY_SCALE} tolerance=${SCENE_VIOLATION_TOLERANCE} reg_floor=${SCENE_REGULARIZATION_FLOOR}"
 echo "[momask-scene-viz] room=${SCENE_ROOM_WIDTH}x${SCENE_ROOM_DEPTH}x${SCENE_ROOM_HEIGHT} obstacle=${SCENE_OBSTACLE_KIND}@(${SCENE_OBSTACLE_X},${SCENE_OBSTACLE_Y},${SCENE_OBSTACLE_Z})"
 
 SAMPLING_ARGS="--no-sample-tokens"
@@ -128,6 +135,12 @@ enroot start \
                     --refinement-lr ${REFINEMENT_LR} \
                     --scene-weight ${SCENE_WEIGHT} \
                     --scene-peak-weight ${SCENE_PEAK_WEIGHT} \
+                    --scene-peak-temperature ${SCENE_PEAK_TEMPERATURE} \
+                    --scene-penalty-growth ${SCENE_PENALTY_GROWTH} \
+                    --scene-penalty-interval ${SCENE_PENALTY_INTERVAL} \
+                    --scene-max-penalty-scale ${SCENE_MAX_PENALTY_SCALE} \
+                    --scene-violation-tolerance ${SCENE_VIOLATION_TOLERANCE} \
+                    --scene-regularization-floor ${SCENE_REGULARIZATION_FLOOR} \
                     --scene-root-weight ${SCENE_ROOT_WEIGHT} \
                     --latent-weight ${LATENT_WEIGHT} \
                     --dynamics-weight ${DYNAMICS_WEIGHT} \

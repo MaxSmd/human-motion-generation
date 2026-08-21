@@ -14,6 +14,7 @@ from momask.scene_constraints import (
     scene_clearance_violation_components,
     scene_clearance_violations,
     scene_geometry_loss,
+    scene_max_clearance_violation,
     scene_peak_violation_loss,
     scene_swept_clearance_violations,
 )
@@ -106,8 +107,33 @@ def test_swept_samples_detect_motion_that_tunnels_between_frames() -> None:
     assert scene_geometry_loss(joints, swept) > 0.0
     assert scene_peak_violation_loss(joints, frame_only) == 0.0
     assert scene_peak_violation_loss(joints, swept) > 0.0
+    assert scene_max_clearance_violation(joints, frame_only).max() == 0.0
+    assert scene_max_clearance_violation(joints, swept).max() > 0.0
     assert scene_swept_clearance_violations(joints, swept).max() > 0.0
     assert sample_swept_body_points(joints, 0, 3).shape == (1, 1, 3 * NUM_JOINTS, 3)
+
+
+def test_smooth_peak_loss_distributes_gradients_across_colliding_frames() -> None:
+    joints = _joints(time=2)
+    joints[:, 1, :, 0] = 0.05
+    joints.requires_grad_(True)
+    scene = RoomGeometryConstraint(
+        room_size=(6.0, 6.0, 3.0),
+        obstacles=(
+            SceneObstacle.box(center=(0.0, 1.0, 0.0), size=(0.5, 0.5, 0.5)),
+        ),
+        body_radius=0.0,
+        bone_samples=0,
+        swept_samples=0,
+    )
+
+    loss = scene_peak_violation_loss(joints, scene, temperature=0.01)
+    loss.backward()
+
+    assert joints.grad is not None
+    assert torch.isfinite(joints.grad).all()
+    assert joints.grad[:, 0].abs().sum() > 0.0
+    assert joints.grad[:, 1].abs().sum() > 0.0
 
 
 def test_scene_violation_components_identify_collision_source() -> None:
@@ -229,3 +255,87 @@ def test_latent_refinement_reduces_scene_penetration() -> None:
         "scene_initial_max_violation_m"
     ]
     assert model.scale.grad is None
+
+
+def test_adaptive_scene_penalty_grows_while_collision_remains() -> None:
+    model = _IdentityDecoder()
+    initial = torch.zeros(1, 1, H3D_FEATURE_DIM)
+    scene = RoomGeometryConstraint(
+        room_size=(6.0, 6.0, 3.0),
+        obstacles=(
+            SceneObstacle.box(center=(0.0, 0.0, 0.0), size=(2.0, 2.0, 2.0)),
+        ),
+        body_radius=0.0,
+        bone_samples=0,
+        swept_samples=0,
+    )
+
+    result = refine_motion_latents(
+        model,
+        initial,
+        mean=torch.zeros(H3D_FEATURE_DIM),
+        std=torch.ones(H3D_FEATURE_DIM),
+        target_len=1,
+        scene_constraint=scene,
+        config=LatentRefinementConfig(
+            steps=3,
+            learning_rate=1e-8,
+            scene_weight=1.0,
+            scene_peak_weight=1.0,
+            scene_penalty_growth=2.0,
+            scene_penalty_interval=1,
+            scene_max_penalty_scale=4.0,
+            scene_violation_tolerance=0.0,
+            scene_regularization_floor=0.2,
+            latent_weight=0.0,
+            dynamics_weight=0.0,
+            root_weight=0.0,
+            bone_weight=0.0,
+            max_delta_norm=0.001,
+            grad_clip_norm=10.0,
+        ),
+    )
+
+    assert result.metrics["scene_penalty_scale_final"] == 4.0
+    assert result.metrics["scene_regularization_scale_final"] == 0.2
+    assert result.metrics["scene_feasible_step"] == -1.0
+    assert result.metrics["scene_final_combined_max_violation_m"] > 0.0
+
+
+def test_scene_regularization_returns_after_feasibility() -> None:
+    model = _IdentityDecoder()
+    initial = torch.zeros(1, 1, H3D_FEATURE_DIM)
+    scene = RoomGeometryConstraint(
+        room_size=(100.0, 100.0, 100.0),
+        body_radius=0.0,
+        bone_samples=0,
+        swept_samples=0,
+    )
+
+    result = refine_motion_latents(
+        model,
+        initial,
+        mean=torch.zeros(H3D_FEATURE_DIM),
+        std=torch.ones(H3D_FEATURE_DIM),
+        target_len=1,
+        scene_constraint=scene,
+        config=LatentRefinementConfig(
+            steps=2,
+            learning_rate=0.01,
+            scene_weight=1.0,
+            scene_penalty_growth=2.0,
+            scene_penalty_interval=2,
+            scene_max_penalty_scale=4.0,
+            scene_regularization_floor=0.2,
+            latent_weight=0.0,
+            dynamics_weight=0.0,
+            root_weight=0.0,
+            bone_weight=0.0,
+            history_interval=1,
+        ),
+    )
+
+    assert result.metrics["scene_feasible_step"] == 0.0
+    assert result.metrics["scene_regularization_scale_final"] == 1.0
+    assert abs(result.history[0]["scene_regularization_scale"] - 0.6) < 1e-6
+    assert result.history[-1]["scene_regularization_scale"] == 1.0

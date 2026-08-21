@@ -24,6 +24,7 @@ from .scene_constraints import (
     place_joints_in_scene,
     scene_geometry_loss,
     scene_geometry_metrics,
+    scene_max_clearance_violation,
     scene_peak_violation_loss,
 )
 
@@ -934,6 +935,12 @@ class LatentRefinementConfig:
     parent_relative_weight: float = 1.0
     scene_weight: float = 1.0
     scene_peak_weight: float = 0.0
+    scene_peak_temperature: float = 0.01
+    scene_penalty_growth: float = 1.0
+    scene_penalty_interval: int = 50
+    scene_max_penalty_scale: float = 1.0
+    scene_violation_tolerance: float = 0.005
+    scene_regularization_floor: float = 1.0
 
     def __post_init__(self) -> None:
         if self.steps < 1:
@@ -953,6 +960,7 @@ class LatentRefinementConfig:
             "jerk_weight",
             "scene_weight",
             "scene_peak_weight",
+            "scene_violation_tolerance",
         ):
             if getattr(self, name) < 0.0:
                 raise ValueError(f"{name} must be non-negative")
@@ -966,6 +974,34 @@ class LatentRefinementConfig:
             raise ValueError("grad_clip_norm must be positive when supplied")
         if self.history_interval < 0:
             raise ValueError("history_interval must be non-negative")
+        if (
+            not math.isfinite(self.scene_peak_temperature)
+            or self.scene_peak_temperature <= 0.0
+        ):
+            raise ValueError("scene_peak_temperature must be positive")
+        if (
+            not math.isfinite(self.scene_penalty_growth)
+            or self.scene_penalty_growth < 1.0
+        ):
+            raise ValueError("scene_penalty_growth must be at least one")
+        if (
+            not isinstance(self.scene_penalty_interval, int)
+            or isinstance(self.scene_penalty_interval, bool)
+            or self.scene_penalty_interval < 1
+        ):
+            raise ValueError("scene_penalty_interval must be positive")
+        if (
+            not math.isfinite(self.scene_max_penalty_scale)
+            or self.scene_max_penalty_scale < 1.0
+        ):
+            raise ValueError("scene_max_penalty_scale must be at least one")
+        if not math.isfinite(self.scene_violation_tolerance):
+            raise ValueError("scene_violation_tolerance must be finite")
+        if (
+            not math.isfinite(self.scene_regularization_floor)
+            or not 0.0 <= self.scene_regularization_floor <= 1.0
+        ):
+            raise ValueError("scene_regularization_floor must be between zero and one")
 
 
 @dataclass
@@ -1205,6 +1241,15 @@ def refine_motion_latents(
         delta = torch.nn.Parameter(torch.zeros(z0.shape, device=z0.device, dtype=torch.float32))
         optimizer = torch.optim.Adam([delta], lr=config.learning_rate)
         history: list[dict[str, float]] = []
+        scene_penalty_scale = 1.0
+        scene_feasible_step: int | None = None
+        scene_restore_start: int | None = None
+        last_scene_max_violation = float("nan")
+        adaptive_scene_penalty = bool(
+            scene_constraint is not None
+            and config.scene_penalty_growth > 1.0
+            and config.scene_max_penalty_scale > 1.0
+        )
 
         with torch.enable_grad():
             for step_index in range(config.steps):
@@ -1256,6 +1301,48 @@ def refine_motion_latents(
                 ):
                     assert scene_transform is not None
                     scene_joints_current = place_joints_in_scene(joints, scene_transform)
+                if (
+                    scene_joints_current is not None
+                    and adaptive_scene_penalty
+                    and (
+                        step_index % config.scene_penalty_interval == 0
+                        or step_index + 1 == config.steps
+                    )
+                ):
+                    assert scene_constraint is not None
+                    with torch.no_grad():
+                        last_scene_max_violation = float(
+                            scene_max_clearance_violation(
+                                scene_joints_current,
+                                scene_constraint,
+                                valid_frames,
+                            ).max().cpu()
+                        )
+                    if last_scene_max_violation <= config.scene_violation_tolerance:
+                        if scene_feasible_step is None:
+                            scene_feasible_step = step_index
+                        if scene_restore_start is None:
+                            scene_restore_start = step_index
+                    else:
+                        scene_restore_start = None
+                        if step_index > 0:
+                            scene_penalty_scale = min(
+                                scene_penalty_scale * config.scene_penalty_growth,
+                                config.scene_max_penalty_scale,
+                            )
+                if not adaptive_scene_penalty:
+                    scene_regularization_scale = 1.0
+                elif scene_restore_start is None:
+                    scene_regularization_scale = config.scene_regularization_floor
+                else:
+                    ramp = min(
+                        (step_index - scene_restore_start + 1)
+                        / config.scene_penalty_interval,
+                        1.0,
+                    )
+                    scene_regularization_scale = config.scene_regularization_floor + (
+                        1.0 - config.scene_regularization_floor
+                    ) * ramp
                 if scene_constraint is not None and config.scene_weight > 0.0:
                     assert scene_joints_current is not None
                     losses["scene"] = scene_geometry_loss(
@@ -1269,6 +1356,7 @@ def refine_motion_latents(
                         scene_joints_current,
                         scene_constraint,
                         valid_frames,
+                        temperature=config.scene_peak_temperature,
                     )
                 if config.latent_weight > 0.0:
                     latent_error = masked_delta.pow(2).sum(dim=-1)
@@ -1298,14 +1386,30 @@ def refine_motion_latents(
                     + config.torso_relative_weight * losses.get("torso_relative", zero)
                     + config.parent_relative_weight * losses.get("parent_relative", zero)
                     + config.angle_weight * losses.get("angle", zero)
-                    + config.latent_weight * losses.get("latent", zero)
-                    + config.dynamics_weight * losses.get("dynamics", zero)
-                    + config.root_weight * losses.get("root", zero)
-                    + config.bone_weight * losses.get("bone", zero)
-                    + config.foot_skate_weight * losses.get("foot_skate", zero)
-                    + config.jerk_weight * losses.get("jerk", zero)
-                    + config.scene_weight * losses.get("scene", zero)
-                    + config.scene_peak_weight * losses.get("scene_peak", zero)
+                    + scene_regularization_scale
+                    * config.latent_weight
+                    * losses.get("latent", zero)
+                    + scene_regularization_scale
+                    * config.dynamics_weight
+                    * losses.get("dynamics", zero)
+                    + scene_regularization_scale
+                    * config.root_weight
+                    * losses.get("root", zero)
+                    + scene_regularization_scale
+                    * config.bone_weight
+                    * losses.get("bone", zero)
+                    + scene_regularization_scale
+                    * config.foot_skate_weight
+                    * losses.get("foot_skate", zero)
+                    + scene_regularization_scale
+                    * config.jerk_weight
+                    * losses.get("jerk", zero)
+                    + scene_penalty_scale
+                    * config.scene_weight
+                    * losses.get("scene", zero)
+                    + scene_penalty_scale
+                    * config.scene_peak_weight
+                    * losses.get("scene_peak", zero)
                 )
                 if not bool(torch.isfinite(total)):
                     raise FloatingPointError("non-finite loss during MoMask latent refinement")
@@ -1333,6 +1437,11 @@ def refine_motion_latents(
                             name: float(value.detach().cpu()) for name, value in losses.items()
                         }
                         record["total"] = float(total.detach().cpu())
+                        if scene_constraint is not None:
+                            record["scene_penalty_scale"] = scene_penalty_scale
+                            record["scene_regularization_scale"] = scene_regularization_scale
+                            if math.isfinite(last_scene_max_violation):
+                                record["scene_max_violation_m"] = last_scene_max_violation
                         history.append(record)
 
         with torch.no_grad():
@@ -1413,6 +1522,21 @@ def refine_motion_latents(
                     final_scene_joints, scene_constraint, valid_frames
                 ).items():
                     metrics[f"scene_final_{key}"] = value
+                metrics["scene_initial_combined_max_violation_m"] = float(
+                    scene_max_clearance_violation(
+                        initial_scene_joints, scene_constraint, valid_frames
+                    ).max().cpu()
+                )
+                metrics["scene_final_combined_max_violation_m"] = float(
+                    scene_max_clearance_violation(
+                        final_scene_joints, scene_constraint, valid_frames
+                    ).max().cpu()
+                )
+                metrics["scene_penalty_scale_final"] = scene_penalty_scale
+                metrics["scene_regularization_scale_final"] = scene_regularization_scale
+                metrics["scene_feasible_step"] = float(
+                    -1 if scene_feasible_step is None else scene_feasible_step
+                )
             valid_delta = delta[token_valid]
             metrics["latent_delta_rms"] = float(valid_delta.pow(2).mean().sqrt().cpu())
         return LatentRefinementResult(
