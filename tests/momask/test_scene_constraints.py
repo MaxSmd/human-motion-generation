@@ -10,6 +10,7 @@ from momask.scene_constraints import (
     build_scene_transform,
     place_joints_in_scene,
     sample_body_points,
+    scene_clearance_violation_components,
     scene_clearance_violations,
     scene_geometry_loss,
 )
@@ -78,6 +79,29 @@ def test_scene_loss_ignores_padded_frames() -> None:
     assert scene_geometry_loss(joints, scene, mask) == 0.0
 
 
+def test_scene_violation_components_identify_collision_source() -> None:
+    obstacle = SceneObstacle.box(center=(0.0, 1.0, 0.0), size=(0.5, 0.5, 0.5))
+    scene = RoomGeometryConstraint(
+        room_size=(4.0, 4.0, 3.0),
+        obstacles=(obstacle,),
+        body_radius=0.0,
+        bone_samples=0,
+    )
+    joints = _joints(time=4)
+    joints[:, 0] = torch.tensor([0.0, 1.0, 0.0])
+    joints[:, 1] = torch.tensor([0.0, -0.2, 1.0])
+    joints[:, 2] = torch.tensor([2.2, 1.0, 1.0])
+    joints[:, 3] = torch.tensor([0.0, 3.2, 1.0])
+
+    components = scene_clearance_violation_components(joints, scene)
+
+    assert components["obstacle"][:, 0].max() > 0.0
+    assert components["floor"][:, 1].max() > 0.0
+    assert components["wall"][:, 2].max() > 0.0
+    assert components["ceiling"][:, 3].max() > 0.0
+    assert torch.all(components["combined"] >= components["obstacle"])
+
+
 def test_cylinder_center_has_a_finite_escape_gradient() -> None:
     joints = _joints(time=1).requires_grad_(True)
     scene = RoomGeometryConstraint(
@@ -122,6 +146,9 @@ def test_dataset_scene_statistics_are_weighted_by_frames_and_body_points() -> No
     assert summary["scene_mean_violation_m"] == 1.0
     assert summary["scene_violating_point_fraction"] == 1.0 / (4 * NUM_JOINTS)
     assert summary["scene_colliding_frame_fraction"] == 0.25
+    assert summary["scene_wall_max_violation_m"] == 1.0
+    assert summary["scene_wall_colliding_frame_fraction"] == 0.25
+    assert summary["scene_obstacle_colliding_frame_fraction"] == 0.0
 
 
 class _IdentityDecoder(nn.Module):

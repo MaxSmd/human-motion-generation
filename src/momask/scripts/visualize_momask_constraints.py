@@ -23,6 +23,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import torch
 from matplotlib.animation import FuncAnimation, PillowWriter
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from torch import Tensor
 
 from momask.models import (
@@ -43,10 +44,17 @@ from momask.constraints import (
     refine_motion_latents,
 )
 from momask.data_utils import normalize_motion, token_mask_from_frame_mask
+from momask.scene_constraints import (
+    RoomGeometryConstraint,
+    SceneObstacle,
+    sample_body_points,
+    scene_clearance_violation_components,
+)
 from momask.scripts.evaluate_momask_constraints import (
     angle_triplets_from_centers,
     build_angle_constraint,
     build_joint_constraint,
+    build_scene_constraint,
     parse_csv_ints,
 )
 from shared.data import H3D263Dataset, collate
@@ -105,6 +113,7 @@ def parse_args() -> argparse.Namespace:
             "angle",
             "joint-angle",
             "body-fixed",
+            "scene",
             "all",
         ],
         default="both",
@@ -138,6 +147,30 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--bone-weight", type=float, default=0.1)
     p.add_argument("--max-delta-norm", type=float, default=1.0)
     p.add_argument("--grad-clip-norm", type=float, default=1.0)
+    p.add_argument("--scene-weight", type=float, default=10.0)
+    p.add_argument("--scene-root-weight", type=float, default=0.0)
+    p.add_argument("--scene-room-width", type=float, default=6.0)
+    p.add_argument("--scene-room-depth", type=float, default=8.0)
+    p.add_argument("--scene-room-height", type=float, default=3.0)
+    p.add_argument("--scene-spawn-x", type=float, default=0.0)
+    p.add_argument("--scene-spawn-z", type=float, default=-2.0)
+    p.add_argument("--scene-spawn-yaw", type=float, default=0.0)
+    p.add_argument("--scene-padding", type=float, default=0.02)
+    p.add_argument("--scene-body-radius", type=float, default=0.05)
+    p.add_argument("--scene-bone-samples", type=int, default=2)
+    p.add_argument(
+        "--scene-obstacle-kind",
+        choices=["box", "sphere", "cylinder"],
+        default="box",
+    )
+    p.add_argument("--scene-obstacle-x", type=float, default=0.0)
+    p.add_argument("--scene-obstacle-y", type=float, default=0.5)
+    p.add_argument("--scene-obstacle-z", type=float, default=-1.0)
+    p.add_argument("--scene-obstacle-width", type=float, default=1.0)
+    p.add_argument("--scene-obstacle-height", type=float, default=1.0)
+    p.add_argument("--scene-obstacle-depth", type=float, default=0.4)
+    p.add_argument("--scene-obstacle-radius", type=float, default=0.4)
+    p.add_argument("--scene-obstacle-yaw", type=float, default=0.0)
     p.add_argument("--real-h3d-dir", default=None)
     p.add_argument("--model-input-source", choices=["auto", "packed", "canonical"], default="auto")
     p.add_argument("--auto-sample-moving", type=int, default=0)
@@ -741,6 +774,371 @@ def draw_control_error_frame(
     ax.grid(True, axis="x", linewidth=0.7, alpha=0.35)
 
 
+def _draw_scene_box(ax, obstacle: SceneObstacle) -> None:
+    assert obstacle.size is not None
+    width, height, depth = obstacle.size
+    local = np.array(
+        [
+            [sx * width / 2.0, sy * height / 2.0, sz * depth / 2.0]
+            for sx in (-1.0, 1.0)
+            for sy in (-1.0, 1.0)
+            for sz in (-1.0, 1.0)
+        ],
+        dtype=np.float32,
+    )
+    yaw = math.radians(obstacle.yaw_degrees)
+    c, s = math.cos(yaw), math.sin(yaw)
+    x = c * local[:, 0] + s * local[:, 2]
+    z = -s * local[:, 0] + c * local[:, 2]
+    center = np.asarray(obstacle.center, dtype=np.float32)
+    world = np.stack((x, local[:, 1], z), axis=-1) + center
+    faces = [
+        [0, 1, 3, 2],
+        [4, 5, 7, 6],
+        [0, 1, 5, 4],
+        [2, 3, 7, 6],
+        [0, 2, 6, 4],
+        [1, 3, 7, 5],
+    ]
+    vertices = [
+        [(world[i, 0], world[i, 2], world[i, 1]) for i in face] for face in faces
+    ]
+    ax.add_collection3d(
+        Poly3DCollection(
+            vertices,
+            facecolors="#f59e0b",
+            edgecolors="#92400e",
+            linewidths=1.1,
+            alpha=0.38,
+        )
+    )
+
+
+def _draw_scene_obstacle(ax, obstacle: SceneObstacle) -> None:
+    if obstacle.kind == "box":
+        _draw_scene_box(ax, obstacle)
+        return
+    center_x, center_y, center_z = obstacle.center
+    if obstacle.kind == "sphere":
+        assert obstacle.radius is not None
+        azimuth = np.linspace(0.0, 2.0 * np.pi, 24)
+        polar = np.linspace(0.0, np.pi, 14)
+        x = center_x + obstacle.radius * np.outer(np.cos(azimuth), np.sin(polar))
+        z = center_z + obstacle.radius * np.outer(np.sin(azimuth), np.sin(polar))
+        y = center_y + obstacle.radius * np.outer(np.ones_like(azimuth), np.cos(polar))
+    else:
+        assert obstacle.radius is not None and obstacle.height is not None
+        azimuth = np.linspace(0.0, 2.0 * np.pi, 24)
+        vertical = np.linspace(-obstacle.height / 2.0, obstacle.height / 2.0, 8)
+        x = center_x + obstacle.radius * np.outer(np.cos(azimuth), np.ones_like(vertical))
+        z = center_z + obstacle.radius * np.outer(np.sin(azimuth), np.ones_like(vertical))
+        y = center_y + np.outer(np.ones_like(azimuth), vertical)
+    ax.plot_surface(x, z, y, color="#f59e0b", edgecolor="#92400e", alpha=0.38)
+
+
+def draw_scene_geometry(ax, constraint: RoomGeometryConstraint) -> None:
+    width, depth, height = constraint.room_size
+    half_w, half_d = width / 2.0, depth / 2.0
+    floor = [
+        [
+            (-half_w, -half_d, 0.0),
+            (half_w, -half_d, 0.0),
+            (half_w, half_d, 0.0),
+            (-half_w, half_d, 0.0),
+        ]
+    ]
+    ax.add_collection3d(
+        Poly3DCollection(
+            floor,
+            facecolors="#e5e7eb",
+            edgecolors="#6b7280",
+            linewidths=0.9,
+            alpha=0.18,
+        )
+    )
+    corners = [
+        (x, z, y)
+        for x in (-half_w, half_w)
+        for z in (-half_d, half_d)
+        for y in (0.0, height)
+    ]
+    for start, end in (
+        (0, 1),
+        (2, 3),
+        (4, 5),
+        (6, 7),
+        (0, 2),
+        (1, 3),
+        (4, 6),
+        (5, 7),
+        (0, 4),
+        (1, 5),
+        (2, 6),
+        (3, 7),
+    ):
+        ax.plot(
+            [corners[start][0], corners[end][0]],
+            [corners[start][1], corners[end][1]],
+            [corners[start][2], corners[end][2]],
+            color="#9ca3af",
+            linewidth=0.8,
+            alpha=0.55,
+        )
+    for obstacle in constraint.obstacles:
+        _draw_scene_obstacle(ax, obstacle)
+
+
+def scene_axis_limits(
+    series: list[tuple[str, Tensor]], constraint: RoomGeometryConstraint
+) -> tuple[tuple[float, float], tuple[float, float], tuple[float, float]]:
+    width, depth, height = constraint.room_size
+    points = torch.cat([joints.reshape(-1, 3) for _, joints in series], dim=0)
+    margin = 0.3
+    xlim = (
+        min(-width / 2.0, float(points[:, 0].min())) - margin,
+        max(width / 2.0, float(points[:, 0].max())) + margin,
+    )
+    zlim = (
+        min(-depth / 2.0, float(points[:, 2].min())) - margin,
+        max(depth / 2.0, float(points[:, 2].max())) + margin,
+    )
+    ylim = (
+        min(0.0, float(points[:, 1].min())) - 0.15,
+        max(height, float(points[:, 1].max())) + 0.15,
+    )
+    return xlim, zlim, ylim
+
+
+def draw_scene_pose_frame(
+    ax,
+    *,
+    name: str,
+    joints_seq: Tensor,
+    body_points: Tensor,
+    components: dict[str, Tensor],
+    constraint: RoomGeometryConstraint,
+    limits: tuple[tuple[float, float], tuple[float, float], tuple[float, float]],
+    frame: int,
+) -> None:
+    ax.cla()
+    draw_scene_geometry(ax, constraint)
+    joints = joints_seq[frame]
+    for joint, parent in enumerate(PARENTS):
+        if parent < 0:
+            continue
+        ax.plot(
+            [joints[parent, 0], joints[joint, 0]],
+            [joints[parent, 2], joints[joint, 2]],
+            [joints[parent, 1], joints[joint, 1]],
+            color="#2563eb",
+            linewidth=2.4,
+            alpha=0.95,
+        )
+    points = body_points[frame]
+    violation = components["combined"][frame]
+    colliding = violation > 0.0
+    clear = ~colliding
+    if bool(clear.any()):
+        safe_points = points[clear]
+        ax.scatter(
+            safe_points[:, 0],
+            safe_points[:, 2],
+            safe_points[:, 1],
+            color="#60a5fa",
+            s=10,
+            alpha=0.55,
+            depthshade=False,
+            label="clear body samples",
+        )
+    if bool(colliding.any()):
+        collision_points = points[colliding]
+        ax.scatter(
+            collision_points[:, 0],
+            collision_points[:, 2],
+            collision_points[:, 1],
+            color="#dc2626",
+            edgecolor="white",
+            linewidth=0.6,
+            s=48,
+            depthshade=False,
+            label="colliding body samples",
+        )
+    root_path = joints_seq[:, 0][:, [0, 2]]
+    ax.plot(
+        root_path[: frame + 1, 0],
+        root_path[: frame + 1, 1],
+        torch.zeros(frame + 1),
+        color="#111827",
+        linewidth=2.0,
+        alpha=0.8,
+    )
+    source_values = {
+        source: float(values[frame].max())
+        for source, values in components.items()
+        if source != "combined" and float(values[frame].max()) > 0.0
+    }
+    source_text = ", ".join(
+        f"{source} {value * 100:.1f} cm"
+        for source, value in source_values.items()
+    )
+    if not source_text:
+        source_text = "clear"
+    ax.set_title(
+        f"{name} | frame {frame}\n"
+        f"max {float(violation.max()) * 100:.1f} cm | "
+        f"points {int(colliding.sum())}/{points.shape[0]} | {source_text}",
+        pad=12,
+    )
+    ax.set_xlabel("Scene X (m)")
+    ax.set_ylabel("Scene Z (m)")
+    ax.set_zlabel("Height Y (m)")
+    ax.set_xlim(*limits[0])
+    ax.set_ylim(*limits[1])
+    ax.set_zlim(*limits[2])
+    ax.grid(True, linewidth=0.7, alpha=0.4)
+    ax.view_init(elev=20, azim=-68)
+    try:
+        ax.set_box_aspect(
+            (
+                limits[0][1] - limits[0][0],
+                limits[1][1] - limits[1][0],
+                limits[2][1] - limits[2][0],
+            )
+        )
+    except AttributeError:
+        pass
+
+
+def draw_scene_violation_frame(
+    ax,
+    *,
+    name: str,
+    components: dict[str, Tensor],
+    frame: int,
+    ymax_cm: float,
+) -> None:
+    ax.cla()
+    colors = {
+        "combined": "#111827",
+        "obstacle": "#f59e0b",
+        "floor": "#16a34a",
+        "wall": "#2563eb",
+        "ceiling": "#7c3aed",
+    }
+    frames = np.arange(components["combined"].shape[0])
+    for source in ("combined", "obstacle", "floor", "wall", "ceiling"):
+        values = components[source].amax(dim=-1).numpy() * 100.0
+        ax.plot(
+            frames,
+            values,
+            color=colors[source],
+            linewidth=2.2 if source == "combined" else 1.4,
+            alpha=0.95 if source == "combined" else 0.75,
+            label=source,
+        )
+    ax.axvline(frame, color="#dc2626", linewidth=1.2, alpha=0.85)
+    ax.set_xlim(0, max(1, len(frames) - 1))
+    ax.set_ylim(0.0, ymax_cm)
+    ax.set_xlabel("Frame")
+    ax.set_ylabel("Maximum penetration (cm)")
+    ax.set_title(f"{name}: collision source", fontsize=11)
+    ax.grid(True, linewidth=0.7, alpha=0.35)
+    ax.legend(loc="upper right", fontsize=8, ncol=2, framealpha=0.9)
+
+
+def render_scene_constraint_comparison(
+    *,
+    series: list[tuple[str, Tensor]],
+    constraint: RoomGeometryConstraint,
+    prompt: str,
+    sample_idx: int,
+    seed: int,
+    fps: int,
+    out_dir: Path,
+) -> None:
+    diagnostics = []
+    for _, joints in series:
+        diagnostics.append(
+            (
+                sample_body_points(joints.unsqueeze(0), constraint.bone_samples)[0],
+                {
+                    key: value[0].detach().cpu()
+                    for key, value in scene_clearance_violation_components(
+                        joints.unsqueeze(0), constraint
+                    ).items()
+                },
+            )
+        )
+    limits = scene_axis_limits(series, constraint)
+    ymax_cm = max(
+        [float(components["combined"].max()) * 100.0 for _, components in diagnostics]
+        + [5.0]
+    ) * 1.15
+    n_cols = len(series)
+    fig = plt.figure(figsize=(max(14.0, 7.0 * n_cols), 10.2))
+    obstacle_description = ", ".join(
+        f"{obstacle.kind} at ({obstacle.center[0]:g}, {obstacle.center[1]:g}, "
+        f"{obstacle.center[2]:g})"
+        for obstacle in constraint.obstacles
+    ) or "no obstacle"
+    title = (
+        f"Sample {sample_idx} | Seed {seed} | Prompt: {prompt}\n"
+        f"Scene constraint (not part of the text): avoid {obstacle_description}; "
+        "red points violate clearance."
+    )
+    fig.suptitle(
+        "\n".join(textwrap.wrap(title, width=150)),
+        fontsize=14,
+        fontweight="semibold",
+        y=0.985,
+    )
+    grid = fig.add_gridspec(2, n_cols, height_ratios=[2.4, 1.0], hspace=0.24, wspace=0.2)
+    pose_axes = [fig.add_subplot(grid[0, col], projection="3d") for col in range(n_cols)]
+    metric_axes = [fig.add_subplot(grid[1, col]) for col in range(n_cols)]
+    fig.subplots_adjust(top=0.84, left=0.055, right=0.97, bottom=0.08)
+
+    def update(frame: int):
+        for index, ((name, joints), (points, components)) in enumerate(
+            zip(series, diagnostics)
+        ):
+            draw_scene_pose_frame(
+                pose_axes[index],
+                name=name,
+                joints_seq=joints,
+                body_points=points,
+                components=components,
+                constraint=constraint,
+                limits=limits,
+                frame=frame,
+            )
+            draw_scene_violation_frame(
+                metric_axes[index],
+                name=name,
+                components=components,
+                frame=frame,
+                ymax_cm=ymax_cm,
+            )
+        return []
+
+    snapshot_frame = int(diagnostics[0][1]["combined"].amax(dim=-1).argmax())
+    update(snapshot_frame)
+    prefix = f"scene_constraint_sample_{sample_idx:04d}_seed{seed:03d}"
+    png = out_dir / f"{prefix}_frame{snapshot_frame:04d}.png"
+    gif = out_dir / f"{prefix}.gif"
+    fig.savefig(png, dpi=150, bbox_inches="tight")
+    animation = FuncAnimation(
+        fig,
+        update,
+        frames=series[0][1].shape[0],
+        interval=1000 / fps,
+        blit=False,
+    )
+    animation.save(gif, writer=PillowWriter(fps=fps))
+    plt.close(fig)
+    print(f"[constraints-viz] wrote {png}")
+    print(f"[constraints-viz] wrote {gif}")
+
+
 def render_latent_constraint_comparison(
     *,
     series: list[tuple[str, Tensor, Tensor | None]],
@@ -961,8 +1359,9 @@ def main() -> None:
     latent_joint = args.constraint_variant in {"joint", "joint-angle", "all"}
     latent_angle = args.constraint_variant in {"angle", "joint-angle", "all"}
     latent_body_fixed = args.constraint_variant in {"body-fixed", "all"}
+    latent_scene = args.constraint_variant in {"scene", "all"}
     trajectory_mode = args.constraint_variant in {"projected", "vq", "both", "all"}
-    if latent_joint or latent_angle or latent_body_fixed:
+    if latent_joint or latent_angle or latent_body_fixed or latent_scene:
         joint_ids = parse_csv_ints(args.joint_ids, name="--joint-ids") if latent_joint else []
         angle_centers = parse_csv_ints(args.angle_joints, name="--angle-joints") if latent_angle else []
         body_fixed_joint_ids = (
@@ -970,6 +1369,7 @@ def main() -> None:
             if latent_body_fixed
             else []
         )
+        scene_constraint = build_scene_constraint(args) if latent_scene else None
         triplets = angle_triplets_from_centers(angle_centers, device) if latent_angle else None
         decoded_length = int(
             (token_mask[0].sum() * vqvae.downsample).clamp(max=length).item()
@@ -997,6 +1397,7 @@ def main() -> None:
         joint_motion: Tensor | None = None
         angle_motion: Tensor | None = None
         body_fixed_motion: Tensor | None = None
+        scene_result = None
         if latent_joint:
             position_constraint = build_joint_constraint(
                 real.unsqueeze(0),
@@ -1097,6 +1498,37 @@ def main() -> None:
             body_fixed_motion = body_fixed_result.motion
             print(
                 f"[constraints-viz] body-fixed refinement metrics={body_fixed_result.metrics}",
+                flush=True,
+            )
+        if latent_scene:
+            assert scene_constraint is not None
+            scene_result = refine_motion_latents(
+                vqvae,
+                initial_latents,
+                mean=normalizer.mean,
+                std=normalizer.std,
+                target_len=length,
+                token_mask=token_mask,
+                frame_mask=constraint_frame_mask,
+                scene_constraint=scene_constraint,
+                config=LatentRefinementConfig(
+                    steps=args.refinement_steps,
+                    learning_rate=args.refinement_lr,
+                    position_weight=0.0,
+                    torso_relative_weight=0.0,
+                    parent_relative_weight=0.0,
+                    angle_weight=0.0,
+                    scene_weight=args.scene_weight,
+                    latent_weight=args.latent_weight,
+                    dynamics_weight=args.dynamics_weight,
+                    root_weight=args.scene_root_weight,
+                    bone_weight=args.bone_weight,
+                    max_delta_norm=args.max_delta_norm,
+                    grad_clip_norm=args.grad_clip_norm,
+                ),
+            )
+            print(
+                f"[constraints-viz] scene refinement metrics={scene_result.metrics}",
                 flush=True,
             )
 
@@ -1210,6 +1642,29 @@ def main() -> None:
                 ),
                 dense_constraint=True,
                 output_prefix=args.body_output_prefix,
+                prompt=text,
+                sample_idx=sample_idx,
+                seed=args.seed,
+                fps=args.fps,
+                out_dir=out_dir,
+            )
+
+        if scene_result is not None:
+            assert scene_constraint is not None
+            assert scene_result.initial_scene_joints is not None
+            assert scene_result.scene_joints is not None
+            render_scene_constraint_comparison(
+                series=[
+                    (
+                        "unconstrained generation",
+                        scene_result.initial_scene_joints[0, :decoded_length].detach().cpu(),
+                    ),
+                    (
+                        "scene-constrained generation",
+                        scene_result.scene_joints[0, :decoded_length].detach().cpu(),
+                    ),
+                ],
+                constraint=scene_constraint,
                 prompt=text,
                 sample_idx=sample_idx,
                 seed=args.seed,

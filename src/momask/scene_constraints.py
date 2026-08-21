@@ -290,26 +290,44 @@ def _obstacle_sdf(points: Tensor, obstacle: SceneObstacle) -> Tensor:
     return outside + torch.maximum(radial, vertical).clamp_max(0.0)
 
 
-def scene_clearance_violations(
+def scene_clearance_violation_components(
     joints_world: Tensor,
     constraint: RoomGeometryConstraint,
-) -> Tensor:
-    """Return per-body-point clearance violation in metres."""
+) -> dict[str, Tensor]:
+    """Return combined and source-specific body-point violations in metres."""
 
     points = sample_body_points(joints_world, constraint.bone_samples)
     width, depth, height = constraint.room_size
     clearance = constraint.padding + constraint.body_radius
     wall_x = (points[..., 0].abs() + clearance - width / 2.0).clamp_min(0.0)
     wall_z = (points[..., 2].abs() + clearance - depth / 2.0).clamp_min(0.0)
+    wall = torch.linalg.vector_norm(torch.stack((wall_x, wall_z), dim=-1), dim=-1)
     ceiling = (points[..., 1] + clearance - height).clamp_min(0.0)
+    # The floor is a contact surface, so body-radius clearance is not applied.
     floor = (-points[..., 1]).clamp_min(0.0)
-    violation = torch.linalg.vector_norm(
+    room = torch.linalg.vector_norm(
         torch.stack((wall_x, wall_z, ceiling, floor), dim=-1), dim=-1
     )
+    obstacle_violation = torch.zeros_like(room)
     for obstacle in constraint.obstacles:
-        obstacle_violation = (clearance - _obstacle_sdf(points, obstacle)).clamp_min(0.0)
-        violation = torch.maximum(violation, obstacle_violation)
-    return violation
+        current = (clearance - _obstacle_sdf(points, obstacle)).clamp_min(0.0)
+        obstacle_violation = torch.maximum(obstacle_violation, current)
+    return {
+        "combined": torch.maximum(room, obstacle_violation),
+        "obstacle": obstacle_violation,
+        "floor": floor,
+        "wall": wall,
+        "ceiling": ceiling,
+    }
+
+
+def scene_clearance_violations(
+    joints_world: Tensor,
+    constraint: RoomGeometryConstraint,
+) -> Tensor:
+    """Return per-body-point clearance violation in metres."""
+
+    return scene_clearance_violation_components(joints_world, constraint)["combined"]
 
 
 def scene_geometry_loss(
@@ -339,7 +357,8 @@ def scene_geometry_metrics(
 ) -> dict[str, float]:
     """Clearance magnitude and collision rates for one batch."""
 
-    violation = scene_clearance_violations(joints_world, constraint)
+    components = scene_clearance_violation_components(joints_world, constraint)
+    violation = components["combined"]
     valid_frames = (
         torch.ones(violation.shape[:2], dtype=torch.bool, device=violation.device)
         if frame_mask is None
@@ -348,16 +367,29 @@ def scene_geometry_metrics(
     if valid_frames.shape != violation.shape[:2]:
         raise ValueError("scene frame_mask must match the joint batch/time dimensions")
     valid_points = valid_frames.unsqueeze(-1).expand_as(violation)
-    active = violation[valid_points]
-    positive = active[active > 0.0]
-    colliding_frames = (violation > 0.0).any(dim=-1) & valid_frames
-    return {
-        "max_violation_m": float(active.max().cpu()) if active.numel() else 0.0,
-        "mean_violation_m": float(positive.mean().cpu()) if positive.numel() else 0.0,
-        "violating_point_fraction": float((active > 0.0).float().mean().cpu())
-        if active.numel()
-        else 0.0,
-        "colliding_frame_fraction": float(
-            colliding_frames.sum().float().cpu() / valid_frames.sum().clamp_min(1).cpu()
-        ),
-    }
+
+    def summarize(values: Tensor) -> dict[str, float]:
+        active = values[valid_points]
+        positive = active[active > 0.0]
+        colliding_frames = (values > 0.0).any(dim=-1) & valid_frames
+        return {
+            "max_violation_m": float(active.max().cpu()) if active.numel() else 0.0,
+            "mean_violation_m": float(positive.mean().cpu()) if positive.numel() else 0.0,
+            "violating_point_fraction": float((active > 0.0).float().mean().cpu())
+            if active.numel()
+            else 0.0,
+            "colliding_frame_fraction": float(
+                colliding_frames.sum().float().cpu()
+                / valid_frames.sum().clamp_min(1).cpu()
+            ),
+        }
+
+    result = summarize(violation)
+    for source in ("obstacle", "floor", "wall", "ceiling"):
+        result.update(
+            {
+                f"{source}_{key}": value
+                for key, value in summarize(components[source]).items()
+            }
+        )
+    return result

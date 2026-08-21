@@ -55,7 +55,7 @@ from momask.data_utils import normalize_motion, token_mask_from_frame_mask
 from momask.scene_constraints import (
     RoomGeometryConstraint,
     SceneObstacle,
-    scene_clearance_violations,
+    scene_clearance_violation_components,
 )
 from shared.data import H3D263Dataset, collate
 from shared.text import CLIPTextEncoder, RandomTextEncoder, TextEncoder
@@ -722,49 +722,71 @@ def accumulate_scene_statistics(
     constraint: RoomGeometryConstraint,
     frame_mask: Tensor,
 ) -> None:
-    violation = scene_clearance_violations(joints_world, constraint)
-    valid_frames = frame_mask.to(device=violation.device, dtype=torch.bool)
-    if valid_frames.shape != violation.shape[:2]:
+    components = scene_clearance_violation_components(joints_world, constraint)
+    valid_frames = frame_mask.to(device=joints_world.device, dtype=torch.bool)
+    if valid_frames.shape != joints_world.shape[:2]:
         raise ValueError("scene frame mask must match scene joints")
-    valid_points = valid_frames.unsqueeze(-1).expand_as(violation)
-    values = violation[valid_points]
-    positive = values > 0.0
-    colliding_frames = (violation > 0.0).any(dim=-1) & valid_frames
-    total["scene_max_violation_m"] = max(
-        total.get("scene_max_violation_m", 0.0),
-        float(values.max().cpu()) if values.numel() else 0.0,
-    )
-    total["scene_violation_sum_m"] = total.get("scene_violation_sum_m", 0.0) + float(
-        values[positive].sum().cpu()
-    )
-    total["scene_violating_point_count"] = total.get(
-        "scene_violating_point_count", 0.0
-    ) + float(positive.sum().cpu())
-    total["scene_valid_point_count"] = total.get("scene_valid_point_count", 0.0) + float(
-        values.numel()
-    )
-    total["scene_colliding_frame_count"] = total.get(
-        "scene_colliding_frame_count", 0.0
-    ) + float(colliding_frames.sum().cpu())
-    total["scene_valid_frame_count"] = total.get("scene_valid_frame_count", 0.0) + float(
-        valid_frames.sum().cpu()
-    )
+
+    for source, violation in components.items():
+        prefix = "scene" if source == "combined" else f"scene_{source}"
+        valid_points = valid_frames.unsqueeze(-1).expand_as(violation)
+        values = violation[valid_points]
+        positive = values > 0.0
+        colliding_frames = (violation > 0.0).any(dim=-1) & valid_frames
+        total[f"{prefix}_max_violation_m"] = max(
+            total.get(f"{prefix}_max_violation_m", 0.0),
+            float(values.max().cpu()) if values.numel() else 0.0,
+        )
+        total[f"{prefix}_violation_sum_m"] = total.get(
+            f"{prefix}_violation_sum_m", 0.0
+        ) + float(values[positive].sum().cpu())
+        total[f"{prefix}_violating_point_count"] = total.get(
+            f"{prefix}_violating_point_count", 0.0
+        ) + float(positive.sum().cpu())
+        total[f"{prefix}_valid_point_count"] = total.get(
+            f"{prefix}_valid_point_count", 0.0
+        ) + float(values.numel())
+        total[f"{prefix}_colliding_frame_count"] = total.get(
+            f"{prefix}_colliding_frame_count", 0.0
+        ) + float(colliding_frames.sum().cpu())
+        total[f"{prefix}_valid_frame_count"] = total.get(
+            f"{prefix}_valid_frame_count", 0.0
+        ) + float(valid_frames.sum().cpu())
 
 
 def summarize_scene_statistics(stats: dict[str, float]) -> dict[str, float]:
-    valid_points = stats.get("scene_valid_point_count", 0.0)
-    valid_frames = stats.get("scene_valid_frame_count", 0.0)
-    if valid_points <= 0.0 or valid_frames <= 0.0:
-        return {}
-    return {
-        "scene_max_violation_m": stats.get("scene_max_violation_m", 0.0),
-        "scene_mean_violation_m": stats.get("scene_violation_sum_m", 0.0)
-        / max(stats.get("scene_violating_point_count", 0.0), 1.0),
-        "scene_violating_point_fraction": stats.get("scene_violating_point_count", 0.0)
-        / valid_points,
-        "scene_colliding_frame_fraction": stats.get("scene_colliding_frame_count", 0.0)
-        / valid_frames,
-    }
+    result: dict[str, float] = {}
+    for prefix in (
+        "scene",
+        "scene_obstacle",
+        "scene_floor",
+        "scene_wall",
+        "scene_ceiling",
+    ):
+        valid_points = stats.get(f"{prefix}_valid_point_count", 0.0)
+        valid_frames = stats.get(f"{prefix}_valid_frame_count", 0.0)
+        if valid_points <= 0.0 or valid_frames <= 0.0:
+            continue
+        result.update(
+            {
+                f"{prefix}_max_violation_m": stats.get(
+                    f"{prefix}_max_violation_m", 0.0
+                ),
+                f"{prefix}_mean_violation_m": stats.get(
+                    f"{prefix}_violation_sum_m", 0.0
+                )
+                / max(stats.get(f"{prefix}_violating_point_count", 0.0), 1.0),
+                f"{prefix}_violating_point_fraction": stats.get(
+                    f"{prefix}_violating_point_count", 0.0
+                )
+                / valid_points,
+                f"{prefix}_colliding_frame_fraction": stats.get(
+                    f"{prefix}_colliding_frame_count", 0.0
+                )
+                / valid_frames,
+            }
+        )
+    return result
 
 
 @torch.no_grad()

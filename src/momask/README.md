@@ -189,7 +189,18 @@ The default scene is a 6x8x3 metre room. The actor spawns at `(0, -2)` facing
 `SCENE_SPAWN_*`, `SCENE_OBSTACLE_*`, `SCENE_BODY_RADIUS`, and `SCENE_WEIGHT`
 can be overridden at submission. The JSON compares `unconstrained` and
 `scene_latent` quality and reports maximum/mean clearance violation, violating
-body-point fraction, and colliding-frame fraction.
+body-point fraction, and colliding-frame fraction. Source-specific
+`scene_obstacle_*`, `scene_floor_*`, `scene_wall_*`, and `scene_ceiling_*`
+metrics identify which geometry still fails. Render the same strong diagnostic
+settings for three samples with:
+
+```bash
+sbatch slurm/momask/visualize_momask_scene_constraints.sbatch
+```
+
+Each GIF compares unconstrained and scene-refined motion in the configured
+room, highlights penetrating body samples in red, and plots penetration by
+source over time.
 
 The constraint evaluator compares the unconstrained sample, the existing root
 trajectory baselines, wrist-position latent refinement, and knee/elbow-angle
