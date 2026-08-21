@@ -24,6 +24,7 @@ from .scene_constraints import (
     place_joints_in_scene,
     scene_geometry_loss,
     scene_geometry_metrics,
+    scene_peak_violation_loss,
 )
 
 
@@ -932,6 +933,7 @@ class LatentRefinementConfig:
     torso_relative_weight: float = 1.0
     parent_relative_weight: float = 1.0
     scene_weight: float = 1.0
+    scene_peak_weight: float = 0.0
 
     def __post_init__(self) -> None:
         if self.steps < 1:
@@ -950,6 +952,7 @@ class LatentRefinementConfig:
             "foot_skate_weight",
             "jerk_weight",
             "scene_weight",
+            "scene_peak_weight",
         ):
             if getattr(self, name) < 0.0:
                 raise ValueError(f"{name} must be non-negative")
@@ -1097,7 +1100,6 @@ def refine_motion_latents(
                 impossible = angle_constraint.mask & ~valid_frames.unsqueeze(-1)
                 if bool(impossible.any()):
                     raise ValueError("angle constraints target padded or invalid decoded frames")
-
             active_position = False
             if position_constraint is not None:
                 position_active = position_constraint.mask & valid_frames.unsqueeze(-1)
@@ -1124,7 +1126,9 @@ def refine_motion_latents(
                 active_parent_relative and config.parent_relative_weight > 0.0
             )
             weighted_angle = active_angle and config.angle_weight > 0.0
-            weighted_scene = scene_constraint is not None and config.scene_weight > 0.0
+            weighted_scene = scene_constraint is not None and (
+                config.scene_weight > 0.0 or config.scene_peak_weight > 0.0
+            )
             if (
                 not weighted_position
                 and not weighted_torso_relative
@@ -1217,6 +1221,7 @@ def refine_motion_latents(
                 )
 
                 losses: dict[str, Tensor] = {}
+                scene_joints_current: Tensor | None = None
                 if position_constraint is not None and config.position_weight > 0.0:
                     losses["position"] = joint_position_loss(
                         joints,
@@ -1245,10 +1250,23 @@ def refine_motion_latents(
                         frame_mask=valid_frames,
                         beta=config.angle_huber_beta,
                     )
-                if scene_constraint is not None and config.scene_weight > 0.0:
+                if scene_constraint is not None and (
+                    config.scene_weight > 0.0
+                    or config.scene_peak_weight > 0.0
+                ):
                     assert scene_transform is not None
+                    scene_joints_current = place_joints_in_scene(joints, scene_transform)
+                if scene_constraint is not None and config.scene_weight > 0.0:
+                    assert scene_joints_current is not None
                     losses["scene"] = scene_geometry_loss(
-                        place_joints_in_scene(joints, scene_transform),
+                        scene_joints_current,
+                        scene_constraint,
+                        valid_frames,
+                    )
+                if scene_constraint is not None and config.scene_peak_weight > 0.0:
+                    assert scene_joints_current is not None
+                    losses["scene_peak"] = scene_peak_violation_loss(
+                        scene_joints_current,
                         scene_constraint,
                         valid_frames,
                     )
@@ -1287,6 +1305,7 @@ def refine_motion_latents(
                     + config.foot_skate_weight * losses.get("foot_skate", zero)
                     + config.jerk_weight * losses.get("jerk", zero)
                     + config.scene_weight * losses.get("scene", zero)
+                    + config.scene_peak_weight * losses.get("scene_peak", zero)
                 )
                 if not bool(torch.isfinite(total)):
                     raise FloatingPointError("non-finite loss during MoMask latent refinement")
@@ -1379,7 +1398,10 @@ def refine_motion_latents(
                 metrics["angle_violation_final_rad"] = float(
                     bend_angle_violation(joints, angle_constraint, frame_mask=valid_frames).cpu()
                 )
-            if scene_constraint is not None and config.scene_weight > 0.0:
+            if scene_constraint is not None and (
+                config.scene_weight > 0.0
+                or config.scene_peak_weight > 0.0
+            ):
                 assert scene_transform is not None
                 initial_scene_joints = place_joints_in_scene(initial_joints, scene_transform)
                 final_scene_joints = place_joints_in_scene(joints, scene_transform)

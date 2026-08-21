@@ -46,10 +46,13 @@ from .scene_constraints import (
     build_scene_transform,
     place_joints_in_scene,
     sample_body_points,
+    sample_swept_body_points,
     scene_clearance_violation_components,
     scene_clearance_violations,
     scene_geometry_loss,
     scene_geometry_metrics,
+    scene_peak_violation_loss,
+    scene_swept_clearance_violations,
 )
 
 __all__ = [
@@ -71,10 +74,13 @@ __all__ = [
     "build_scene_transform",
     "place_joints_in_scene",
     "sample_body_points",
+    "sample_swept_body_points",
     "scene_clearance_violation_components",
     "scene_clearance_violations",
     "scene_geometry_loss",
     "scene_geometry_metrics",
+    "scene_peak_violation_loss",
+    "scene_swept_clearance_violations",
     "bend_angles_from_joints",
     "joint_position_loss",
     "joint_position_error",

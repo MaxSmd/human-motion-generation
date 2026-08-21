@@ -35,6 +35,7 @@ REMASK_KEPT_TOKENS="${REMASK_KEPT_TOKENS:-1}"
 REFINEMENT_STEPS="${REFINEMENT_STEPS:-200}"
 REFINEMENT_LR="${REFINEMENT_LR:-0.02}"
 SCENE_WEIGHT="${SCENE_WEIGHT:-50.0}"
+SCENE_PEAK_WEIGHT="${SCENE_PEAK_WEIGHT:-50.0}"
 SCENE_ROOT_WEIGHT="${SCENE_ROOT_WEIGHT:-0.0}"
 LATENT_WEIGHT="${LATENT_WEIGHT:-0.001}"
 DYNAMICS_WEIGHT="${DYNAMICS_WEIGHT:-0.05}"
@@ -50,6 +51,7 @@ SCENE_SPAWN_YAW="${SCENE_SPAWN_YAW:-0.0}"
 SCENE_PADDING="${SCENE_PADDING:-0.02}"
 SCENE_BODY_RADIUS="${SCENE_BODY_RADIUS:-0.05}"
 SCENE_BONE_SAMPLES="${SCENE_BONE_SAMPLES:-2}"
+SCENE_SWEPT_SAMPLES="${SCENE_SWEPT_SAMPLES:-3}"
 SCENE_OBSTACLE_KIND="${SCENE_OBSTACLE_KIND:-box}"
 SCENE_OBSTACLE_X="${SCENE_OBSTACLE_X:-0.0}"
 SCENE_OBSTACLE_Y="${SCENE_OBSTACLE_Y:-0.5}"
@@ -70,13 +72,13 @@ RUN_DIR="$(dirname "${CKPT}")"
 if [ "$(basename "${RUN_DIR}")" = "checkpoints" ]; then
     RUN_DIR="$(dirname "${RUN_DIR}")"
 fi
-OUT_DIR="${OUT_DIR:-${RUN_DIR}/constraints/viz_scene_ref${REFINEMENT_STEPS}_w${SCENE_WEIGHT}}"
+OUT_DIR="${OUT_DIR:-${RUN_DIR}/constraints/viz_scene_collision_ref${REFINEMENT_STEPS}_w${SCENE_WEIGHT}}"
 
 echo "[momask-scene-viz] host=$(hostname)"
 echo "[momask-scene-viz] repo=${REPO}"
 echo "[momask-scene-viz] ckpt=${CKPT}"
 echo "[momask-scene-viz] samples=${SAMPLES} seeds=${SEEDS} out_dir=${OUT_DIR}"
-echo "[momask-scene-viz] refinement_steps=${REFINEMENT_STEPS} refinement_lr=${REFINEMENT_LR} scene_weight=${SCENE_WEIGHT}"
+echo "[momask-scene-viz] refinement_steps=${REFINEMENT_STEPS} refinement_lr=${REFINEMENT_LR} collision=${SCENE_WEIGHT} peak=${SCENE_PEAK_WEIGHT}"
 echo "[momask-scene-viz] room=${SCENE_ROOM_WIDTH}x${SCENE_ROOM_DEPTH}x${SCENE_ROOM_HEIGHT} obstacle=${SCENE_OBSTACLE_KIND}@(${SCENE_OBSTACLE_X},${SCENE_OBSTACLE_Y},${SCENE_OBSTACLE_Z})"
 
 SAMPLING_ARGS="--no-sample-tokens"
@@ -125,6 +127,7 @@ enroot start \
                     --refinement-steps ${REFINEMENT_STEPS} \
                     --refinement-lr ${REFINEMENT_LR} \
                     --scene-weight ${SCENE_WEIGHT} \
+                    --scene-peak-weight ${SCENE_PEAK_WEIGHT} \
                     --scene-root-weight ${SCENE_ROOT_WEIGHT} \
                     --latent-weight ${LATENT_WEIGHT} \
                     --dynamics-weight ${DYNAMICS_WEIGHT} \
@@ -140,6 +143,7 @@ enroot start \
                     --scene-padding ${SCENE_PADDING} \
                     --scene-body-radius ${SCENE_BODY_RADIUS} \
                     --scene-bone-samples ${SCENE_BONE_SAMPLES} \
+                    --scene-swept-samples ${SCENE_SWEPT_SAMPLES} \
                     --scene-obstacle-kind '${SCENE_OBSTACLE_KIND}' \
                     --scene-obstacle-x ${SCENE_OBSTACLE_X} \
                     --scene-obstacle-y ${SCENE_OBSTACLE_Y} \

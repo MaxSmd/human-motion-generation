@@ -10,9 +10,12 @@ from momask.scene_constraints import (
     build_scene_transform,
     place_joints_in_scene,
     sample_body_points,
+    sample_swept_body_points,
     scene_clearance_violation_components,
     scene_clearance_violations,
     scene_geometry_loss,
+    scene_peak_violation_loss,
+    scene_swept_clearance_violations,
 )
 from momask.scripts.evaluate_momask_constraints import (
     accumulate_scene_statistics,
@@ -77,6 +80,34 @@ def test_scene_loss_ignores_padded_frames() -> None:
     mask = torch.tensor([[True, False]])
 
     assert scene_geometry_loss(joints, scene, mask) == 0.0
+
+
+def test_swept_samples_detect_motion_that_tunnels_between_frames() -> None:
+    joints = _joints(time=2)
+    joints[:, 0, :, 2] = -0.4
+    joints[:, 1, :, 2] = 0.4
+    obstacle = SceneObstacle.box(center=(0.0, 1.0, 0.0), size=(0.2, 0.2, 0.2))
+    frame_only = RoomGeometryConstraint(
+        room_size=(4.0, 4.0, 3.0),
+        obstacles=(obstacle,),
+        body_radius=0.0,
+        bone_samples=0,
+        swept_samples=0,
+    )
+    swept = RoomGeometryConstraint(
+        room_size=(4.0, 4.0, 3.0),
+        obstacles=(obstacle,),
+        body_radius=0.0,
+        bone_samples=0,
+        swept_samples=3,
+    )
+
+    assert scene_geometry_loss(joints, frame_only) == 0.0
+    assert scene_geometry_loss(joints, swept) > 0.0
+    assert scene_peak_violation_loss(joints, frame_only) == 0.0
+    assert scene_peak_violation_loss(joints, swept) > 0.0
+    assert scene_swept_clearance_violations(joints, swept).max() > 0.0
+    assert sample_swept_body_points(joints, 0, 3).shape == (1, 1, 3 * NUM_JOINTS, 3)
 
 
 def test_scene_violation_components_identify_collision_source() -> None:

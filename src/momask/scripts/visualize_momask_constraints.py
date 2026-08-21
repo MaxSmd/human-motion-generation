@@ -23,6 +23,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import torch
 from matplotlib.animation import FuncAnimation, PillowWriter
+from matplotlib.patches import Circle, Polygon, Rectangle
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from torch import Tensor
 
@@ -148,6 +149,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-delta-norm", type=float, default=1.0)
     p.add_argument("--grad-clip-norm", type=float, default=1.0)
     p.add_argument("--scene-weight", type=float, default=10.0)
+    p.add_argument("--scene-peak-weight", type=float, default=50.0)
     p.add_argument("--scene-root-weight", type=float, default=0.0)
     p.add_argument("--scene-room-width", type=float, default=6.0)
     p.add_argument("--scene-room-depth", type=float, default=8.0)
@@ -158,6 +160,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--scene-padding", type=float, default=0.02)
     p.add_argument("--scene-body-radius", type=float, default=0.05)
     p.add_argument("--scene-bone-samples", type=int, default=2)
+    p.add_argument("--scene-swept-samples", type=int, default=3)
     p.add_argument(
         "--scene-obstacle-kind",
         choices=["box", "sphere", "cylinder"],
@@ -889,7 +892,8 @@ def draw_scene_geometry(ax, constraint: RoomGeometryConstraint) -> None:
 
 
 def scene_axis_limits(
-    series: list[tuple[str, Tensor]], constraint: RoomGeometryConstraint
+    series: list[tuple[str, Tensor]],
+    constraint: RoomGeometryConstraint,
 ) -> tuple[tuple[float, float], tuple[float, float], tuple[float, float]]:
     width, depth, height = constraint.room_size
     points = torch.cat([joints.reshape(-1, 3) for _, joints in series], dim=0)
@@ -1046,6 +1050,100 @@ def draw_scene_violation_frame(
     ax.legend(loc="upper right", fontsize=8, ncol=2, framealpha=0.9)
 
 
+def draw_scene_top_view_frame(
+    ax,
+    *,
+    name: str,
+    joints_seq: Tensor,
+    constraint: RoomGeometryConstraint,
+    limits: tuple[tuple[float, float], tuple[float, float], tuple[float, float]],
+    frame: int,
+) -> None:
+    ax.cla()
+    width, depth, _ = constraint.room_size
+    ax.add_patch(
+        Rectangle(
+            (-width / 2.0, -depth / 2.0),
+            width,
+            depth,
+            facecolor="#f3f4f6",
+            edgecolor="#6b7280",
+            linewidth=1.0,
+        )
+    )
+    for obstacle in constraint.obstacles:
+        if obstacle.kind == "box":
+            assert obstacle.size is not None
+            half_width = obstacle.size[0] / 2.0
+            half_depth = obstacle.size[2] / 2.0
+            local = np.array(
+                [
+                    [-half_width, -half_depth],
+                    [half_width, -half_depth],
+                    [half_width, half_depth],
+                    [-half_width, half_depth],
+                ]
+            )
+            yaw = math.radians(obstacle.yaw_degrees)
+            rotation = np.array(
+                [[math.cos(yaw), math.sin(yaw)], [-math.sin(yaw), math.cos(yaw)]]
+            )
+            polygon = local @ rotation.T
+            polygon += np.array([obstacle.center[0], obstacle.center[2]])
+            patch = Polygon(
+                polygon,
+                closed=True,
+                facecolor="#f59e0b",
+                edgecolor="#92400e",
+                linewidth=1.2,
+                alpha=0.5,
+            )
+        else:
+            assert obstacle.radius is not None
+            patch = Circle(
+                (obstacle.center[0], obstacle.center[2]),
+                obstacle.radius,
+                facecolor="#f59e0b",
+                edgecolor="#92400e",
+                linewidth=1.2,
+                alpha=0.5,
+            )
+        ax.add_patch(patch)
+    root_path = joints_seq[:, 0][:, [0, 2]]
+    ax.plot(
+        root_path[:, 0],
+        root_path[:, 1],
+        color="#9ca3af",
+        linewidth=1.2,
+        alpha=0.65,
+        label="full pelvis path",
+    )
+    ax.plot(
+        root_path[: frame + 1, 0],
+        root_path[: frame + 1, 1],
+        color="#2563eb",
+        linewidth=2.8,
+        label="pelvis trail",
+    )
+    ax.scatter(
+        root_path[frame, 0],
+        root_path[frame, 1],
+        color="#dc2626",
+        edgecolor="white",
+        linewidth=0.7,
+        s=54,
+        zorder=5,
+    )
+    ax.set_title(f"{name}: top view | pelvis trajectory")
+    ax.set_xlabel("Scene X (m)")
+    ax.set_ylabel("Scene Z (m)")
+    ax.set_xlim(*limits[0])
+    ax.set_ylim(*limits[1])
+    ax.set_aspect("equal", adjustable="box")
+    ax.grid(True, linewidth=0.7, alpha=0.35)
+    ax.legend(loc="upper right", fontsize=8, framealpha=0.9)
+
+
 def render_scene_constraint_comparison(
     *,
     series: list[tuple[str, Tensor]],
@@ -1075,7 +1173,7 @@ def render_scene_constraint_comparison(
         + [5.0]
     ) * 1.15
     n_cols = len(series)
-    fig = plt.figure(figsize=(max(14.0, 7.0 * n_cols), 10.2))
+    fig = plt.figure(figsize=(max(14.0, 7.0 * n_cols), 13.0))
     obstacle_description = ", ".join(
         f"{obstacle.kind} at ({obstacle.center[0]:g}, {obstacle.center[1]:g}, "
         f"{obstacle.center[2]:g})"
@@ -1092,9 +1190,16 @@ def render_scene_constraint_comparison(
         fontweight="semibold",
         y=0.985,
     )
-    grid = fig.add_gridspec(2, n_cols, height_ratios=[2.4, 1.0], hspace=0.24, wspace=0.2)
+    grid = fig.add_gridspec(
+        3,
+        n_cols,
+        height_ratios=[2.4, 1.0, 1.0],
+        hspace=0.28,
+        wspace=0.2,
+    )
     pose_axes = [fig.add_subplot(grid[0, col], projection="3d") for col in range(n_cols)]
-    metric_axes = [fig.add_subplot(grid[1, col]) for col in range(n_cols)]
+    path_axes = [fig.add_subplot(grid[1, col]) for col in range(n_cols)]
+    metric_axes = [fig.add_subplot(grid[2, col]) for col in range(n_cols)]
     fig.subplots_adjust(top=0.84, left=0.055, right=0.97, bottom=0.08)
 
     def update(frame: int):
@@ -1117,6 +1222,14 @@ def render_scene_constraint_comparison(
                 components=components,
                 frame=frame,
                 ymax_cm=ymax_cm,
+            )
+            draw_scene_top_view_frame(
+                path_axes[index],
+                name=name,
+                joints_seq=joints,
+                constraint=constraint,
+                limits=limits,
+                frame=frame,
             )
         return []
 
@@ -1509,7 +1622,7 @@ def main() -> None:
                 std=normalizer.std,
                 target_len=length,
                 token_mask=token_mask,
-                frame_mask=constraint_frame_mask,
+                frame_mask=decoded_frame_mask,
                 scene_constraint=scene_constraint,
                 config=LatentRefinementConfig(
                     steps=args.refinement_steps,
@@ -1519,6 +1632,7 @@ def main() -> None:
                     parent_relative_weight=0.0,
                     angle_weight=0.0,
                     scene_weight=args.scene_weight,
+                    scene_peak_weight=args.scene_peak_weight,
                     latent_weight=args.latent_weight,
                     dynamics_weight=args.dynamics_weight,
                     root_weight=args.scene_root_weight,

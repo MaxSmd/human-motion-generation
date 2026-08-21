@@ -171,7 +171,14 @@ nonpenetration for box, sphere, and upright-cylinder obstacles. The original
 generated clip is rigidly aligned to a scene spawn marker once; that transform
 is then frozen while the RVQ latent is refined. Collision loss checks every
 joint and configurable interior samples along all 21 kinematic edges, rather
-than only checking joint endpoints.
+than only checking joint endpoints. It also checks interpolated body samples
+between adjacent frames so a fast motion cannot tunnel through a thin obstacle.
+
+A separate worst-penetration loss prevents the optimizer from improving the
+average merely by crossing the obstacle in fewer frames. No avoidance route is
+prescribed: the frozen model prior and collision gradients determine how the
+motion changes. This is inference-time latent optimization; neither MoMask
+transformer is retrained.
 
 This stage enforces geometry only. It can push a motion out of an obstacle, but
 it does not by itself teach the model to climb stairs or choose a jumping action.
@@ -186,10 +193,12 @@ sbatch slurm/momask/evaluate_momask_constraints.sbatch
 
 The default scene is a 6x8x3 metre room. The actor spawns at `(0, -2)` facing
 `+Z`, with a one-metre box one metre ahead at `z=-1`. `SCENE_ROOM_*`,
-`SCENE_SPAWN_*`, `SCENE_OBSTACLE_*`, `SCENE_BODY_RADIUS`, and `SCENE_WEIGHT`
-can be overridden at submission. The JSON compares `unconstrained` and
+`SCENE_SPAWN_*`, `SCENE_OBSTACLE_*`, `SCENE_BODY_RADIUS`, `SCENE_WEIGHT`,
+`SCENE_PEAK_WEIGHT`, and `SCENE_SWEPT_SAMPLES` can be overridden at submission.
+The JSON compares `unconstrained` and
 `scene_latent` quality and reports maximum/mean clearance violation, violating
-body-point fraction, and colliding-frame fraction. Source-specific
+body-point fraction, colliding-frame fraction, and swept collision metrics for
+the intervals between frames. Source-specific
 `scene_obstacle_*`, `scene_floor_*`, `scene_wall_*`, and `scene_ceiling_*`
 metrics identify which geometry still fails. Render the same strong diagnostic
 settings for three samples with:
@@ -199,8 +208,8 @@ sbatch slurm/momask/visualize_momask_scene_constraints.sbatch
 ```
 
 Each GIF compares unconstrained and scene-refined motion in the configured
-room, highlights penetrating body samples in red, and plots penetration by
-source over time.
+room, highlights penetrating body samples in red, shows the actual pelvis path
+from above, and plots penetration by source over time.
 
 The constraint evaluator compares the unconstrained sample, the existing root
 trajectory baselines, wrist-position latent refinement, and knee/elbow-angle

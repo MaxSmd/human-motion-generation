@@ -99,6 +99,7 @@ class RoomGeometryConstraint:
     padding: float = 0.0
     body_radius: float = 0.05
     bone_samples: int = 2
+    swept_samples: int = 3
     heading_epsilon: float = 0.12
 
     def __post_init__(self) -> None:
@@ -119,6 +120,10 @@ class RoomGeometryConstraint:
             raise TypeError("bone_samples must be an integer")
         if self.bone_samples < 0:
             raise ValueError("bone_samples must be non-negative")
+        if not isinstance(self.swept_samples, int) or isinstance(self.swept_samples, bool):
+            raise TypeError("swept_samples must be an integer")
+        if self.swept_samples < 0:
+            raise ValueError("swept_samples must be non-negative")
         if not math.isfinite(self.heading_epsilon) or self.heading_epsilon <= 0.0:
             raise ValueError("heading_epsilon must be positive")
         if not isinstance(self.obstacles, tuple):
@@ -133,6 +138,7 @@ class RoomGeometryConstraint:
             "padding": self.padding,
             "body_radius": self.body_radius,
             "bone_samples": self.bone_samples,
+            "swept_samples": self.swept_samples,
             "obstacles": [
                 {
                     "kind": obstacle.kind,
@@ -252,6 +258,33 @@ def sample_body_points(joints: Tensor, bone_samples: int) -> Tensor:
     return torch.cat((joints, samples.flatten(-3, -2)), dim=-2)
 
 
+def sample_swept_body_points(
+    joints: Tensor,
+    bone_samples: int,
+    swept_samples: int,
+) -> Tensor:
+    """Interpolate body samples between frames as ``(B,T-1,S*P,3)``."""
+
+    if not isinstance(swept_samples, int) or isinstance(swept_samples, bool):
+        raise TypeError("swept_samples must be an integer")
+    if swept_samples < 1:
+        raise ValueError("swept_samples must be positive")
+    body = sample_body_points(joints, bone_samples)
+    if body.shape[1] < 2:
+        return body.new_empty(body.shape[0], 0, body.shape[2] * swept_samples, 3)
+    fractions = torch.linspace(
+        0.0,
+        1.0,
+        swept_samples + 2,
+        device=body.device,
+        dtype=body.dtype,
+    )[1:-1]
+    swept = body[:, :-1].unsqueeze(-2) + fractions.view(1, 1, 1, -1, 1) * (
+        body[:, 1:] - body[:, :-1]
+    ).unsqueeze(-2)
+    return swept.flatten(-3, -2)
+
+
 def _sdf_box(points: Tensor, obstacle: SceneObstacle) -> Tensor:
     center = points.new_tensor(obstacle.center)
     local = points - center
@@ -290,13 +323,10 @@ def _obstacle_sdf(points: Tensor, obstacle: SceneObstacle) -> Tensor:
     return outside + torch.maximum(radial, vertical).clamp_max(0.0)
 
 
-def scene_clearance_violation_components(
-    joints_world: Tensor,
+def _clearance_violation_components_from_points(
+    points: Tensor,
     constraint: RoomGeometryConstraint,
 ) -> dict[str, Tensor]:
-    """Return combined and source-specific body-point violations in metres."""
-
-    points = sample_body_points(joints_world, constraint.bone_samples)
     width, depth, height = constraint.room_size
     clearance = constraint.padding + constraint.body_radius
     wall_x = (points[..., 0].abs() + clearance - width / 2.0).clamp_min(0.0)
@@ -321,6 +351,16 @@ def scene_clearance_violation_components(
     }
 
 
+def scene_clearance_violation_components(
+    joints_world: Tensor,
+    constraint: RoomGeometryConstraint,
+) -> dict[str, Tensor]:
+    """Return combined and source-specific body-point violations in metres."""
+
+    points = sample_body_points(joints_world, constraint.bone_samples)
+    return _clearance_violation_components_from_points(points, constraint)
+
+
 def scene_clearance_violations(
     joints_world: Tensor,
     constraint: RoomGeometryConstraint,
@@ -328,6 +368,24 @@ def scene_clearance_violations(
     """Return per-body-point clearance violation in metres."""
 
     return scene_clearance_violation_components(joints_world, constraint)["combined"]
+
+
+def scene_swept_clearance_violations(
+    joints_world: Tensor,
+    constraint: RoomGeometryConstraint,
+) -> Tensor:
+    """Return clearance violations at interpolated points between frames."""
+
+    if constraint.swept_samples < 1 or joints_world.shape[1] < 2:
+        return joints_world.new_empty(
+            joints_world.shape[0], max(joints_world.shape[1] - 1, 0), 0
+        )
+    swept_points = sample_swept_body_points(
+        joints_world, constraint.bone_samples, constraint.swept_samples
+    )
+    return _clearance_violation_components_from_points(swept_points, constraint)[
+        "combined"
+    ]
 
 
 def scene_geometry_loss(
@@ -346,7 +404,45 @@ def scene_geometry_loss(
     if valid.shape != violation.shape[:2]:
         raise ValueError("scene frame_mask must match the joint batch/time dimensions")
     weights = valid.to(violation.dtype)
-    return (violation.pow(2).sum(dim=-1) * weights).sum() / weights.sum().clamp_min(1.0)
+    loss = (violation.pow(2).sum(dim=-1) * weights).sum() / weights.sum().clamp_min(1.0)
+    if constraint.swept_samples > 0 and joints_world.shape[1] > 1:
+        swept_violation = scene_swept_clearance_violations(joints_world, constraint)
+        segment_valid = valid[:, :-1] & valid[:, 1:]
+        segment_weights = segment_valid.to(swept_violation.dtype)
+        swept_loss = (
+            swept_violation.pow(2).sum(dim=-1) * segment_weights
+        ).sum() / segment_weights.sum().clamp_min(1.0)
+        loss = loss + swept_loss
+    return loss
+
+
+def scene_peak_violation_loss(
+    joints_world: Tensor,
+    constraint: RoomGeometryConstraint,
+    frame_mask: Tensor | None = None,
+) -> Tensor:
+    """Squared worst penetration per sample, including swept-frame points."""
+
+    violation = scene_clearance_violations(joints_world, constraint)
+    valid = (
+        torch.ones(violation.shape[:2], dtype=torch.bool, device=violation.device)
+        if frame_mask is None
+        else frame_mask.to(device=violation.device, dtype=torch.bool)
+    )
+    if valid.shape != violation.shape[:2] or not bool(valid.any(dim=1).all()):
+        raise ValueError("scene frame mask must match and contain a valid frame")
+    frame_peak = violation.masked_fill(~valid.unsqueeze(-1), -1.0).amax(dim=(1, 2))
+    if constraint.swept_samples > 0 and joints_world.shape[1] > 1:
+        swept_violation = scene_swept_clearance_violations(joints_world, constraint)
+        segment_valid = valid[:, :-1] & valid[:, 1:]
+        swept_peak = swept_violation.masked_fill(
+            ~segment_valid.unsqueeze(-1), -1.0
+        ).amax(dim=(1, 2))
+        swept_peak = torch.where(
+            segment_valid.any(dim=1), swept_peak, torch.zeros_like(swept_peak)
+        )
+        frame_peak = torch.maximum(frame_peak, swept_peak)
+    return frame_peak.clamp_min(0.0).pow(2).mean()
 
 
 @torch.no_grad()
@@ -385,6 +481,32 @@ def scene_geometry_metrics(
         }
 
     result = summarize(violation)
+    if constraint.swept_samples > 0 and joints_world.shape[1] > 1:
+        swept = scene_swept_clearance_violations(joints_world, constraint)
+        valid_segments = valid_frames[:, :-1] & valid_frames[:, 1:]
+        valid_swept_points = valid_segments.unsqueeze(-1).expand_as(swept)
+        active = swept[valid_swept_points]
+        positive = active[active > 0.0]
+        colliding_segments = (swept > 0.0).any(dim=-1) & valid_segments
+        result.update(
+            {
+                "swept_max_violation_m": float(active.max().cpu())
+                if active.numel()
+                else 0.0,
+                "swept_mean_violation_m": float(positive.mean().cpu())
+                if positive.numel()
+                else 0.0,
+                "swept_violating_point_fraction": float(
+                    (active > 0.0).float().mean().cpu()
+                )
+                if active.numel()
+                else 0.0,
+                "swept_colliding_segment_fraction": float(
+                    colliding_segments.sum().float().cpu()
+                    / valid_segments.sum().clamp_min(1).cpu()
+                ),
+            }
+        )
     for source in ("obstacle", "floor", "wall", "ceiling"):
         result.update(
             {

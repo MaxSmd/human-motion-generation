@@ -56,6 +56,7 @@ from momask.scene_constraints import (
     RoomGeometryConstraint,
     SceneObstacle,
     scene_clearance_violation_components,
+    scene_swept_clearance_violations,
 )
 from shared.data import H3D263Dataset, collate
 from shared.text import CLIPTextEncoder, RandomTextEncoder, TextEncoder
@@ -153,6 +154,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-delta-norm", type=float, default=1.0)
     p.add_argument("--grad-clip-norm", type=float, default=1.0)
     p.add_argument("--scene-weight", type=float, default=10.0)
+    p.add_argument("--scene-peak-weight", type=float, default=50.0)
     p.add_argument("--scene-root-weight", type=float, default=0.0)
     p.add_argument("--scene-room-width", type=float, default=6.0)
     p.add_argument("--scene-room-depth", type=float, default=8.0)
@@ -163,6 +165,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--scene-padding", type=float, default=0.02)
     p.add_argument("--scene-body-radius", type=float, default=0.05)
     p.add_argument("--scene-bone-samples", type=int, default=2)
+    p.add_argument("--scene-swept-samples", type=int, default=3)
     p.add_argument(
         "--scene-obstacle-kind",
         choices=["box", "sphere", "cylinder"],
@@ -271,6 +274,7 @@ def build_scene_constraint(args: argparse.Namespace) -> RoomGeometryConstraint:
         padding=args.scene_padding,
         body_radius=args.scene_body_radius,
         bone_samples=args.scene_bone_samples,
+        swept_samples=args.scene_swept_samples,
     )
 
 
@@ -753,6 +757,33 @@ def accumulate_scene_statistics(
             f"{prefix}_valid_frame_count", 0.0
         ) + float(valid_frames.sum().cpu())
 
+    if constraint.swept_samples > 0 and joints_world.shape[1] > 1:
+        swept = scene_swept_clearance_violations(joints_world, constraint)
+        valid_segments = valid_frames[:, :-1] & valid_frames[:, 1:]
+        valid_points = valid_segments.unsqueeze(-1).expand_as(swept)
+        values = swept[valid_points]
+        positive = values > 0.0
+        colliding_segments = (swept > 0.0).any(dim=-1) & valid_segments
+        total["scene_swept_max_violation_m"] = max(
+            total.get("scene_swept_max_violation_m", 0.0),
+            float(values.max().cpu()) if values.numel() else 0.0,
+        )
+        total["scene_swept_violation_sum_m"] = total.get(
+            "scene_swept_violation_sum_m", 0.0
+        ) + float(values[positive].sum().cpu())
+        total["scene_swept_violating_point_count"] = total.get(
+            "scene_swept_violating_point_count", 0.0
+        ) + float(positive.sum().cpu())
+        total["scene_swept_valid_point_count"] = total.get(
+            "scene_swept_valid_point_count", 0.0
+        ) + float(values.numel())
+        total["scene_swept_colliding_segment_count"] = total.get(
+            "scene_swept_colliding_segment_count", 0.0
+        ) + float(colliding_segments.sum().cpu())
+        total["scene_swept_valid_segment_count"] = total.get(
+            "scene_swept_valid_segment_count", 0.0
+        ) + float(valid_segments.sum().cpu())
+
 
 def summarize_scene_statistics(stats: dict[str, float]) -> dict[str, float]:
     result: dict[str, float] = {}
@@ -784,6 +815,28 @@ def summarize_scene_statistics(stats: dict[str, float]) -> dict[str, float]:
                     f"{prefix}_colliding_frame_count", 0.0
                 )
                 / valid_frames,
+            }
+        )
+    swept_points = stats.get("scene_swept_valid_point_count", 0.0)
+    swept_segments = stats.get("scene_swept_valid_segment_count", 0.0)
+    if swept_points > 0.0 and swept_segments > 0.0:
+        result.update(
+            {
+                "scene_swept_max_violation_m": stats.get(
+                    "scene_swept_max_violation_m", 0.0
+                ),
+                "scene_swept_mean_violation_m": stats.get(
+                    "scene_swept_violation_sum_m", 0.0
+                )
+                / max(stats.get("scene_swept_violating_point_count", 0.0), 1.0),
+                "scene_swept_violating_point_fraction": stats.get(
+                    "scene_swept_violating_point_count", 0.0
+                )
+                / swept_points,
+                "scene_swept_colliding_segment_fraction": stats.get(
+                    "scene_swept_colliding_segment_count", 0.0
+                )
+                / swept_segments,
             }
         )
     return result
@@ -1139,7 +1192,7 @@ def main() -> None:
                     std=normalizer.std,
                     target_len=model_real_x.shape[1],
                     token_mask=token_mask,
-                    frame_mask=model_frame_mask,
+                    frame_mask=decoded_frame_mask,
                     scene_constraint=scene_constraint,
                     config=LatentRefinementConfig(
                         steps=args.refinement_steps,
@@ -1149,6 +1202,7 @@ def main() -> None:
                         parent_relative_weight=0.0,
                         angle_weight=0.0,
                         scene_weight=args.scene_weight,
+                        scene_peak_weight=args.scene_peak_weight,
                         latent_weight=args.latent_weight,
                         dynamics_weight=args.dynamics_weight,
                         root_weight=args.scene_root_weight,
@@ -1249,6 +1303,7 @@ def main() -> None:
                 "root_weight": args.root_weight,
                 "bone_weight": args.bone_weight,
                 "scene_weight": args.scene_weight,
+                "scene_peak_weight": args.scene_peak_weight,
                 "scene_root_weight": args.scene_root_weight,
                 "max_delta_norm": args.max_delta_norm,
                 "grad_clip_norm": args.grad_clip_norm,

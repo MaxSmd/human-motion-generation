@@ -62,6 +62,7 @@ BONE_WEIGHT="${BONE_WEIGHT:-0.1}"
 MAX_DELTA_NORM="${MAX_DELTA_NORM:-1.0}"
 GRAD_CLIP_NORM="${GRAD_CLIP_NORM:-1.0}"
 SCENE_WEIGHT="${SCENE_WEIGHT:-10.0}"
+SCENE_PEAK_WEIGHT="${SCENE_PEAK_WEIGHT:-50.0}"
 SCENE_ROOT_WEIGHT="${SCENE_ROOT_WEIGHT:-0.0}"
 SCENE_ROOM_WIDTH="${SCENE_ROOM_WIDTH:-6.0}"
 SCENE_ROOM_DEPTH="${SCENE_ROOM_DEPTH:-8.0}"
@@ -72,6 +73,7 @@ SCENE_SPAWN_YAW="${SCENE_SPAWN_YAW:-0.0}"
 SCENE_PADDING="${SCENE_PADDING:-0.02}"
 SCENE_BODY_RADIUS="${SCENE_BODY_RADIUS:-0.05}"
 SCENE_BONE_SAMPLES="${SCENE_BONE_SAMPLES:-2}"
+SCENE_SWEPT_SAMPLES="${SCENE_SWEPT_SAMPLES:-3}"
 SCENE_OBSTACLE_KIND="${SCENE_OBSTACLE_KIND:-box}"
 SCENE_OBSTACLE_X="${SCENE_OBSTACLE_X:-0.0}"
 SCENE_OBSTACLE_Y="${SCENE_OBSTACLE_Y:-0.5}"
@@ -117,6 +119,7 @@ echo "[momask-constraints] angle_joints=${ANGLE_JOINTS} angle_tolerance_deg=${AN
 echo "[momask-constraints] body_fixed_joint_ids=${BODY_FIXED_JOINT_IDS} body_reference_frame=${BODY_REFERENCE_FRAME}"
 echo "[momask-constraints] refinement_steps=${REFINEMENT_STEPS} refinement_lr=${REFINEMENT_LR} position_weight=${POSITION_WEIGHT} parent_relative_weight=${PARENT_RELATIVE_WEIGHT} angle_weight=${ANGLE_WEIGHT}"
 echo "[momask-constraints] scene room=${SCENE_ROOM_WIDTH}x${SCENE_ROOM_DEPTH}x${SCENE_ROOM_HEIGHT} spawn=${SCENE_SPAWN_X},${SCENE_SPAWN_Z},${SCENE_SPAWN_YAW} obstacle=${SCENE_OBSTACLE_KIND}@${SCENE_OBSTACLE_X},${SCENE_OBSTACLE_Y},${SCENE_OBSTACLE_Z}"
+echo "[momask-constraints] scene weights collision=${SCENE_WEIGHT} peak=${SCENE_PEAK_WEIGHT} swept_samples=${SCENE_SWEPT_SAMPLES}"
 echo "[momask-constraints] output=${OUTPUT}"
 
 TEXTS_ZIP_ARG=""
@@ -197,6 +200,7 @@ enroot start \
             --max-delta-norm ${MAX_DELTA_NORM} \
             --grad-clip-norm ${GRAD_CLIP_NORM} \
             --scene-weight ${SCENE_WEIGHT} \
+            --scene-peak-weight ${SCENE_PEAK_WEIGHT} \
             --scene-root-weight ${SCENE_ROOT_WEIGHT} \
             --scene-room-width ${SCENE_ROOM_WIDTH} \
             --scene-room-depth ${SCENE_ROOM_DEPTH} \
@@ -207,6 +211,7 @@ enroot start \
             --scene-padding ${SCENE_PADDING} \
             --scene-body-radius ${SCENE_BODY_RADIUS} \
             --scene-bone-samples ${SCENE_BONE_SAMPLES} \
+            --scene-swept-samples ${SCENE_SWEPT_SAMPLES} \
             --scene-obstacle-kind ${SCENE_OBSTACLE_KIND} \
             --scene-obstacle-x ${SCENE_OBSTACLE_X} \
             --scene-obstacle-y ${SCENE_OBSTACLE_Y} \
