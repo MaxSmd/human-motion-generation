@@ -73,6 +73,8 @@ BASE_COND_DROP="${BASE_COND_DROP:-0.1}"
 RESIDUAL_COND_DROP="${RESIDUAL_COND_DROP:-0.2}"
 RESIDUAL_ARCH="${RESIDUAL_ARCH:-simple}"
 RESIDUAL_SHARE_WEIGHT="${RESIDUAL_SHARE_WEIGHT:-0}"
+RESIDUAL_PREDICT_PAD="${RESIDUAL_PREDICT_PAD:-0}"
+OFFICIAL_MASK_SCHEDULE="${OFFICIAL_MASK_SCHEDULE:-0}"
 FREEZE_MASKED="${FREEZE_MASKED:-0}"
 TOKEN_STAGE="${TOKEN_STAGE:-joint}"
 BASE_FULL_MASK_PROB="${BASE_FULL_MASK_PROB:-0.3}"
@@ -119,13 +121,21 @@ echo "[momask-tokens] token_steps=${TOKEN_STEPS} token_epochs=${TOKEN_EPOCHS} ma
 echo "[momask-tokens] validate_every=${VALIDATE_EVERY} val_eval_batches=${VAL_EVAL_BATCHES}"
 echo "[momask-tokens] text_encoder=${TEXT_ENCODER} clip_model=${CLIP_MODEL} clip_backend=${CLIP_BACKEND} clip_l2_normalize=${CLIP_L2_NORMALIZE}"
 echo "[momask-tokens] transformer arch=${TRANSFORMER_ARCH} hidden=${TRANSFORMER_HIDDEN_DIM} depth=${TRANSFORMER_DEPTH} heads=${TRANSFORMER_HEADS} ffn=${TRANSFORMER_FFN_DIM} dropout=${TRANSFORMER_DROPOUT}"
-echo "[momask-tokens] token_stage=${TOKEN_STAGE} lr=${TOKEN_LR} adam_beta2=${ADAM_BETA2} weight_decay=${WEIGHT_DECAY} grad_clip=${TOKEN_GRAD_CLIP} residual_arch=${RESIDUAL_ARCH} residual_share_weight=${RESIDUAL_SHARE_WEIGHT} freeze_masked=${FREEZE_MASKED} live_token_crops=${LIVE_TOKEN_CROPS} paper_data=${PAPER_TRANSFORMER_DATA} base_full_mask_prob=${BASE_FULL_MASK_PROB} generation_steps=${GENERATION_STEPS}"
+echo "[momask-tokens] token_stage=${TOKEN_STAGE} lr=${TOKEN_LR} adam_beta2=${ADAM_BETA2} weight_decay=${WEIGHT_DECAY} grad_clip=${TOKEN_GRAD_CLIP} residual_arch=${RESIDUAL_ARCH} residual_share_weight=${RESIDUAL_SHARE_WEIGHT} residual_predict_pad=${RESIDUAL_PREDICT_PAD} official_mask_schedule=${OFFICIAL_MASK_SCHEDULE} freeze_masked=${FREEZE_MASKED} live_token_crops=${LIVE_TOKEN_CROPS} paper_data=${PAPER_TRANSFORMER_DATA} base_full_mask_prob=${BASE_FULL_MASK_PROB} generation_steps=${GENERATION_STEPS}"
 echo "[momask-tokens] warmup_steps=${WARMUP_STEPS} lr_milestones=${LR_MILESTONES:-<none>} lr_gamma=${LR_GAMMA}"
 echo "[momask-tokens] seed=${SEED}"
 
 RESIDUAL_SHARE_ARG=""
 if [ "${RESIDUAL_SHARE_WEIGHT}" = "1" ]; then
     RESIDUAL_SHARE_ARG="--residual-share-weight"
+fi
+RESIDUAL_PREDICT_PAD_ARG=""
+if [ "${RESIDUAL_PREDICT_PAD}" = "1" ]; then
+    RESIDUAL_PREDICT_PAD_ARG="--residual-predict-pad"
+fi
+OFFICIAL_MASK_SCHEDULE_ARG=""
+if [ "${OFFICIAL_MASK_SCHEDULE}" = "1" ]; then
+    OFFICIAL_MASK_SCHEDULE_ARG="--official-mask-schedule"
 fi
 FREEZE_MASKED_ARG=""
 if [ "${FREEZE_MASKED}" = "1" ]; then
@@ -209,6 +219,8 @@ enroot start \
             --residual-cond-drop ${RESIDUAL_COND_DROP} \\
             --residual-arch ${RESIDUAL_ARCH} \\
             ${RESIDUAL_SHARE_ARG} \\
+            ${RESIDUAL_PREDICT_PAD_ARG} \\
+            ${OFFICIAL_MASK_SCHEDULE_ARG} \\
             ${FREEZE_MASKED_ARG} \\
             --token-stage ${TOKEN_STAGE} \\
             ${LIVE_TOKEN_CROPS_ARG} \\

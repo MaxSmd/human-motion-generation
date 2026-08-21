@@ -44,6 +44,8 @@ COMPATIBLE_ARG_NAMES = (
     "shared_residual_head",
     "residual_arch",
     "residual_share_weight",
+    "residual_predict_pad",
+    "official_mask_schedule",
     "base_cond_drop",
     "residual_cond_drop",
     "paper_transformer_data",

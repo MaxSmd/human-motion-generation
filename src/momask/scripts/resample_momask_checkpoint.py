@@ -57,6 +57,8 @@ def _build_models(args: dict, device: torch.device):
         max_seq_len=math.ceil(int(args["max_seq_len"]) / int(args.get("downsample", 1))),
         dropout=float(args["transformer_dropout"]),
         architecture=str(args.get("transformer_arch", "legacy")),
+        residual_predict_pad=bool(args.get("residual_predict_pad", False)),
+        official_mask_schedule=bool(args.get("official_mask_schedule", False)),
     )
     masked_model = MaskedMotionTransformer(cfg).to(device)
     if args.get("residual_arch", "simple") == "codebook":

@@ -41,7 +41,7 @@ FPS="${FPS:-20}"
 TEXT_ENCODER="${TEXT_ENCODER:-checkpoint}"
 CLIP_MODEL="${CLIP_MODEL:-}"
 CLIP_CACHE_DIR="${CLIP_CACHE_DIR:-${HF_CACHE}}"
-CLIP_BACKEND="${CLIP_BACKEND:-auto}"
+CLIP_BACKEND="${CLIP_BACKEND:-checkpoint}"
 
 RUN_DIR="$(dirname "${CKPT}")"
 if [ "$(basename "${RUN_DIR}")" = "checkpoints" ]; then

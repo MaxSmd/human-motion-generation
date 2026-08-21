@@ -13,6 +13,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from momask.models import (
+    CodebookResidualTransformer,
     MaskedMotionTransformer,
     MotionRVQVAE,
     ResidualVectorQuantizer,
@@ -20,6 +21,7 @@ from momask.models import (
     TokenTransformerConfig,
 )
 from momask.data_utils import normalize_motion, token_mask_from_frame_mask
+from momask.scripts.evaluate_momask import generate_variant
 from momask.scripts.train_momask import (
     FixedWindowTensorBatcher,
     H3DNormalizer,
@@ -153,6 +155,147 @@ def test_momask_models_tokenize_predict_and_decode() -> None:
     assert (ragged_base[0, -3:] == 0).all()
     ragged_tokens = residual.generate_residuals(ragged_base, cond=cond, guidance_scale=1.0, mask=ragged_mask)
     assert ragged_tokens.shape == (B, 3, T)
+
+
+def test_official_residual_head_includes_pad_class_without_breaking_legacy_shape() -> None:
+    common = dict(
+        vocab_size=8,
+        text_dim=12,
+        code_dim=8,
+        hidden_dim=16,
+        depth=1,
+        num_heads=4,
+        ffn_dim=32,
+        max_seq_len=5,
+        dropout=0.0,
+        architecture="paper",
+    )
+    prev = torch.zeros(2, 1, 5, dtype=torch.long)
+    mask = torch.ones(2, 5, dtype=torch.bool)
+    cond = torch.randn(2, 12)
+
+    legacy = CodebookResidualTransformer(
+        TokenTransformerConfig(**common, residual_predict_pad=False),
+        num_quantizers=3,
+        code_dim=8,
+        share_weight=True,
+    )
+    official = CodebookResidualTransformer(
+        TokenTransformerConfig(**common, residual_predict_pad=True),
+        num_quantizers=3,
+        code_dim=8,
+        share_weight=True,
+    )
+
+    assert legacy(prev, 1, cond=cond, mask=mask).shape == (2, 5, 8)
+    assert official(prev, 1, cond=cond, mask=mask).shape == (2, 5, 9)
+
+
+def test_official_mask_schedule_uses_single_token_final_refinement() -> None:
+    def seen_mask_counts(official: bool) -> list[int]:
+        cfg = TokenTransformerConfig(
+            vocab_size=8,
+            text_dim=12,
+            code_dim=8,
+            hidden_dim=16,
+            depth=1,
+            num_heads=4,
+            ffn_dim=32,
+            max_seq_len=49,
+            dropout=0.0,
+            architecture="paper",
+            official_mask_schedule=official,
+        )
+        model = MaskedMotionTransformer(cfg)
+        counts: list[int] = []
+
+        def fake_forward(self, tokens, **_kwargs):
+            counts.append(int((tokens == self.mask_token_id).sum()))
+            return torch.zeros(*tokens.shape, cfg.vocab_size)
+
+        model.forward = types.MethodType(fake_forward, model)
+        model.generate(
+            cond=torch.zeros(1, 12),
+            seq_len=49,
+            steps=10,
+            guidance_scale=1.0,
+            sample=False,
+            remask_kept_tokens=False,
+            mask=torch.ones(1, 49, dtype=torch.bool),
+        )
+        return counts
+
+    assert seen_mask_counts(True)[-1] == 1
+    assert seen_mask_counts(False)[-1] == 8
+
+
+def test_rvq_decoder_treats_padding_indices_as_zero_codes() -> None:
+    quantizer = ResidualVectorQuantizer(
+        num_quantizers=2,
+        codebook_size=3,
+        dim=4,
+    )
+    for codebook in quantizer.codebooks:
+        codebook.weight.data.fill_(1.0)
+    indices = torch.tensor([[[0, 3, -1], [1, 3, -1]]])
+
+    decoded = quantizer.decode(indices)
+
+    assert torch.equal(decoded[0, 0], torch.full((4,), 2.0))
+    assert torch.equal(decoded[0, 1:], torch.zeros(2, 4))
+
+
+def test_full_generation_uses_independent_masked_and_residual_guidance() -> None:
+    class DummyVQ:
+        downsample = 1
+
+        def encode_to_tokens(self, x):
+            return torch.zeros(x.shape[0], 2, x.shape[1], dtype=torch.long)
+
+        def decode_from_tokens(self, tokens, target_len=None, token_mask=None):
+            return torch.zeros(tokens.shape[0], target_len, H3D_FEATURE_DIM)
+
+    class DummyMasked:
+        def __init__(self):
+            self.guidance = None
+
+        def generate(self, *, cond, seq_len, guidance_scale, **_kwargs):
+            self.guidance = guidance_scale
+            return torch.zeros(cond.shape[0], seq_len, dtype=torch.long)
+
+    class DummyResidual:
+        def __init__(self):
+            self.guidance = None
+
+        def generate_residuals(self, base, *, guidance_scale, **_kwargs):
+            self.guidance = guidance_scale
+            return torch.stack([base, base], dim=1)
+
+    masked = DummyMasked()
+    residual = DummyResidual()
+    real = torch.zeros(2, 8, H3D_FEATURE_DIM)
+    frame_mask = torch.ones(2, 8, dtype=torch.bool)
+
+    generate_variant(
+        "full",
+        vqvae=DummyVQ(),
+        masked=masked,
+        residual=residual,
+        normalizer=H3DNormalizer.identity(),
+        cond=torch.zeros(2, 12),
+        real_x=real,
+        frame_mask=frame_mask,
+        steps=10,
+        guidance_scale=4.0,
+        residual_guidance_scale=5.0,
+        temperature=1.0,
+        topk_filter_thres=0.9,
+        sample=True,
+        remask_kept_tokens=False,
+    )
+
+    assert masked.guidance == 4.0
+    assert residual.guidance == 5.0
 
 
 def test_generation_helper_returns_h3d_features() -> None:

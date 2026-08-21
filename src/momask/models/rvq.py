@@ -178,7 +178,11 @@ class ResidualVectorQuantizer(nn.Module):
             raise ValueError(f"indices contain {Q} quantizers, model has {self.num_quantizers}")
         out = torch.zeros(B, T, self.dim, device=indices.device, dtype=self.codebooks[0].weight.dtype)
         for level in range(Q):
-            out = out + self.codebooks[level](indices[:, level])
+            level_indices = indices[:, level]
+            valid = (level_indices >= 0) & (level_indices < self.codebook_size)
+            safe_indices = level_indices.clamp(0, self.codebook_size - 1)
+            codes = self.codebooks[level](safe_indices)
+            out = out + codes.masked_fill(~valid.unsqueeze(-1), 0.0)
         return out
 
     def forward(self, z: Tensor, mask: Tensor | None = None) -> RVQOutput:

@@ -28,9 +28,9 @@ HUMANML3D_DIR="${HUMANML3D_DIR:-/mnt/projects/drl4cvb/human-motion-representatio
 HUMANML3D_TEXTS_ZIP="${HUMANML3D_TEXTS_ZIP:-${HUMANML3D_DIR}/texts.zip}"
 REAL_H3D_DIR="${REAL_H3D_DIR:-${HOME}/rmg-runs/h3d-canonical/new_joint_vecs}"
 
-MASKED_CHECKPOINT_DIR="${MASKED_CHECKPOINT_DIR:-runs/momask-canonical-mtrans-officialsplits196-clip500e/checkpoints}"
-RESIDUAL_CHECKPOINT_DIR="${RESIDUAL_CHECKPOINT_DIR:-runs/momask-canonical-rtrans-officialsplits196-clip500e/checkpoints}"
-OUTPUT_DIR="${OUTPUT_DIR:-runs/momask-canonical-tokens-officialsplits196-valfidselection-full}"
+MASKED_CHECKPOINT_DIR="${MASKED_CHECKPOINT_DIR:-runs/momask-canonical-mtrans-releaseparity196-clip500e/checkpoints}"
+RESIDUAL_CHECKPOINT_DIR="${RESIDUAL_CHECKPOINT_DIR:-runs/momask-canonical-rtrans-releaseparity196-clip500e/checkpoints}"
+OUTPUT_DIR="${OUTPUT_DIR:-runs/momask-canonical-tokens-releaseparity196-valfidselection-full}"
 CHECKPOINT_STRIDE="${CHECKPOINT_STRIDE:-1}"
 OVERWRITE="${OVERWRITE:-0}"
 
@@ -45,6 +45,7 @@ RESIDUAL_GENERATION_STEPS="${RESIDUAL_GENERATION_STEPS:-1}"
 RESIDUAL_GUIDANCE_SCALE="${RESIDUAL_GUIDANCE_SCALE:-2.0}"
 FINAL_GENERATION_STEPS="${FINAL_GENERATION_STEPS:-10}"
 FINAL_GUIDANCE_SCALE="${FINAL_GUIDANCE_SCALE:-4.0}"
+FINAL_RESIDUAL_GUIDANCE_SCALE="${FINAL_RESIDUAL_GUIDANCE_SCALE:-5.0}"
 TEMPERATURE="${TEMPERATURE:-1.0}"
 TOPK_FILTER_THRES="${TOPK_FILTER_THRES:-0.9}"
 SAMPLE="${SAMPLE:-1}"
@@ -59,7 +60,7 @@ echo "[momask-fidsel] output_dir=${OUTPUT_DIR} stride=${CHECKPOINT_STRIDE} overw
 echo "[momask-fidsel] split=${SPLIT} max_clips=${MAX_CLIPS} max_seq_len=${MAX_SEQ_LEN}"
 echo "[momask-fidsel] humanml3d_dir=${HUMANML3D_DIR} data_view=official_text2motion"
 echo "[momask-fidsel] masked_steps=${MASKED_GENERATION_STEPS} masked_guidance=${MASKED_GUIDANCE_SCALE}"
-echo "[momask-fidsel] residual_guidance=${RESIDUAL_GUIDANCE_SCALE} final_steps=${FINAL_GENERATION_STEPS}"
+echo "[momask-fidsel] residual_guidance=${RESIDUAL_GUIDANCE_SCALE} final_steps=${FINAL_GENERATION_STEPS} final_residual_guidance=${FINAL_RESIDUAL_GUIDANCE_SCALE}"
 echo "[momask-fidsel] temp=${TEMPERATURE} topk=${TOPK_FILTER_THRES} sample=${SAMPLE} remask=${REMASK_KEPT_TOKENS} seed=${SEED}"
 
 enroot start \
@@ -128,7 +129,7 @@ enroot start \
                     --generation-steps \"\${generation_steps}\" \\
                     --text-encoder checkpoint \\
                     --clip-cache-dir '${HF_CACHE}' \\
-                    --clip-backend auto \\
+                    --clip-backend checkpoint \\
                     --guidance-scale \"\${guidance_scale}\" \\
                     --temperature ${TEMPERATURE} \\
                     --topk-filter-thres ${TOPK_FILTER_THRES} \\
@@ -161,7 +162,8 @@ enroot start \
         residual_protocol=\"\${residual_protocol};guidance=${RESIDUAL_GUIDANCE_SCALE}\"
         residual_protocol=\"\${residual_protocol};\${common_protocol}\"
         final_protocol=\"phase=final;variant=full;steps=${FINAL_GENERATION_STEPS}\"
-        final_protocol=\"\${final_protocol};guidance=${FINAL_GUIDANCE_SCALE};\${common_protocol}\"
+        final_protocol=\"\${final_protocol};guidance=${FINAL_GUIDANCE_SCALE}\"
+        final_protocol=\"\${final_protocol};residual_guidance=${FINAL_RESIDUAL_GUIDANCE_SCALE};\${common_protocol}\"
 
         residual_reference='${RESIDUAL_CHECKPOINT_DIR}/tokens_best_val.pt'
         python -u -m momask.scripts.select_transformer_checkpoints manifest \\
@@ -237,8 +239,9 @@ enroot start \
                 --generation-steps ${FINAL_GENERATION_STEPS} \\
                 --text-encoder checkpoint \\
                 --clip-cache-dir '${HF_CACHE}' \\
-                --clip-backend auto \\
+                --clip-backend checkpoint \\
                 --guidance-scale ${FINAL_GUIDANCE_SCALE} \\
+                --residual-guidance-scale ${FINAL_RESIDUAL_GUIDANCE_SCALE} \\
                 --temperature ${TEMPERATURE} \\
                 --topk-filter-thres ${TOPK_FILTER_THRES} \\
                 $([ "${SAMPLE}" = 1 ] && printf '%s' '--sample' || printf '%s' '--no-sample') \\

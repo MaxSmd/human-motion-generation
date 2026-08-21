@@ -266,6 +266,19 @@ def parse_args() -> argparse.Namespace:
         help="For --residual-arch codebook, share residual input/output projection weights.",
     )
     p.add_argument(
+        "--residual-predict-pad",
+        action="store_true",
+        help=(
+            "Include the padding class in the residual transformer's output vocabulary, "
+            "matching the released MoMask architecture."
+        ),
+    )
+    p.add_argument(
+        "--official-mask-schedule",
+        action="store_true",
+        help="Use the released MoMask linspace schedule during masked-token generation.",
+    )
+    p.add_argument(
         "--base-full-mask-prob",
         type=float,
         default=0.3,
@@ -388,6 +401,8 @@ def restore_model_args(args: argparse.Namespace, ckpt: dict) -> None:
         "shared_residual_head",
         "residual_arch",
         "residual_share_weight",
+        "residual_predict_pad",
+        "official_mask_schedule",
         "max_seq_len",
     )
     restore_names = vq_names + (transformer_names if "masked_transformer" in ckpt else ())
@@ -1375,6 +1390,8 @@ def main() -> None:
         max_seq_len=math.ceil(args.max_seq_len / args.downsample),
         dropout=args.transformer_dropout,
         architecture=args.transformer_arch,
+        residual_predict_pad=args.residual_predict_pad,
+        official_mask_schedule=args.official_mask_schedule,
     )
     masked_model = MaskedMotionTransformer(cfg).to(device)
     if args.residual_arch == "codebook":

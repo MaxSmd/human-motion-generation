@@ -5,12 +5,11 @@ Reproduction of *MoMask: Generative Masked Modeling of 3D Human Motions*
 
 ## Status
 
-Implemented end to end — residual VQ-VAE tokenizer plus the masked and residual
-token transformers — and the 263-D data path is verified by `tests/momask/`. There
-is **no reproduction-quality evaluation yet**: the RVQ has no EMA codebook update
-and no dead-code revival, so codebook collapse is the failure mode to expect and
-the one the diagnostic runs kept hitting. The loader, Guo evaluator and 263-D
-feature conversion all come from `shared`.
+Implemented end to end: the residual VQ-VAE tokenizer, masked transformer,
+residual transformer, canonical HumanML3D training view, and Guo evaluator are
+covered by `tests/momask/`. The paper-style RVQ uses six 512-entry EMA-reset
+codebooks with quantizer dropout. The release-parity transformer configuration
+uses the dimensions and training defaults from the authors' released code.
 
 Load training data straight from `shared` — MoMask imports no other model package:
 
@@ -90,7 +89,7 @@ bash slurm/momask/submit_momask_transformers_paperstyle.sh
 ```
 
 The default assembled, evaluation-ready checkpoint is written to
-`runs/momask-canonical-tokens-officialsplits196-clip500e/momask_smoke_latest.pt`.
+`runs/momask-canonical-tokens-releaseparity196-clip500e/momask_smoke_latest.pt`.
 Each component is selected using a fixed validation cache and repeatable
 corruptions: masked-token CE for the M-Transformer and the same sampled-level
 residual-token CE used to train the R-Transformer. The assembly job consumes
@@ -125,9 +124,31 @@ only when both checkpoint identities and the complete evaluation protocol match.
 After selecting both components, the job assembles `momask_best_val_fid.pt` and
 reports its normal full-generation validation metrics in
 `selected_full_validation.json`. Results are written under
-`runs/momask-canonical-tokens-officialsplits196-valfidselection-full/`. The test
+`runs/momask-canonical-tokens-releaseparity196-valfidselection-full/`. The test
 split remains untouched. Set `CHECKPOINT_STRIDE=2` or higher for a quicker coarse
 sweep, then use stride 1 for final selection.
+
+The release-parity defaults are 8 layers, 6 heads, hidden size 384, FFN size
+1024, dropout 0.2, raw frozen CLIP ViT-B/32 features, batch size 64, 500 epochs,
+and live random crops up to 196 frames. The residual transformer's output
+vocabulary includes the padding class, matching the released implementation.
+The masked sampler uses the released `linspace(0, 1, steps)` schedule, including
+its final one-token refinement iteration.
+Legacy checkpoints retain their older 512-way residual head through checkpoint
+metadata. Final HumanML3D generation uses separate classifier-free guidance:
+4 for the M-Transformer and 5 for the R-Transformer.
+
+After FID selection, run the untouched test split with the paper sampler:
+
+```bash
+sbatch slurm/momask/evaluate_momask_paper_protocol.sbatch
+```
+
+This uses the full test population, 10 masked iterations, temperature 1,
+top-k 0.9, stochastic sampling, and no remasking of accepted tokens. A single
+run is useful for iteration; the paper's final table averages 20 evaluation
+runs, so report a multi-seed mean and confidence interval before making a
+paper-level comparison.
 
 ## Inference-time joint constraints
 

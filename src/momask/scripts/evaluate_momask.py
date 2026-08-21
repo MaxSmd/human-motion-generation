@@ -90,6 +90,12 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--generation-steps", type=int, default=None, help="Defaults to checkpoint args.generation_steps.")
     p.add_argument("--guidance-scale", type=float, default=1.0)
+    p.add_argument(
+        "--residual-guidance-scale",
+        type=float,
+        default=None,
+        help="R-Transformer guidance. Defaults to --guidance-scale for backward compatibility.",
+    )
     p.add_argument("--temperature", type=float, default=1.0)
     p.add_argument("--topk-filter-thres", type=float, default=1.0)
     p.add_argument(
@@ -110,7 +116,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--text-encoder", choices=["checkpoint", "random", "clip"], default="checkpoint")
     p.add_argument("--clip-model", default=None, help="Defaults to checkpoint args.clip_model or ViT-B/32.")
     p.add_argument("--clip-cache-dir", default=None)
-    p.add_argument("--clip-backend", choices=["auto", "openai", "transformers"], default="auto")
+    p.add_argument(
+        "--clip-backend",
+        choices=["checkpoint", "auto", "openai", "transformers"],
+        default="checkpoint",
+        help="Use the checkpoint's CLIP backend by default so training and evaluation agree.",
+    )
     p.add_argument("--evaluator", choices=["real", "random"], default="real")
     p.add_argument("--text-to-motion-repo", default="external/text-to-motion")
     p.add_argument("--humanml3d-repo", default="external/HumanML3D")
@@ -192,10 +203,15 @@ def build_text_encoder(args: argparse.Namespace, saved_args: dict) -> TextEncode
     if kind == "random":
         return RandomTextEncoder(text_dim=int(saved_args.get("text_dim", 64)))
     if kind == "clip":
+        backend = (
+            str(saved_args.get("clip_backend", "auto"))
+            if args.clip_backend == "checkpoint"
+            else args.clip_backend
+        )
         return CLIPTextEncoder(
             model_name=args.clip_model or str(saved_args.get("clip_model", "ViT-B/32")),
             cache_dir=args.clip_cache_dir,
-            backend=args.clip_backend,
+            backend=backend,
             l2_normalize=bool(saved_args.get("clip_l2_normalize", True)),
         )
     raise ValueError(f"unknown text encoder: {kind}")
@@ -240,6 +256,8 @@ def build_token_models(ckpt: dict, device: torch.device):
         max_seq_len=math.ceil(int(a.get("max_seq_len", 80)) / int(a.get("downsample", 1))),
         dropout=float(a.get("transformer_dropout", 0.0)),
         architecture=str(a.get("transformer_arch", "legacy")),
+        residual_predict_pad=bool(a.get("residual_predict_pad", False)),
+        official_mask_schedule=bool(a.get("official_mask_schedule", False)),
     )
     masked = MaskedMotionTransformer(cfg).to(device)
     if a.get("residual_arch", "simple") == "codebook":
@@ -394,6 +412,7 @@ def generate_variant(
     frame_mask: Tensor,
     steps: int,
     guidance_scale: float,
+    residual_guidance_scale: float,
     temperature: float,
     topk_filter_thres: float,
     sample: bool,
@@ -410,7 +429,7 @@ def generate_variant(
         tokens = residual.generate_residuals(
             true_tokens[:, 0],
             cond=cond,
-            guidance_scale=guidance_scale,
+            guidance_scale=residual_guidance_scale,
             temperature=temperature,
             topk_filter_thres=topk_filter_thres,
             sample=sample,
@@ -435,7 +454,7 @@ def generate_variant(
         tokens = residual.generate_residuals(
             base,
             cond=cond,
-            guidance_scale=guidance_scale,
+            guidance_scale=residual_guidance_scale,
             temperature=temperature,
             topk_filter_thres=topk_filter_thres,
             sample=sample,
@@ -499,6 +518,11 @@ def main() -> None:
     if args.paper_transformer_data and model_input_source != "canonical":
         raise ValueError("--paper-transformer-data requires canonical model input")
     steps = int(args.generation_steps or saved_args.get("generation_steps", 10))
+    residual_guidance_scale = (
+        args.guidance_scale
+        if args.residual_guidance_scale is None
+        else args.residual_guidance_scale
+    )
     max_seq_len = int(args.max_seq_len or saved_args.get("max_seq_len", 80))
     vqvae = build_vqvae(ckpt, device)
     text_encoder: TextEncoder | None = None
@@ -619,6 +643,7 @@ def main() -> None:
                 frame_mask=model_frame_mask,
                 steps=steps,
                 guidance_scale=args.guidance_scale,
+                residual_guidance_scale=residual_guidance_scale,
                 temperature=args.temperature,
                 topk_filter_thres=args.topk_filter_thres,
                 sample=args.sample,
@@ -643,6 +668,7 @@ def main() -> None:
             "max_seq_len": max_seq_len,
             "generation_steps": steps,
             "guidance_scale": args.guidance_scale,
+            "residual_guidance_scale": residual_guidance_scale,
             "temperature": args.temperature,
             "topk_filter_thres": args.topk_filter_thres,
             "sample": args.sample,

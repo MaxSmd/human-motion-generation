@@ -191,7 +191,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--text-encoder", choices=["checkpoint", "random", "clip"], default="checkpoint")
     p.add_argument("--clip-model", default=None)
     p.add_argument("--clip-cache-dir", default=None)
-    p.add_argument("--clip-backend", choices=["auto", "openai", "transformers"], default="auto")
+    p.add_argument(
+        "--clip-backend",
+        choices=["checkpoint", "auto", "openai", "transformers"],
+        default="checkpoint",
+    )
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     return p.parse_args()
 
@@ -215,10 +219,15 @@ def build_text_encoder(args: argparse.Namespace, saved_args: dict) -> TextEncode
     if kind == "random":
         return RandomTextEncoder(text_dim=int(saved_args.get("text_dim", 64)))
     if kind == "clip":
+        backend = (
+            str(saved_args.get("clip_backend", "auto"))
+            if args.clip_backend == "checkpoint"
+            else args.clip_backend
+        )
         return CLIPTextEncoder(
             model_name=args.clip_model or str(saved_args.get("clip_model", "ViT-B/32")),
             cache_dir=args.clip_cache_dir,
-            backend=args.clip_backend,
+            backend=backend,
             l2_normalize=bool(saved_args.get("clip_l2_normalize", True)),
         )
     raise ValueError(f"unknown text encoder: {kind}")
@@ -254,6 +263,8 @@ def build_models(ckpt: dict, device: torch.device):
         max_seq_len=math.ceil(int(a.get("max_seq_len", 80)) / int(a.get("downsample", 1))),
         dropout=float(a.get("transformer_dropout", 0.0)),
         architecture=str(a.get("transformer_arch", "legacy")),
+        residual_predict_pad=bool(a.get("residual_predict_pad", False)),
+        official_mask_schedule=bool(a.get("official_mask_schedule", False)),
     )
     masked = MaskedMotionTransformer(cfg).to(device)
     if a.get("residual_arch", "simple") == "codebook":

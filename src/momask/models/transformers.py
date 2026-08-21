@@ -48,6 +48,8 @@ class TokenTransformerConfig:
     max_seq_len: int = 196
     dropout: float = 0.1
     architecture: str = "legacy"
+    residual_predict_pad: bool = False
+    official_mask_schedule: bool = False
 
 
 class _TransformerBackbone(nn.Module):
@@ -272,11 +274,16 @@ class MaskedMotionTransformer(_TransformerBackbone):
             if not remask_kept_tokens:
                 conf = conf.masked_fill(~unknown, 1e5)
 
-            ratio = cosine_mask_ratio(step, steps)
+            if self.cfg.official_mask_schedule and step < steps:
+                ratio = cosine_mask_ratio(step, max(steps - 1, 1))
+            else:
+                ratio = cosine_mask_ratio(step, steps)
             next_unknown = torch.zeros_like(unknown)
             for i in range(B):
                 active = mask[i] if mask is not None else torch.ones(seq_len, dtype=torch.bool, device=device)
                 n_remask = int(round(active.sum().item() * ratio))
+                if self.cfg.official_mask_schedule and step < steps:
+                    n_remask = max(1, n_remask)
                 if n_remask > 0:
                     scores_i = conf[i].masked_fill(~active, float("inf"))
                     remask = scores_i.argsort()[:n_remask]
@@ -407,6 +414,7 @@ class CodebookResidualTransformer(_TransformerBackbone):
         self.code_dim = code_dim
         self.share_weight = share_weight
         self.pad_id = cfg.vocab_size
+        self.output_vocab_size = cfg.vocab_size + int(cfg.residual_predict_pad)
         n_residual = num_quantizers - 1
         if share_weight:
             if n_residual < 2:
@@ -499,14 +507,14 @@ class CodebookResidualTransformer(_TransformerBackbone):
         code = self.output_proj(h)
         if isinstance(target_level, int):
             idx = target_level - 1
-            weight = self._output_proj_weight()[idx, : self.cfg.vocab_size]
+            weight = self._output_proj_weight()[idx, : self.output_vocab_size]
             logits = code @ weight.t()
         else:
             idx = target_level.to(device=h.device, dtype=torch.long) - 1
-            weight = self._output_proj_weight()[idx, : self.cfg.vocab_size]
+            weight = self._output_proj_weight()[idx, : self.output_vocab_size]
             logits = torch.einsum("btc,bvc->btv", code, weight)
         if self.output_proj_bias is not None:
-            bias = self.output_proj_bias[idx, : self.cfg.vocab_size]
+            bias = self.output_proj_bias[idx, : self.output_vocab_size]
             logits = logits + (bias if isinstance(target_level, int) else bias.unsqueeze(1))
         return logits
 

@@ -38,6 +38,7 @@ MAX_SEQ_LEN="${MAX_SEQ_LEN:-}"
 MIN_SEQ_LEN="${MIN_SEQ_LEN:-40}"
 VARIANTS="${VARIANTS:-full,base}"
 GUIDANCE_SCALE="${GUIDANCE_SCALE:-1.0}"
+RESIDUAL_GUIDANCE_SCALE="${RESIDUAL_GUIDANCE_SCALE:-${GUIDANCE_SCALE}}"
 TEMPERATURE="${TEMPERATURE:-1.0}"
 TOPK_FILTER_THRES="${TOPK_FILTER_THRES:-1.0}"
 SAMPLE="${SAMPLE:-0}"
@@ -46,7 +47,7 @@ GENERATION_STEPS="${GENERATION_STEPS:-}"
 TEXT_ENCODER="${TEXT_ENCODER:-checkpoint}"
 CLIP_MODEL="${CLIP_MODEL:-}"
 CLIP_CACHE_DIR="${CLIP_CACHE_DIR:-${HF_CACHE}}"
-CLIP_BACKEND="${CLIP_BACKEND:-auto}"
+CLIP_BACKEND="${CLIP_BACKEND:-checkpoint}"
 EVALUATOR="${EVALUATOR:-real}"
 PAPER_TRANSFORMER_DATA="${PAPER_TRANSFORMER_DATA:-0}"
 SEED="${SEED:-0}"
@@ -70,6 +71,7 @@ echo "[momask-eval] max_clips=${MAX_CLIPS} batch_size=${BATCH_SIZE} variants=${V
 echo "[momask-eval] split=${SPLIT} seed=${SEED}"
 echo "[momask-eval] max_seq_len=${MAX_SEQ_LEN:-checkpoint-default}"
 echo "[momask-eval] generation_steps=${GENERATION_STEPS:-checkpoint-default}"
+echo "[momask-eval] guidance=${GUIDANCE_SCALE} residual_guidance=${RESIDUAL_GUIDANCE_SCALE}"
 echo "[momask-eval] sample=${SAMPLE} topk_filter_thres=${TOPK_FILTER_THRES} remask_kept_tokens=${REMASK_KEPT_TOKENS}"
 echo "[momask-eval] text_encoder=${TEXT_ENCODER} clip_model=${CLIP_MODEL:-checkpoint-default} clip_backend=${CLIP_BACKEND}"
 echo "[momask-eval] output=${OUTPUT}"
@@ -150,6 +152,7 @@ enroot start \
             --clip-cache-dir '${CLIP_CACHE_DIR}' \
             --clip-backend '${CLIP_BACKEND}' \
             --guidance-scale ${GUIDANCE_SCALE} \
+            --residual-guidance-scale ${RESIDUAL_GUIDANCE_SCALE} \
             --temperature ${TEMPERATURE} \
             --topk-filter-thres ${TOPK_FILTER_THRES} \
             ${SAMPLING_ARGS} \
