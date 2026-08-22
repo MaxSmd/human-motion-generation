@@ -27,6 +27,8 @@ HUMANML3D_REPO="${HUMANML3D_REPO:-external/HumanML3D}"
 HUMANML3D_DIR="${HUMANML3D_DIR:-/mnt/projects/drl4cvb/human-motion-representation/data/HumanML3D/HumanML3D}"
 HUMANML3D_TEXTS_ZIP="${HUMANML3D_TEXTS_ZIP:-${HUMANML3D_DIR}/texts.zip}"
 REAL_H3D_DIR="${REAL_H3D_DIR:-${HOME}/rmg-runs/h3d-canonical/new_joint_vecs}"
+EVALUATOR_CHECKPOINTS_DIR="${EVALUATOR_CHECKPOINTS_DIR:-external/text-to-motion/checkpoints/momask_official}"
+EVALUATOR_NORMALIZATION_NAME="${EVALUATOR_NORMALIZATION_NAME:-Comp_v6_KLD005}"
 
 MASKED_CHECKPOINT_DIR="${MASKED_CHECKPOINT_DIR:-runs/momask-canonical-mtrans-releaseparity196-clip500e/checkpoints}"
 RESIDUAL_CHECKPOINT_DIR="${RESIDUAL_CHECKPOINT_DIR:-runs/momask-canonical-rtrans-releaseparity196-clip500e/checkpoints}"
@@ -59,6 +61,7 @@ echo "[momask-fidsel] residual_dir=${RESIDUAL_CHECKPOINT_DIR}"
 echo "[momask-fidsel] output_dir=${OUTPUT_DIR} stride=${CHECKPOINT_STRIDE} overwrite=${OVERWRITE}"
 echo "[momask-fidsel] split=${SPLIT} max_clips=${MAX_CLIPS} max_seq_len=${MAX_SEQ_LEN}"
 echo "[momask-fidsel] humanml3d_dir=${HUMANML3D_DIR} data_view=official_text2motion"
+echo "[momask-fidsel] evaluator_checkpoints=${EVALUATOR_CHECKPOINTS_DIR} normalization=${EVALUATOR_NORMALIZATION_NAME}"
 echo "[momask-fidsel] masked_steps=${MASKED_GENERATION_STEPS} masked_guidance=${MASKED_GUIDANCE_SCALE}"
 echo "[momask-fidsel] residual_guidance=${RESIDUAL_GUIDANCE_SCALE} final_steps=${FINAL_GENERATION_STEPS} final_residual_guidance=${FINAL_RESIDUAL_GUIDANCE_SCALE}"
 echo "[momask-fidsel] temp=${TEMPERATURE} topk=${TOPK_FILTER_THRES} sample=${SAMPLE} remask=${REMASK_KEPT_TOKENS} seed=${SEED}"
@@ -137,6 +140,8 @@ enroot start \
                     $([ "${REMASK_KEPT_TOKENS}" = 1 ] && printf '%s' '--remask-kept-tokens' || printf '%s' '--no-remask-kept-tokens') \\
                     --seed ${SEED} \\
                     --evaluator real \\
+                    --evaluator-checkpoints-dir '${EVALUATOR_CHECKPOINTS_DIR}' \\
+                    --evaluator-normalization-name '${EVALUATOR_NORMALIZATION_NAME}' \\
                     --output \"\${output}\"
                 python -m momask.scripts.select_transformer_checkpoints annotate \\
                     --result \"\${output}\" \\
@@ -155,6 +160,8 @@ enroot start \
         common_protocol=\"\${common_protocol};data_root=${DATA_ROOT}\"
         common_protocol=\"\${common_protocol};texts=${HUMANML3D_TEXTS_ZIP};real=${REAL_H3D_DIR}\"
         common_protocol=\"\${common_protocol};splits=${HUMANML3D_DIR};view=official_text2motion\"
+        common_protocol=\"\${common_protocol};evaluator_root=${EVALUATOR_CHECKPOINTS_DIR}\"
+        common_protocol=\"\${common_protocol};evaluator_norm=${EVALUATOR_NORMALIZATION_NAME}\"
         masked_protocol=\"phase=masked;variant=base;steps=${MASKED_GENERATION_STEPS}\"
         masked_protocol=\"\${masked_protocol};guidance=${MASKED_GUIDANCE_SCALE};\${common_protocol}\"
         residual_protocol='phase=residual;variant=teacher_residual'
@@ -248,6 +255,8 @@ enroot start \
                 $([ "${REMASK_KEPT_TOKENS}" = 1 ] && printf '%s' '--remask-kept-tokens' || printf '%s' '--no-remask-kept-tokens') \\
                 --seed ${SEED} \\
                 --evaluator real \\
+                --evaluator-checkpoints-dir '${EVALUATOR_CHECKPOINTS_DIR}' \\
+                --evaluator-normalization-name '${EVALUATOR_NORMALIZATION_NAME}' \\
                 --output \"\${final_output}\"
             python -m momask.scripts.select_transformer_checkpoints annotate \\
                 --result \"\${final_output}\" \\

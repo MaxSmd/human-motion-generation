@@ -49,9 +49,18 @@ CLIP_MODEL="${CLIP_MODEL:-}"
 CLIP_CACHE_DIR="${CLIP_CACHE_DIR:-${HF_CACHE}}"
 CLIP_BACKEND="${CLIP_BACKEND:-checkpoint}"
 EVALUATOR="${EVALUATOR:-real}"
+EVALUATOR_CHECKPOINTS_DIR="${EVALUATOR_CHECKPOINTS_DIR:-}"
+EVALUATOR_NORMALIZATION_NAME="${EVALUATOR_NORMALIZATION_NAME:-}"
 PAPER_TRANSFORMER_DATA="${PAPER_TRANSFORMER_DATA:-0}"
 SEED="${SEED:-0}"
 OUTPUT="${OUTPUT:-}"
+
+if [ "${PAPER_TRANSFORMER_DATA}" = "1" ]; then
+    EVALUATOR_CHECKPOINTS_DIR="${EVALUATOR_CHECKPOINTS_DIR:-external/text-to-motion/checkpoints/momask_official}"
+    EVALUATOR_NORMALIZATION_NAME="${EVALUATOR_NORMALIZATION_NAME:-Comp_v6_KLD005}"
+else
+    EVALUATOR_NORMALIZATION_NAME="${EVALUATOR_NORMALIZATION_NAME:-Comp_v6_KLD01}"
+fi
 
 if [ -z "${OUTPUT}" ]; then
     OUTPUT="$(dirname "${CKPT}")/eval_momask/results_${MAX_CLIPS}_${VARIANTS//,/plus}_canonicalreal.json"
@@ -74,6 +83,7 @@ echo "[momask-eval] generation_steps=${GENERATION_STEPS:-checkpoint-default}"
 echo "[momask-eval] guidance=${GUIDANCE_SCALE} residual_guidance=${RESIDUAL_GUIDANCE_SCALE}"
 echo "[momask-eval] sample=${SAMPLE} topk_filter_thres=${TOPK_FILTER_THRES} remask_kept_tokens=${REMASK_KEPT_TOKENS}"
 echo "[momask-eval] text_encoder=${TEXT_ENCODER} clip_model=${CLIP_MODEL:-checkpoint-default} clip_backend=${CLIP_BACKEND}"
+echo "[momask-eval] evaluator=${EVALUATOR} evaluator_checkpoints=${EVALUATOR_CHECKPOINTS_DIR:-legacy-default} evaluator_normalization=${EVALUATOR_NORMALIZATION_NAME}"
 echo "[momask-eval] output=${OUTPUT}"
 
 GENERATION_ARGS=""
@@ -99,6 +109,11 @@ fi
 MAX_SEQ_LEN_ARG=""
 if [ -n "${MAX_SEQ_LEN}" ]; then
     MAX_SEQ_LEN_ARG="--max-seq-len ${MAX_SEQ_LEN}"
+fi
+
+EVALUATOR_CHECKPOINTS_ARG=""
+if [ -n "${EVALUATOR_CHECKPOINTS_DIR}" ]; then
+    EVALUATOR_CHECKPOINTS_ARG="--evaluator-checkpoints-dir '${EVALUATOR_CHECKPOINTS_DIR}'"
 fi
 
 PAPER_DATA_ARG=""
@@ -158,5 +173,7 @@ enroot start \
             ${SAMPLING_ARGS} \
             --seed ${SEED} \
             --evaluator '${EVALUATOR}' \
+            ${EVALUATOR_CHECKPOINTS_ARG} \
+            --evaluator-normalization-name '${EVALUATOR_NORMALIZATION_NAME}' \
             --output '${OUTPUT}'
     "

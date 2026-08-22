@@ -126,6 +126,22 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--text-to-motion-repo", default="external/text-to-motion")
     p.add_argument("--humanml3d-repo", default="external/HumanML3D")
     p.add_argument(
+        "--evaluator-checkpoints-dir",
+        default=None,
+        help=(
+            "Optional evaluator checkpoint root containing t2m/. The official "
+            "MoMask evaluator assets can be kept separate from legacy KLD01 assets."
+        ),
+    )
+    p.add_argument(
+        "--evaluator-normalization-name",
+        default=None,
+        help=(
+            "Evaluator experiment directory containing meta/mean.npy and meta/std.npy. "
+            "Defaults to KLD005 for --paper-transformer-data and KLD01 otherwise."
+        ),
+    )
+    p.add_argument(
         "--real-h3d-dir",
         default=None,
         help=(
@@ -286,14 +302,27 @@ def build_evaluator(args: argparse.Namespace, device: torch.device):
     if args.evaluator == "random":
         return RandomGuoEvaluator()
     require_path(Path(args.text_to_motion_repo) / "networks" / "evaluator_wrapper.py", "text-to-motion evaluator wrapper")
+    checkpoints_dir = args.evaluator_checkpoints_dir
+    if checkpoints_dir is None and args.paper_transformer_data:
+        checkpoints_dir = Path(args.text_to_motion_repo) / "checkpoints" / "momask_official"
+    normalization_name = args.evaluator_normalization_name or (
+        "Comp_v6_KLD005" if args.paper_transformer_data else "Comp_v6_KLD01"
+    )
+    checkpoint_root = (
+        Path(checkpoints_dir)
+        if checkpoints_dir
+        else Path(args.text_to_motion_repo) / "checkpoints"
+    )
     require_path(
-        Path(args.text_to_motion_repo) / "checkpoints" / "t2m" / "text_mot_match" / "model" / "finest.tar",
+        checkpoint_root / "t2m" / "text_mot_match" / "model" / "finest.tar",
         "Guo evaluator checkpoint",
     )
     return RealGuoEvaluator(
         text_to_motion_repo=args.text_to_motion_repo,
         humanml3d_repo=args.humanml3d_repo,
         device=device,
+        checkpoints_dir=checkpoints_dir,
+        normalization_name=normalization_name,
     )
 
 
@@ -675,6 +704,15 @@ def main() -> None:
             "remask_kept_tokens": args.remask_kept_tokens,
             "seed": args.seed,
             "evaluator": args.evaluator,
+            "evaluator_checkpoints_dir": (
+                str(evaluator.checkpoints_dir) if args.evaluator == "real" else None
+            ),
+            "evaluator_normalization_name": (
+                evaluator.normalization_name if args.evaluator == "real" else None
+            ),
+            "evaluator_normalization_path": (
+                str(evaluator.normalization_path) if args.evaluator == "real" else None
+            ),
             "real_feature_source": "canonical" if real_h3d_dir is not None else "packed",
             "real_h3d_dir": str(real_h3d_dir) if real_h3d_dir is not None else None,
             "model_input_source": model_input_source,

@@ -26,6 +26,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--humanml3d-split-dir", required=True)
     parser.add_argument("--text-to-motion-repo", default="external/text-to-motion")
     parser.add_argument("--humanml3d-repo", default="external/HumanML3D")
+    parser.add_argument(
+        "--evaluator-checkpoints-dir",
+        default="external/text-to-motion/checkpoints/momask_official",
+    )
+    parser.add_argument("--evaluator-normalization-name", default="Comp_v6_KLD005")
     parser.add_argument("--split", choices=("train", "val", "test"), default="test")
     parser.add_argument("--max-seq-len", type=int, default=196)
     parser.add_argument("--min-seq-len", type=int, default=40)
@@ -96,6 +101,8 @@ def main() -> None:
         text_to_motion_repo=args.text_to_motion_repo,
         humanml3d_repo=args.humanml3d_repo,
         device=device,
+        checkpoints_dir=args.evaluator_checkpoints_dir,
+        normalization_name=args.evaluator_normalization_name,
     )
     caption_tokens = load_caption_tokens(args.humanml3d_texts_zip)
 
@@ -138,6 +145,9 @@ def main() -> None:
             "max_seq_len": args.max_seq_len,
             "min_seq_len": args.min_seq_len,
             "seed": args.seed,
+            "evaluator_checkpoints_dir": str(evaluator.checkpoints_dir),
+            "evaluator_normalization_name": evaluator.normalization_name,
+            "evaluator_normalization_path": str(evaluator.normalization_path),
             "vip_token_fallbacks": int(token_fallbacks),
             "source_ids": dataset.num_source_ids,
             "source_mirror_ids": dataset.num_source_mirror_ids,

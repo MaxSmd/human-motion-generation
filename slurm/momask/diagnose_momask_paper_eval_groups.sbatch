@@ -22,13 +22,16 @@ DATA_ROOT="${DATA_ROOT:-/mnt/projects/drl4cvb/human-motion-representation/data/d
 HUMANML3D_DIR="${HUMANML3D_DIR:-/mnt/projects/drl4cvb/human-motion-representation/data/HumanML3D/HumanML3D}"
 HUMANML3D_TEXTS_ZIP="${HUMANML3D_TEXTS_ZIP:-${HUMANML3D_DIR}/texts.zip}"
 REAL_H3D_DIR="${REAL_H3D_DIR:-${HOME}/rmg-runs/h3d-canonical/new_joint_vecs}"
+EVALUATOR_CHECKPOINTS_DIR="${EVALUATOR_CHECKPOINTS_DIR:-external/text-to-motion/checkpoints/momask_official}"
+EVALUATOR_NORMALIZATION_NAME="${EVALUATOR_NORMALIZATION_NAME:-Comp_v6_KLD005}"
 SPLIT="${SPLIT:-test}"
 MAX_CLIPS="${MAX_CLIPS:--1}"
 SEED="${SEED:-3407}"
-OUTPUT="${OUTPUT:-runs/momask_diagnostics/paper_eval_real_groups_${SPLIT}.json}"
+OUTPUT="${OUTPUT:-runs/momask_diagnostics/paper_eval_real_groups_${SPLIT}_${EVALUATOR_NORMALIZATION_NAME}.json}"
 
 echo "[momask-real-groups] host=$(hostname)"
 echo "[momask-real-groups] split=${SPLIT} max_clips=${MAX_CLIPS} output=${OUTPUT}"
+echo "[momask-real-groups] evaluator_checkpoints=${EVALUATOR_CHECKPOINTS_DIR} normalization=${EVALUATOR_NORMALIZATION_NAME}"
 
 enroot start \
     --root \
@@ -53,5 +56,7 @@ enroot start \
             --batch-size 32 \\
             --max-clips '${MAX_CLIPS}' \\
             --seed '${SEED}' \\
+            --evaluator-checkpoints-dir '${EVALUATOR_CHECKPOINTS_DIR}' \\
+            --evaluator-normalization-name '${EVALUATOR_NORMALIZATION_NAME}' \\
             --output '${OUTPUT}'
     "

@@ -22,7 +22,7 @@ from shared.eval import (
     multimodality,
     r_precision,
 )
-from shared.eval.guo_evaluator import _upstream_align_indices
+from shared.eval.guo_evaluator import _resolve_evaluator_assets, _upstream_align_indices
 
 
 # ---------------------------------------------------------------------------
@@ -193,3 +193,45 @@ def test_upstream_align_indices_is_identity_without_ties() -> None:
     align, inv = _upstream_align_indices(m_lens)
     assert np.array_equal(align, np.arange(m_lens.numel()))
     assert np.array_equal(inv, np.arange(m_lens.numel()))
+
+
+def test_resolve_explicit_evaluator_assets_keeps_checkpoint_and_stats_paired(tmp_path) -> None:
+    repo = tmp_path / "text-to-motion"
+    checkpoint_root = tmp_path / "momask-official"
+    checkpoint = checkpoint_root / "t2m" / "text_mot_match" / "model" / "finest.tar"
+    meta = checkpoint_root / "t2m" / "Comp_v6_KLD005" / "meta"
+    checkpoint.parent.mkdir(parents=True)
+    meta.mkdir(parents=True)
+    checkpoint.touch()
+    (meta / "mean.npy").touch()
+    (meta / "std.npy").touch()
+
+    root, mean, std = _resolve_evaluator_assets(
+        text_to_motion_repo=repo,
+        humanml3d_repo=tmp_path / "HumanML3D",
+        checkpoints_dir=checkpoint_root,
+        normalization_name="Comp_v6_KLD005",
+    )
+
+    assert root == checkpoint_root.resolve()
+    assert mean == meta / "mean.npy"
+    assert std == meta / "std.npy"
+
+
+def test_resolve_explicit_evaluator_assets_does_not_fallback(tmp_path) -> None:
+    checkpoint_root = tmp_path / "momask-official"
+    checkpoint = checkpoint_root / "t2m" / "text_mot_match" / "model" / "finest.tar"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.touch()
+    h3d = tmp_path / "HumanML3D" / "HumanML3D"
+    h3d.mkdir(parents=True)
+    (h3d / "Mean.npy").touch()
+    (h3d / "Std.npy").touch()
+
+    with pytest.raises(FileNotFoundError, match="Comp_v6_KLD005"):
+        _resolve_evaluator_assets(
+            text_to_motion_repo=tmp_path / "text-to-motion",
+            humanml3d_repo=tmp_path / "HumanML3D",
+            checkpoints_dir=checkpoint_root,
+            normalization_name="Comp_v6_KLD005",
+        )

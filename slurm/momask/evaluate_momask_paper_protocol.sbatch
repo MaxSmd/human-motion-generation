@@ -24,10 +24,13 @@ export SAMPLE="${SAMPLE:-1}"
 export REMASK_KEPT_TOKENS="${REMASK_KEPT_TOKENS:-0}"
 export PAPER_TRANSFORMER_DATA="${PAPER_TRANSFORMER_DATA:-1}"
 export CLIP_BACKEND="${CLIP_BACKEND:-checkpoint}"
+export EVALUATOR_CHECKPOINTS_DIR="${EVALUATOR_CHECKPOINTS_DIR:-external/text-to-motion/checkpoints/momask_official}"
+export EVALUATOR_NORMALIZATION_NAME="${EVALUATOR_NORMALIZATION_NAME:-Comp_v6_KLD005}"
 export SEED="${SEED:-3407}"
 export OUTPUT="${OUTPUT:-$(dirname "${CKPT}")/eval_momask/paper_protocol_test_seed${SEED}.json}"
 
 echo "[momask-paper-eval] M guidance=${GUIDANCE_SCALE} R guidance=${RESIDUAL_GUIDANCE_SCALE}"
 echo "[momask-paper-eval] steps=${GENERATION_STEPS} topk=${TOPK_FILTER_THRES} sample=${SAMPLE} remask=${REMASK_KEPT_TOKENS}"
+echo "[momask-paper-eval] evaluator_checkpoints=${EVALUATOR_CHECKPOINTS_DIR} normalization=${EVALUATOR_NORMALIZATION_NAME}"
 
 bash slurm/momask/evaluate_momask.sbatch

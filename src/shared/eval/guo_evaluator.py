@@ -86,6 +86,54 @@ def _upstream_align_indices(m_lens: Tensor) -> tuple[np.ndarray, np.ndarray]:
     return align, inv
 
 
+def _resolve_evaluator_assets(
+    text_to_motion_repo: str | Path,
+    humanml3d_repo: str | Path,
+    checkpoints_dir: str | Path | None,
+    normalization_name: str,
+) -> tuple[Path, Path, Path]:
+    """Resolve one matching checkpoint and its paired motion normalization."""
+    repo = Path(text_to_motion_repo).resolve()
+    explicit_checkpoint_root = checkpoints_dir is not None
+    checkpoint_root = (
+        Path(checkpoints_dir).resolve()
+        if explicit_checkpoint_root
+        else repo / "checkpoints"
+    )
+    checkpoint = checkpoint_root / "t2m" / "text_mot_match" / "model" / "finest.tar"
+    if not checkpoint.is_file():
+        raise FileNotFoundError(f"Guo evaluator checkpoint not found: {checkpoint}")
+
+    meta = checkpoint_root / "t2m" / normalization_name / "meta"
+    mean_path = meta / "mean.npy"
+    std_path = meta / "std.npy"
+    if mean_path.is_file() and std_path.is_file():
+        return checkpoint_root, mean_path, std_path
+
+    # Preserve the old partial-setup fallback only for the legacy default.
+    # An explicitly selected MoMask evaluator must fail rather than silently
+    # mixing its checkpoint with unrelated HumanML3D statistics.
+    if explicit_checkpoint_root or normalization_name != "Comp_v6_KLD01":
+        raise FileNotFoundError(
+            "Guo evaluator normalization not found: "
+            f"expected {mean_path} and {std_path}"
+        )
+
+    h3d = Path(humanml3d_repo)
+    fallback_mean = h3d / "HumanML3D" / "Mean.npy"
+    fallback_std = h3d / "HumanML3D" / "Std.npy"
+    if not fallback_mean.is_file() or not fallback_std.is_file():
+        raise FileNotFoundError(
+            "Guo evaluator normalization not found in either evaluator assets "
+            f"({meta}) or HumanML3D ({fallback_mean.parent})"
+        )
+    print(
+        f"[guo] WARN: {mean_path} not found, falling back to {fallback_mean}",
+        flush=True,
+    )
+    return checkpoint_root, fallback_mean, fallback_std
+
+
 class RealGuoEvaluator:
     motion_dim = 512
     text_dim = 512
@@ -95,6 +143,8 @@ class RealGuoEvaluator:
         text_to_motion_repo: str | Path = "external/text-to-motion",
         humanml3d_repo: str | Path = "external/HumanML3D",
         device: str | torch.device = "cpu",
+        checkpoints_dir: str | Path | None = None,
+        normalization_name: str = "Comp_v6_KLD01",
     ) -> None:
         repo = Path(text_to_motion_repo).resolve()
         if not (repo / "networks" / "modules.py").exists():
@@ -105,7 +155,16 @@ class RealGuoEvaluator:
         from utils.word_vectorizer import WordVectorizer
 
         self._device = torch.device(device)
-        opt = _GuoOpts(checkpoints_dir=repo / "checkpoints", device=self._device)
+        checkpoint_root, mean_path, std_path = _resolve_evaluator_assets(
+            text_to_motion_repo=repo,
+            humanml3d_repo=humanml3d_repo,
+            checkpoints_dir=checkpoints_dir,
+            normalization_name=normalization_name,
+        )
+        self.checkpoints_dir = checkpoint_root
+        self.normalization_name = normalization_name
+        self.normalization_path = mean_path
+        opt = _GuoOpts(checkpoints_dir=checkpoint_root, device=self._device)
         # EvaluatorModelWrapper expects opt.checkpoints_dir to be a string-coercible path
         opt_ns = type("Opt", (), opt.__dict__)()  # convert dataclass → simple object
         opt_ns.checkpoints_dir = str(opt.checkpoints_dir)
@@ -113,24 +172,15 @@ class RealGuoEvaluator:
 
         self._word_vec = WordVectorizer(str(repo / "glove"), "our_vab")
 
-        # Mean / Std for 263-D feature normalization. CRITICAL: must use the
-        # files shipped *with the evaluator checkpoint* (Comp_v6_KLD01/meta/),
-        # NOT the HumanML3D repo's Mean.npy/Std.npy. They differ — the
-        # evaluator was trained on a specific normalization, and feeding
-        # features normalized with different stats gives a 2-3× scale
-        # mismatch in embeddings (diversity_real ≈ 4 instead of ~9.5).
-        meta = repo / "checkpoints" / opt.dataset_name / "Comp_v6_KLD01" / "meta"
-        mean_path = meta / "mean.npy"
-        std_path = meta / "std.npy"
-        if not mean_path.exists():
-            # Fallback to HumanML3D repo (kept for tests / partial setups).
-            print(f"[guo] WARN: {mean_path} not found, falling back to HumanML3D Mean.npy", flush=True)
-            h3d = Path(humanml3d_repo)
-            mean_path = h3d / "HumanML3D" / "Mean.npy"
-            std_path = h3d / "HumanML3D" / "Std.npy"
+        # The matching checkpoint and its experiment-specific normalization
+        # must stay paired; mixing them changes the evaluator embedding space.
         self._mean = torch.from_numpy(np.load(mean_path)).float().to(self._device)
         self._std = torch.from_numpy(np.load(std_path)).float().to(self._device)
-        print(f"[guo] loaded normalization from {mean_path}", flush=True)
+        print(
+            f"[guo] checkpoints={checkpoint_root} normalization={normalization_name} "
+            f"mean={mean_path}",
+            flush=True,
+        )
 
     # ------------------------------------------------------------ helpers
 
