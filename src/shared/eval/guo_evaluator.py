@@ -134,9 +134,34 @@ def _resolve_evaluator_assets(
     return checkpoint_root, fallback_mean, fallback_std
 
 
+def _normalize_motion_batch(
+    motion: Tensor,
+    lengths: Tensor | None,
+    mean: Tensor,
+    std: Tensor,
+) -> Tensor:
+    """Normalize valid frames and keep temporal padding at normalized zero."""
+    x = (motion - mean.to(device=motion.device, dtype=motion.dtype)) / std.to(
+        device=motion.device,
+        dtype=motion.dtype,
+    ).clamp_min(1e-8)
+    if lengths is None:
+        return x
+    if motion.ndim != 3 or lengths.ndim != 1 or lengths.shape[0] != motion.shape[0]:
+        raise ValueError(
+            "length-aware normalization expects motion (B,T,D) and lengths (B,)"
+        )
+    lengths = lengths.to(device=motion.device, dtype=torch.long)
+    if bool((lengths < 0).any()) or bool((lengths > motion.shape[1]).any()):
+        raise ValueError(f"motion lengths must be within [0, {motion.shape[1]}]")
+    valid = torch.arange(motion.shape[1], device=motion.device).unsqueeze(0) < lengths.unsqueeze(1)
+    return x.masked_fill(~valid.unsqueeze(-1), 0.0)
+
+
 class RealGuoEvaluator:
     motion_dim = 512
     text_dim = 512
+    protocol_version = "guo-v2-normalize-valid-then-zero-pad"
 
     def __init__(
         self,
@@ -178,14 +203,14 @@ class RealGuoEvaluator:
         self._std = torch.from_numpy(np.load(std_path)).float().to(self._device)
         print(
             f"[guo] checkpoints={checkpoint_root} normalization={normalization_name} "
-            f"mean={mean_path}",
+            f"mean={mean_path} protocol={self.protocol_version}",
             flush=True,
         )
 
     # ------------------------------------------------------------ helpers
 
-    def normalize(self, motion_263: Tensor) -> Tensor:
-        return (motion_263 - self._mean) / self._std.clamp_min(1e-8)
+    def normalize(self, motion_263: Tensor, lengths: Tensor | None = None) -> Tensor:
+        return _normalize_motion_batch(motion_263, lengths, self._mean, self._std)
 
     def _tokenize_for_text_enc(self, texts: list[str]) -> tuple[Tensor, Tensor, Tensor]:
         """Convert plain strings → (word_embs, pos_ohot, cap_lens) the
@@ -232,8 +257,8 @@ class RealGuoEvaluator:
         # of inputs"). Anything pairing motion with text by index (R@k, mm_dist)
         # breaks unless the exact permutation is undone. Reproduce its ordering
         # and invert it, encoding the way `get_co_embeddings` does.
-        x = self.normalize(motion_features.to(self._device).float())
         m_lens = lengths.to(self._device).long()
+        x = self.normalize(motion_features.to(self._device).float(), m_lens)
         align, inv = _upstream_align_indices(m_lens)
         align_t = torch.as_tensor(align, device=self._device)
         inv_t = torch.as_tensor(inv, device=self._device)

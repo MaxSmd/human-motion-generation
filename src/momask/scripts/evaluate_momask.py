@@ -713,6 +713,9 @@ def main() -> None:
             "evaluator_normalization_path": (
                 str(evaluator.normalization_path) if args.evaluator == "real" else None
             ),
+            "evaluator_protocol_version": (
+                evaluator.protocol_version if args.evaluator == "real" else None
+            ),
             "real_feature_source": "canonical" if real_h3d_dir is not None else "packed",
             "real_h3d_dir": str(real_h3d_dir) if real_h3d_dir is not None else None,
             "model_input_source": model_input_source,

@@ -148,6 +148,7 @@ def main() -> None:
             "evaluator_checkpoints_dir": str(evaluator.checkpoints_dir),
             "evaluator_normalization_name": evaluator.normalization_name,
             "evaluator_normalization_path": str(evaluator.normalization_path),
+            "evaluator_protocol_version": evaluator.protocol_version,
             "vip_token_fallbacks": int(token_fallbacks),
             "source_ids": dataset.num_source_ids,
             "source_mirror_ids": dataset.num_source_mirror_ids,

@@ -162,6 +162,7 @@ enroot start \
         common_protocol=\"\${common_protocol};splits=${HUMANML3D_DIR};view=official_text2motion\"
         common_protocol=\"\${common_protocol};evaluator_root=${EVALUATOR_CHECKPOINTS_DIR}\"
         common_protocol=\"\${common_protocol};evaluator_norm=${EVALUATOR_NORMALIZATION_NAME}\"
+        common_protocol=\"\${common_protocol};evaluator_impl=guo-v2-normalize-valid-then-zero-pad\"
         masked_protocol=\"phase=masked;variant=base;steps=${MASKED_GENERATION_STEPS}\"
         masked_protocol=\"\${masked_protocol};guidance=${MASKED_GUIDANCE_SCALE};\${common_protocol}\"
         residual_protocol='phase=residual;variant=teacher_residual'

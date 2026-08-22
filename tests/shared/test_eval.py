@@ -22,7 +22,11 @@ from shared.eval import (
     multimodality,
     r_precision,
 )
-from shared.eval.guo_evaluator import _resolve_evaluator_assets, _upstream_align_indices
+from shared.eval.guo_evaluator import (
+    _normalize_motion_batch,
+    _resolve_evaluator_assets,
+    _upstream_align_indices,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -235,3 +239,25 @@ def test_resolve_explicit_evaluator_assets_does_not_fallback(tmp_path) -> None:
             checkpoints_dir=checkpoint_root,
             normalization_name="Comp_v6_KLD005",
         )
+
+
+def test_motion_normalization_keeps_padding_zero_in_normalized_space() -> None:
+    motion = torch.tensor(
+        [
+            [[3.0, 4.0], [0.0, 0.0], [0.0, 0.0]],
+            [[5.0, 5.0], [7.0, 6.0], [0.0, 0.0]],
+        ]
+    )
+    lengths = torch.tensor([1, 2])
+    mean = torch.tensor([1.0, 2.0])
+    std = torch.tensor([2.0, 1.0])
+
+    normalized = _normalize_motion_batch(motion, lengths, mean, std)
+
+    expected = torch.tensor(
+        [
+            [[1.0, 2.0], [0.0, 0.0], [0.0, 0.0]],
+            [[2.0, 3.0], [3.0, 4.0], [0.0, 0.0]],
+        ]
+    )
+    assert torch.equal(normalized, expected)
