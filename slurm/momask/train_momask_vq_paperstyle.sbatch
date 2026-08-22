@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --job-name=momask-vq-paper
-#SBATCH --partition=24g
+#SBATCH --partition=12g
 #SBATCH --qos=students_normal
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:1,ccc:75
 #SBATCH --nodes=1
 #SBATCH --output=slurm/logs/momask-vq-paperstyle-%j.out
 #SBATCH --error=slurm/logs/momask-vq-paperstyle-%j.err
@@ -21,7 +21,8 @@ HUMANML3D_DIR="${HUMANML3D_DIR:-/mnt/projects/drl4cvb/human-motion-representatio
 export CANONICAL_H3D_DIR="${CANONICAL_H3D_DIR:-${HOME}/rmg-runs/h3d-canonical/new_joint_vecs}"
 export H3D_MEAN="${H3D_MEAN:-${HUMANML3D_DIR}/Mean.npy}"
 export H3D_STD="${H3D_STD:-${HUMANML3D_DIR}/Std.npy}"
-export RUN_NAME="${RUN_NAME:-momask-canonical-vq-paper-gpucache64-50e}"
+export HUMANML3D_SPLIT_DIR="${HUMANML3D_SPLIT_DIR:-${HUMANML3D_DIR}}"
+export RUN_NAME="${RUN_NAME:-momask-canonical-vq-releaseparity64-50e}"
 export VQ_STEPS="${VQ_STEPS:-0}"
 export VQ_EPOCHS="${VQ_EPOCHS:-50}"
 export MAX_SEQ_LEN="${MAX_SEQ_LEN:-64}"
@@ -29,10 +30,13 @@ export MIN_SEQ_LEN="${MIN_SEQ_LEN:-64}"
 export VQ_WINDOW_DATASET="${VQ_WINDOW_DATASET:-1}"
 export VQ_WINDOW_STRIDE="${VQ_WINDOW_STRIDE:-1}"
 export VQ_WINDOW_PRELOAD="${VQ_WINDOW_PRELOAD:-1}"
-export VQ_GPU_WINDOW_CACHE="${VQ_GPU_WINDOW_CACHE:-1}"
-export BATCH_SIZE="${BATCH_SIZE:-512}"
-export NUM_WORKERS="${NUM_WORKERS:-4}"
-export SAVE_EVERY="${SAVE_EVERY:-5000}"
+export VQ_GPU_WINDOW_CACHE="${VQ_GPU_WINDOW_CACHE:-0}"
+export BATCH_SIZE="${BATCH_SIZE:-256}"
+export NUM_WORKERS="${NUM_WORKERS:-3}"
+export SAVE_EVERY="${SAVE_EVERY:-0}"
+export VQ_SAVE_EVERY_EPOCH="${VQ_SAVE_EVERY_EPOCH:-1}"
+export VQ_MODEL_ONLY_STEP_CHECKPOINTS="${VQ_MODEL_ONLY_STEP_CHECKPOINTS:-1}"
+export VQ_FAIL_IF_OUTPUT_EXISTS="${VQ_FAIL_IF_OUTPUT_EXISTS:-1}"
 export LOG_EVERY="${LOG_EVERY:-1000}"
 export NO_MOMASK_NORMALIZE="${NO_MOMASK_NORMALIZE:-0}"
 
@@ -56,6 +60,6 @@ export VQ_ARCH="${VQ_ARCH:-paper}"
 export VQ_GRAD_CLIP="${VQ_GRAD_CLIP:-0.0}"
 export WARMUP_STEPS="${WARMUP_STEPS:-2000}"
 export LR_MILESTONES="${LR_MILESTONES:-150000 250000}"
-export LR_GAMMA="${LR_GAMMA:-0.05}"
+export LR_GAMMA="${LR_GAMMA:-0.1}"
 
 bash slurm/momask/train_momask_vq_full.sbatch

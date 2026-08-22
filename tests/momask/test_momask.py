@@ -26,6 +26,7 @@ from momask.scripts.train_momask import (
     FixedWindowTensorBatcher,
     H3DNormalizer,
     cycle_loader,
+    save_vq_train_checkpoint,
     stack_token_cache,
 )
 from momask.tasks import generate_h3d263
@@ -418,6 +419,72 @@ def test_canonical_window_dataset_preloads_and_indexes_all_windows(tmp_path: Pat
     sample = ds[2]
     assert sample.clip_id == "000001:4"
     assert torch.equal(sample.x1, torch.from_numpy(first[4:8]))
+
+
+def test_canonical_window_dataset_can_use_official_split_with_mirrors(tmp_path: Path) -> None:
+    canonical = tmp_path / "new_joint_vecs"
+    canonical.mkdir()
+    split_dir = tmp_path / "HumanML3D"
+    split_dir.mkdir()
+    (tmp_path / "splits.json").write_text(
+        json.dumps({"train": ["000001"], "val": [], "test": []})
+    )
+    (split_dir / "train.txt").write_text("000001\nM000001\nM999999\n")
+    motion = np.zeros((6, H3D_FEATURE_DIM), dtype=np.float32)
+    np.save(canonical / "000001.npy", motion)
+    np.save(canonical / "M000001.npy", motion)
+
+    ds = CanonicalHumanML3DWindowDataset(
+        tmp_path,
+        canonical,
+        window_size=4,
+        split_dir=split_dir,
+        subset_n=999999,
+    )
+
+    assert ds.num_source_ids == 3
+    assert ds.num_source_mirror_ids == 2
+    assert ds.num_clips == 2
+    assert ds.num_mirror_clips == 1
+    assert ds.num_missing_motion == 1
+    assert len(ds) == 6
+
+
+def test_vq_numbered_checkpoints_keep_optimizer_by_default(tmp_path: Path, monkeypatch) -> None:
+    class Stateful:
+        def state_dict(self):
+            return {"value": 1}
+
+    saved: dict[str, dict] = {}
+
+    def fake_save(payload, path):
+        saved[Path(path).name] = payload
+
+    monkeypatch.setattr(torch, "save", fake_save)
+    stateful = Stateful()
+    save_vq_train_checkpoint(
+        tmp_path,
+        10,
+        types.SimpleNamespace(seed=0),
+        stateful,
+        stateful,
+        stateful,
+    )
+    assert "vq_optimizer" in saved["vq_step_0000010.pt"]
+    assert "vq_optimizer" in saved["vq_latest_train.pt"]
+
+    saved.clear()
+    save_vq_train_checkpoint(
+        tmp_path,
+        20,
+        types.SimpleNamespace(seed=0),
+        stateful,
+        stateful,
+        stateful,
+        model_only_step=True,
+    )
+    assert "vq_optimizer" not in saved["vq_step_0000020.pt"]
+    assert "vq_optimizer" in saved["vq_latest_train.pt"]
 
 
 def test_fixed_window_tensor_batcher_preserves_window_contents(tmp_path: Path) -> None:

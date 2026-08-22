@@ -194,6 +194,19 @@ def parse_args() -> argparse.Namespace:
         help="For VQ-only runs, save lightweight VQ training checkpoints every N steps. 0 disables.",
     )
     p.add_argument(
+        "--vq-save-every-epoch",
+        action="store_true",
+        help="For epoch-based VQ runs, save a checkpoint at each epoch boundary.",
+    )
+    p.add_argument(
+        "--vq-model-only-step-checkpoints",
+        action="store_true",
+        help=(
+            "Omit optimizer state from numbered VQ checkpoints while retaining it in "
+            "vq_latest_train.pt. Useful when keeping many checkpoints for FID selection."
+        ),
+    )
+    p.add_argument(
         "--no-momask-normalize",
         action="store_true",
         help="Disable official MoMask-style HumanML3D feature normalization.",
@@ -958,20 +971,22 @@ def save_vq_train_checkpoint(
     normalizer: H3DNormalizer,
     vqvae: MotionRVQVAE,
     vq_opt: torch.optim.Optimizer,
+    *,
+    model_only_step: bool = False,
 ) -> None:
     ckpt_dir = output_dir / "checkpoints"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
-    ckpt = {
+    model_ckpt = {
         "step": step,
         "args": vars(args),
         "normalizer": normalizer.state_dict(),
         "vqvae": vqvae.state_dict(),
-        "vq_optimizer": vq_opt.state_dict(),
     }
+    train_ckpt = {**model_ckpt, "vq_optimizer": vq_opt.state_dict()}
     step_path = ckpt_dir / f"vq_step_{step:07d}.pt"
     latest_path = ckpt_dir / "vq_latest_train.pt"
-    torch.save(ckpt, step_path)
-    torch.save(ckpt, latest_path)
+    torch.save(model_ckpt if model_only_step else train_ckpt, step_path)
+    torch.save(train_ckpt, latest_path)
     print(f"[save] {step_path}", flush=True)
 
 
@@ -1007,6 +1022,7 @@ def main() -> None:
             split=args.split,
             window_size=args.max_seq_len,
             window_stride=args.vq_window_stride,
+            split_dir=args.humanml3d_split_dir,
             subset_n=args.max_clips,
             preload=args.vq_window_preload,
         )
@@ -1132,6 +1148,15 @@ def main() -> None:
             f"missing_text={ds.num_missing_text} filtered_length={ds.num_filtered_motion_length}",
             flush=True,
         )
+    if isinstance(ds, CanonicalHumanML3DWindowDataset):
+        print(
+            "[momask-smoke] vq_split "
+            f"source={ds.split_source} source_ids={ds.num_source_ids} "
+            f"source_mirrors={ds.num_source_mirror_ids} retained_clips={ds.num_clips} "
+            f"retained_mirrors={ds.num_mirror_clips} missing_motion={ds.num_missing_motion} "
+            f"skipped_short={ds.num_skipped_short}",
+            flush=True,
+        )
     print(
         f"[momask-smoke] clips={n_clips} items={n_items} "
         f"batches_per_epoch={len(loader)} batch_size={args.batch_size} "
@@ -1245,8 +1270,18 @@ def main() -> None:
             )
             log_start_step = step
             log_start_time = now
-        if args.vq_only and args.save_every > 0 and step % args.save_every == 0:
-            save_vq_train_checkpoint(output_dir, step, args, normalizer, vqvae, vq_opt)
+        periodic_save = args.save_every > 0 and step % args.save_every == 0
+        epoch_save = args.vq_save_every_epoch and args.vq_epochs > 0 and step % len(loader) == 0
+        if args.vq_only and (periodic_save or epoch_save):
+            save_vq_train_checkpoint(
+                output_dir,
+                step,
+                args,
+                normalizer,
+                vqvae,
+                vq_opt,
+                model_only_step=args.vq_model_only_step_checkpoints,
+            )
 
     eval_batch = next(iter(loader))
     eval_raw_x = eval_batch.x1.to(device)

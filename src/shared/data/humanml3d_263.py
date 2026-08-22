@@ -396,6 +396,7 @@ class CanonicalHumanML3DWindowDataset(Dataset):
         window_size: int = 64,
         window_stride: int = 1,
         splits_name: str = "splits.json",
+        split_dir: str | Path | None = None,
         subset_fraction: float = 1.0,
         subset_seed: int = 0,
         subset_n: int = 0,
@@ -409,15 +410,27 @@ class CanonicalHumanML3DWindowDataset(Dataset):
             raise ValueError("window_stride must be positive")
         self.root = Path(root)
         self.canonical_dir = Path(canonical_dir)
+        self.split_dir = Path(split_dir) if split_dir is not None else None
         self.split = split
         self.window_size = window_size
         self.window_stride = window_stride
         self.preload = preload
         if not self.canonical_dir.exists():
             raise FileNotFoundError(f"canonical new_joint_vecs dir not found: {self.canonical_dir}")
-        with open(self.root / splits_name) as f:
-            splits = json.load(f)
-        split_ids = list(splits[split])
+        if self.split_dir is not None:
+            split_path = self.split_dir / f"{split}.txt"
+            if not split_path.exists():
+                raise FileNotFoundError(f"HumanML3D split file not found: {split_path}")
+            split_ids = [line.strip() for line in split_path.read_text().splitlines() if line.strip()]
+            self.split_source = str(split_path)
+        else:
+            split_path = self.root / splits_name
+            with open(split_path) as f:
+                splits = json.load(f)
+            split_ids = list(splits[split])
+            self.split_source = f"{split_path}:{split}"
+        self.num_source_ids = len(split_ids)
+        self.num_source_mirror_ids = sum(clip_id.startswith("M") for clip_id in split_ids)
         effective_subset_n = subset_n if 0 < subset_n < len(split_ids) else 0
         clip_ids = select_clip_ids(
             split_ids,
@@ -430,11 +443,13 @@ class CanonicalHumanML3DWindowDataset(Dataset):
         self._motions: list[np.ndarray | Path] = []
         self._window_ends: list[int] = []
         self.num_skipped_short = 0
+        self.num_missing_motion = 0
         total_windows = 0
         for clip_id in clip_ids:
             path = self.canonical_dir / f"{clip_id}.npy"
             if not path.exists():
-                raise FileNotFoundError(f"canonical HumanML3D feature not found for {clip_id} in {self.canonical_dir}")
+                self.num_missing_motion += 1
+                continue
             arr = np.load(path, mmap_mode="r")
             if arr.ndim != 2 or arr.shape[1] != H3D_FEATURE_DIM:
                 raise ValueError(f"{path} must have shape (T, {H3D_FEATURE_DIM}), got {arr.shape}")
@@ -448,6 +463,7 @@ class CanonicalHumanML3DWindowDataset(Dataset):
             total_windows += count
             self._window_ends.append(total_windows)
         self.num_clips = len(self.clip_ids)
+        self.num_mirror_clips = sum(clip_id.startswith("M") for clip_id in self.clip_ids)
         self.num_windows = total_windows
         if self.num_windows == 0:
             raise RuntimeError(
