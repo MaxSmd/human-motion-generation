@@ -15,7 +15,7 @@ from tqdm import tqdm
 from momask.scripts.evaluate_momask import encode_motion, encode_text_batch, load_caption_tokens
 from shared.data import CanonicalHumanML3DText2MotionDataset, collate
 from shared.eval.guo_evaluator import RealGuoEvaluator
-from shared.eval.metrics import mm_distance, r_precision
+from shared.eval.metrics import mm_distance, r_precision, r_precision_batch
 
 
 def parse_args() -> argparse.Namespace:
@@ -92,10 +92,11 @@ def main() -> None:
     loader = DataLoader(
         dataset,
         batch_size=args.batch_size,
-        shuffle=False,
+        shuffle=True,
         collate_fn=collate,
         num_workers=0,
         drop_last=False,
+        generator=torch.Generator().manual_seed(args.seed),
     )
     evaluator = RealGuoEvaluator(
         text_to_motion_repo=args.text_to_motion_repo,
@@ -111,6 +112,11 @@ def main() -> None:
     all_lengths: list[np.ndarray] = []
     all_clip_ids: list[str] = []
     token_fallbacks = 0
+    protocol_pairs = 0
+    separate_r_sum = np.zeros(3, dtype=np.float64)
+    joint_r_sum = np.zeros(3, dtype=np.float64)
+    separate_mm_sum = 0.0
+    joint_mm_sum = 0.0
     seen = 0
 
     for batch in tqdm(loader, desc="paper real retrieval groups"):
@@ -122,10 +128,45 @@ def main() -> None:
         texts = batch.texts[:take]
         clip_ids = batch.clip_ids[:take]
         lengths = batch.lengths[:take]
-        motion_embs.append(encode_motion(evaluator, batch.x1[:take], lengths))
+        motion_np = encode_motion(evaluator, batch.x1[:take], lengths)
+        motion_embs.append(motion_np)
         text_np, missing = encode_text_batch(evaluator, texts, clip_ids, caption_tokens)
         text_embs.append(text_np)
         token_fallbacks += missing
+
+        # Official MoMask computes retrieval inside each DataLoader batch with
+        # EvaluatorModelWrapper.get_co_embeddings. Compare that exact route to
+        # our independently encoded embeddings using the very same pairs.
+        # Ignore the final partial batch, matching the official drop_last=True.
+        if take == args.batch_size:
+            lookup_ids = [clip_id.split(":segment", 1)[0] for clip_id in clip_ids]
+            tokens = [
+                caption_tokens.get(clip_id, {}).get(text)
+                for clip_id, text in zip(lookup_ids, texts)
+            ]
+            if any(token is None for token in tokens):
+                missing_pairs = sum(token is None for token in tokens)
+                raise RuntimeError(
+                    "official joint evaluator comparison requires VIP tokens for "
+                    f"every pair; missing {missing_pairs}/{take} in one batch"
+                )
+            joint_text, joint_motion = evaluator.encode_co_embeddings_from_tokens(
+                batch.x1[:take],
+                lengths,
+                [token for token in tokens if token is not None],
+            )
+            joint_text_np = joint_text.cpu().numpy()
+            joint_motion_np = joint_motion.cpu().numpy()
+            separate_r_sum += r_precision_batch(text_np, motion_np, top_k=3) * take
+            joint_r_sum += r_precision_batch(
+                joint_text_np, joint_motion_np, top_k=3
+            ) * take
+            separate_mm_sum += float(np.linalg.norm(text_np - motion_np, axis=1).sum())
+            joint_mm_sum += float(
+                np.linalg.norm(joint_text_np - joint_motion_np, axis=1).sum()
+            )
+            protocol_pairs += take
+
         all_lengths.append(lengths.cpu().numpy())
         all_clip_ids.extend(clip_ids)
         seen += take
@@ -137,6 +178,13 @@ def main() -> None:
     for index, clip_id in enumerate(all_clip_ids):
         for group in entry_groups(clip_id):
             groups.setdefault(group, []).append(index)
+
+    if protocol_pairs == 0:
+        raise RuntimeError("no full retrieval batch was available for protocol comparison")
+    separate_protocol_r = separate_r_sum / protocol_pairs
+    joint_protocol_r = joint_r_sum / protocol_pairs
+    separate_protocol_mm = separate_mm_sum / protocol_pairs
+    joint_protocol_mm = joint_mm_sum / protocol_pairs
 
     results = {
         "_meta": {
@@ -157,6 +205,26 @@ def main() -> None:
             "missing_motion": dataset.num_missing_motion,
             "missing_text": dataset.num_missing_text,
         },
+        "protocol_checks": {
+            "num_pairs": protocol_pairs,
+            "batch_size": args.batch_size,
+            "loader_shuffle": True,
+            "drop_last": True,
+            "separate_encoders": {
+                "r_precision": separate_protocol_r.tolist(),
+                "mm_dist": separate_protocol_mm,
+            },
+            "joint_get_co_embeddings": {
+                "r_precision": joint_protocol_r.tolist(),
+                "mm_dist": joint_protocol_mm,
+            },
+            "absolute_delta": {
+                "r_precision": np.abs(
+                    separate_protocol_r - joint_protocol_r
+                ).tolist(),
+                "mm_dist": abs(separate_protocol_mm - joint_protocol_mm),
+            },
+        },
         "groups": {
             name: group_metrics(text, motion, lengths_np, indices, args.seed)
             for name, indices in groups.items()
@@ -168,6 +236,25 @@ def main() -> None:
 
     print(
         f"[paper-real-groups] pairs={text.shape[0]} vip_fallbacks={token_fallbacks}",
+        flush=True,
+    )
+    for label, metrics in (
+        ("separate", results["protocol_checks"]["separate_encoders"]),
+        ("joint", results["protocol_checks"]["joint_get_co_embeddings"]),
+    ):
+        r1, r2, r3 = metrics["r_precision"]
+        print(
+            f"[paper-real-protocol] {label} n={protocol_pairs} "
+            f"R@1/2/3={r1:.4f}/{r2:.4f}/{r3:.4f} "
+            f"MM={metrics['mm_dist']:.4f}",
+            flush=True,
+        )
+    delta = results["protocol_checks"]["absolute_delta"]
+    dr1, dr2, dr3 = delta["r_precision"]
+    print(
+        f"[paper-real-protocol] absolute_delta "
+        f"R@1/2/3={dr1:.6f}/{dr2:.6f}/{dr3:.6f} "
+        f"MM={delta['mm_dist']:.6f}",
         flush=True,
     )
     for name in (

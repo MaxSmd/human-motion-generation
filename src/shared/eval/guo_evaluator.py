@@ -296,6 +296,21 @@ class RealGuoEvaluator:
         Pull the upstream tokens from `external/HumanML3D/HumanML3D/texts.zip`
         (each line is `<caption>#<word/POS word/POS ...>#<start>#<end>`).
         """
+        word_embs, pos_ohot, cap_lens_dev = self._vectorize_caption_tokens(tokens_per_caption)
+        # Same sort/unsort dance as encode_text_from_strings.
+        sort_idx = torch.argsort(cap_lens_dev, descending=True)
+        inv_idx = torch.empty_like(sort_idx)
+        inv_idx[sort_idx] = torch.arange(sort_idx.numel(), device=sort_idx.device)
+        with torch.no_grad():
+            emb = self._wrapper.text_encoder(
+                word_embs[sort_idx], pos_ohot[sort_idx], cap_lens_dev[sort_idx],
+            )
+        return emb[inv_idx]
+
+    def _vectorize_caption_tokens(
+        self,
+        tokens_per_caption: list[list[str]],
+    ) -> tuple[Tensor, Tensor, Tensor]:
         max_len = 20
         B = len(tokens_per_caption)
         word_embs = torch.zeros(B, max_len + 2, 300)
@@ -312,15 +327,31 @@ class RealGuoEvaluator:
         word_embs = word_embs.to(self._device)
         pos_ohot = pos_ohot.to(self._device)
         cap_lens_dev = cap_lens.to(self._device)
-        # Same sort/unsort dance as encode_text_from_strings.
-        sort_idx = torch.argsort(cap_lens_dev, descending=True)
-        inv_idx = torch.empty_like(sort_idx)
-        inv_idx[sort_idx] = torch.arange(sort_idx.numel(), device=sort_idx.device)
+        return word_embs, pos_ohot, cap_lens_dev
+
+    def encode_co_embeddings_from_tokens(
+        self,
+        motion_features: Tensor,
+        lengths: Tensor,
+        tokens_per_caption: list[list[str]],
+    ) -> tuple[Tensor, Tensor]:
+        """Run the upstream paired evaluator path exactly for one retrieval batch."""
+        if motion_features.shape[0] != len(tokens_per_caption):
+            raise ValueError("motion and caption-token batch sizes must match")
+        word_embs, pos_ohot, cap_lens = self._vectorize_caption_tokens(tokens_per_caption)
+        m_lens = lengths.to(self._device).long()
+        motion = self.normalize(motion_features.to(self._device).float(), m_lens)
+        # Upstream collate_fn sorts by sentence length before get_co_embeddings.
+        text_order = torch.argsort(cap_lens, descending=True, stable=True)
         with torch.no_grad():
-            emb = self._wrapper.text_encoder(
-                word_embs[sort_idx], pos_ohot[sort_idx], cap_lens_dev[sort_idx],
+            text_emb, motion_emb = self._wrapper.get_co_embeddings(
+                word_embs[text_order],
+                pos_ohot[text_order],
+                cap_lens[text_order],
+                motion[text_order],
+                m_lens[text_order],
             )
-        return emb[inv_idx]
+        return text_emb, motion_emb
 
 
 # ---------------------------------------------------------------------------
