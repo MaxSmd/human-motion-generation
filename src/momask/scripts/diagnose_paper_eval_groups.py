@@ -6,6 +6,7 @@ import argparse
 import csv
 import json
 import random
+import zipfile
 from pathlib import Path
 
 import numpy as np
@@ -72,6 +73,42 @@ def load_index_metadata(
     return source_by_id, expected_length_by_id
 
 
+def audit_caption_token_keys(texts_zip: Path) -> dict[str, int]:
+    """Detect caption-string keys that collapse distinct token annotations."""
+    seen: dict[tuple[str, str], tuple[str, ...]] = {}
+    duplicate_keys = 0
+    conflicting_keys: set[tuple[str, str]] = set()
+    records = 0
+    with zipfile.ZipFile(texts_zip) as archive:
+        for name in archive.namelist():
+            if not name.endswith(".txt"):
+                continue
+            clip_id = Path(name).stem
+            for line in archive.read(name).decode("utf-8").splitlines():
+                parts = line.strip().split("#")
+                if len(parts) < 2:
+                    continue
+                caption = parts[0].strip()
+                tokens = tuple(parts[1].strip().split())
+                if not caption or not tokens:
+                    continue
+                records += 1
+                key = (clip_id, caption)
+                previous = seen.get(key)
+                if previous is not None:
+                    duplicate_keys += 1
+                    if previous != tokens:
+                        conflicting_keys.add(key)
+                else:
+                    seen[key] = tokens
+    return {
+        "records": records,
+        "unique_clip_caption_keys": len(seen),
+        "duplicate_keys": duplicate_keys,
+        "conflicting_token_keys": len(conflicting_keys),
+    }
+
+
 def base_motion_id(clip_id: str) -> str:
     base_id = clip_id.split(":segment", 1)[0]
     return base_id[1:] if base_id.startswith("M") else base_id
@@ -122,6 +159,7 @@ def main() -> None:
     if not index_csv.is_file():
         raise FileNotFoundError(f"HumanML3D index.csv not found: {index_csv}")
     source_by_id, expected_length_by_id = load_index_metadata(index_csv)
+    caption_token_audit = audit_caption_token_keys(Path(args.humanml3d_texts_zip))
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dataset = CanonicalHumanML3DText2MotionDataset(
@@ -277,6 +315,7 @@ def main() -> None:
                 }
                 for clip_id, (actual, expected) in list(length_mismatches.items())[:20]
             ],
+            "caption_token_audit": caption_token_audit,
         },
         "protocol_checks": {
             "num_pairs": protocol_pairs,
@@ -334,6 +373,13 @@ def main() -> None:
         f"[paper-real-integrity] index_ids={len(source_by_id)} "
         f"lengths_checked={len(checked_lengths)} "
         f"length_mismatches={len(length_mismatches)}",
+        flush=True,
+    )
+    print(
+        f"[paper-real-captions] records={caption_token_audit['records']} "
+        f"unique_keys={caption_token_audit['unique_clip_caption_keys']} "
+        f"duplicates={caption_token_audit['duplicate_keys']} "
+        f"conflicting_tokens={caption_token_audit['conflicting_token_keys']}",
         flush=True,
     )
     for name in (
