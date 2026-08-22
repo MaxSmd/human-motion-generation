@@ -15,6 +15,7 @@ Variants:
   base             = text -> base tokens only -> RVQ decoder
   teacher_residual = real base tokens -> predicted residual tokens -> RVQ decoder
   recon            = real motion -> RVQ encode/decode
+  recon_unmasked   = official RVQ eval path; padded normalized motion is not latent-masked
 """
 
 from __future__ import annotations
@@ -86,7 +87,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--variants",
         default="full,base",
-        help="Comma list from: full,base,teacher_residual,recon",
+        help="Comma list from: full,base,teacher_residual,recon,recon_unmasked",
     )
     p.add_argument("--generation-steps", type=int, default=None, help="Defaults to checkpoint args.generation_steps.")
     p.add_argument("--guidance-scale", type=float, default=1.0)
@@ -451,6 +452,11 @@ def generate_variant(
 
     if variant == "recon":
         return normalizer.inverse(vqvae(x_norm, mask=frame_mask).recon)
+    if variant == "recon_unmasked":
+        # Official eval_t2m_vq.py passes the zero-padded, normalized motion
+        # directly through the RVQ. Keep this separate from the mask-aware
+        # reconstruction so protocol differences can be measured explicitly.
+        return normalizer.inverse(vqvae(x_norm, mask=None).recon)
 
     true_tokens = vqvae.encode_to_tokens(x_norm)
     token_mask = token_mask_from_frame_mask(frame_mask, true_tokens.shape[-1], vqvae.downsample)
@@ -526,7 +532,11 @@ def main() -> None:
         require_path(real_h3d_dir, "canonical HumanML3D new_joint_vecs dir")
 
     variants = [v.strip() for v in args.variants.split(",") if v.strip()]
-    unknown = sorted(set(variants) - {"full", "base", "teacher_residual", "recon"})
+    reconstruction_variants = {"recon", "recon_unmasked"}
+    unknown = sorted(
+        set(variants)
+        - {"full", "base", "teacher_residual", *reconstruction_variants}
+    )
     if unknown:
         raise ValueError(f"unknown variants: {unknown}")
     needs_generation = any(v in {"full", "base", "teacher_residual"} for v in variants)
@@ -658,7 +668,7 @@ def main() -> None:
         n_text_fallback += n_missing
 
         for variant in variants:
-            if variant != "recon":
+            if variant not in reconstruction_variants:
                 if masked is None or residual is None or cond is None:
                     raise RuntimeError(f"variant {variant!r} requires token transformers")
             gen = generate_variant(
@@ -746,8 +756,9 @@ def main() -> None:
     for variant in variants:
         gen = np.concatenate(gen_embs[variant], axis=0)
         results[variant] = compute_metrics(real, gen, text, args.diversity_times, args.seed)
-        if variant == "recon" and packed_real is not None:
-            results["recon_vs_packed_real"] = compute_metrics(
+        packed_key = f"{variant}_vs_packed_real"
+        if variant in reconstruction_variants and packed_real is not None:
+            results[packed_key] = compute_metrics(
                 packed_real,
                 gen,
                 text,
@@ -755,8 +766,8 @@ def main() -> None:
                 args.seed,
             )
         print(f"\n[{variant}]\n{json.dumps(results[variant], indent=2)}", flush=True)
-        if variant == "recon" and "recon_vs_packed_real" in results:
-            print(f"\n[recon_vs_packed_real]\n{json.dumps(results['recon_vs_packed_real'], indent=2)}", flush=True)
+        if packed_key in results:
+            print(f"\n[{packed_key}]\n{json.dumps(results[packed_key], indent=2)}", flush=True)
 
     output = Path(args.output) if args.output else ckpt_path.parent / "eval_momask" / "results.json"
     output.parent.mkdir(parents=True, exist_ok=True)

@@ -298,6 +298,48 @@ def test_full_generation_uses_independent_masked_and_residual_guidance() -> None
     assert residual.guidance == 5.0
 
 
+def test_reconstruction_variants_expose_official_unmasked_rvq_path() -> None:
+    class DummyOutput:
+        def __init__(self, recon: torch.Tensor) -> None:
+            self.recon = recon
+
+    class DummyVQ:
+        downsample = 1
+
+        def __init__(self) -> None:
+            self.masks = []
+
+        def __call__(self, x, mask=None):
+            self.masks.append(mask)
+            return DummyOutput(x)
+
+    vqvae = DummyVQ()
+    real = torch.zeros(2, 8, H3D_FEATURE_DIM)
+    frame_mask = torch.ones(2, 8, dtype=torch.bool)
+    common = dict(
+        vqvae=vqvae,
+        masked=None,
+        residual=None,
+        normalizer=H3DNormalizer.identity(),
+        cond=None,
+        real_x=real,
+        frame_mask=frame_mask,
+        steps=10,
+        guidance_scale=4.0,
+        residual_guidance_scale=5.0,
+        temperature=1.0,
+        topk_filter_thres=0.9,
+        sample=True,
+        remask_kept_tokens=False,
+    )
+
+    generate_variant("recon", **common)
+    generate_variant("recon_unmasked", **common)
+
+    assert vqvae.masks[0] is frame_mask
+    assert vqvae.masks[1] is None
+
+
 def test_generation_helper_returns_h3d_features() -> None:
     torch.manual_seed(1)
     T = 8
