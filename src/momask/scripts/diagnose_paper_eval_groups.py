@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import random
 from pathlib import Path
@@ -24,6 +25,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--canonical-h3d-dir", required=True)
     parser.add_argument("--humanml3d-texts-zip", required=True)
     parser.add_argument("--humanml3d-split-dir", required=True)
+    parser.add_argument(
+        "--humanml3d-index-csv",
+        default="",
+        help="HumanML3D index.csv; defaults to the parent of the split directory",
+    )
     parser.add_argument("--text-to-motion-repo", default="external/text-to-motion")
     parser.add_argument("--humanml3d-repo", default="external/HumanML3D")
     parser.add_argument(
@@ -41,11 +47,42 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def entry_groups(clip_id: str) -> tuple[str, ...]:
+def load_index_metadata(
+    path: Path,
+) -> tuple[dict[str, str], dict[str, int]]:
+    """Map canonical HumanML3D ids to AMASS source and expected feature length."""
+    source_by_id: dict[str, str] = {}
+    expected_length_by_id: dict[str, int] = {}
+    with path.open(newline="", encoding="utf-8-sig") as handle:
+        for row in csv.DictReader(handle):
+            clip_id = Path(row["new_name"]).stem
+            source_parts = Path(row["source_path"].replace("\\", "/")).parts
+            try:
+                source_index = source_parts.index("pose_data") + 1
+                source = source_parts[source_index]
+            except (ValueError, IndexError):
+                source = source_parts[0] if source_parts else "unknown"
+            start = int(row["start_frame"])
+            end = int(row["end_frame"])
+            source_by_id[clip_id] = source
+            if end > start:
+                # HumanML3D process_file emits one fewer feature frame because
+                # root/local velocities are defined between adjacent frames.
+                expected_length_by_id[clip_id] = end - start - 1
+    return source_by_id, expected_length_by_id
+
+
+def base_motion_id(clip_id: str) -> str:
+    base_id = clip_id.split(":segment", 1)[0]
+    return base_id[1:] if base_id.startswith("M") else base_id
+
+
+def entry_groups(clip_id: str, source_by_id: dict[str, str]) -> tuple[str, ...]:
     base_id = clip_id.split(":segment", 1)[0]
     source = "mirrored" if base_id.startswith("M") else "original"
     span = "segment" if ":segment" in clip_id else "whole"
-    return ("all", source, span, f"{source}_{span}")
+    amass_source = source_by_id.get(base_motion_id(clip_id), "unknown")
+    return ("all", source, span, f"{source}_{span}", f"source:{amass_source}")
 
 
 def group_metrics(
@@ -76,6 +113,15 @@ def main() -> None:
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
+
+    index_csv = (
+        Path(args.humanml3d_index_csv)
+        if args.humanml3d_index_csv
+        else Path(args.humanml3d_split_dir).parent / "index.csv"
+    )
+    if not index_csv.is_file():
+        raise FileNotFoundError(f"HumanML3D index.csv not found: {index_csv}")
+    source_by_id, expected_length_by_id = load_index_metadata(index_csv)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dataset = CanonicalHumanML3DText2MotionDataset(
@@ -176,8 +222,22 @@ def main() -> None:
     lengths_np = np.concatenate(all_lengths, axis=0)
     groups: dict[str, list[int]] = {}
     for index, clip_id in enumerate(all_clip_ids):
-        for group in entry_groups(clip_id):
+        for group in entry_groups(clip_id, source_by_id):
             groups.setdefault(group, []).append(index)
+
+    checked_lengths: dict[str, tuple[int, int]] = {}
+    for entry in dataset.entries:
+        clip_id = base_motion_id(entry.clip_id)
+        expected = expected_length_by_id.get(clip_id)
+        if expected is None or clip_id in checked_lengths:
+            continue
+        actual = int(np.load(entry.motion_path, mmap_mode="r").shape[0])
+        checked_lengths[clip_id] = (actual, expected)
+    length_mismatches = {
+        clip_id: values
+        for clip_id, values in checked_lengths.items()
+        if values[0] != values[1]
+    }
 
     if protocol_pairs == 0:
         raise RuntimeError("no full retrieval batch was available for protocol comparison")
@@ -204,6 +264,19 @@ def main() -> None:
             "retained_mirror_clips": dataset.num_mirror_clips,
             "missing_motion": dataset.num_missing_motion,
             "missing_text": dataset.num_missing_text,
+            "humanml3d_index_csv": str(index_csv),
+            "index_ids": len(source_by_id),
+            "lengths_checked": len(checked_lengths),
+            "length_mismatches": len(length_mismatches),
+            "length_mismatch_examples": [
+                {
+                    "clip_id": clip_id,
+                    "actual": actual,
+                    "expected": expected,
+                    "source": source_by_id.get(clip_id, "unknown"),
+                }
+                for clip_id, (actual, expected) in list(length_mismatches.items())[:20]
+            ],
         },
         "protocol_checks": {
             "num_pairs": protocol_pairs,
@@ -257,6 +330,12 @@ def main() -> None:
         f"MM={delta['mm_dist']:.6f}",
         flush=True,
     )
+    print(
+        f"[paper-real-integrity] index_ids={len(source_by_id)} "
+        f"lengths_checked={len(checked_lengths)} "
+        f"length_mismatches={len(length_mismatches)}",
+        flush=True,
+    )
     for name in (
         "all",
         "original",
@@ -274,6 +353,23 @@ def main() -> None:
         r1, r2, r3 = metrics["r_precision"]
         print(
             f"[paper-real-groups] {name} n={metrics['num_pairs']} "
+            f"R@1/2/3={r1:.4f}/{r2:.4f}/{r3:.4f} "
+            f"MM={metrics['mm_dist']:.4f}",
+            flush=True,
+        )
+    source_metrics = sorted(
+        (
+            (name.removeprefix("source:"), metrics)
+            for name, metrics in results["groups"].items()
+            if name.startswith("source:") and metrics["num_pairs"] >= args.batch_size
+        ),
+        key=lambda item: item[1]["num_pairs"],
+        reverse=True,
+    )
+    for source, metrics in source_metrics:
+        r1, r2, r3 = metrics["r_precision"]
+        print(
+            f"[paper-real-source] {source} n={metrics['num_pairs']} "
             f"R@1/2/3={r1:.4f}/{r2:.4f}/{r3:.4f} "
             f"MM={metrics['mm_dist']:.4f}",
             flush=True,
