@@ -23,6 +23,7 @@ from shared.eval import (
     r_precision,
 )
 from shared.eval.guo_evaluator import (
+    _denormalize_motion_batch,
     _normalize_motion_batch,
     _resolve_evaluator_assets,
     _upstream_align_indices,
@@ -261,3 +262,20 @@ def test_motion_normalization_keeps_padding_zero_in_normalized_space() -> None:
         ]
     )
     assert torch.equal(normalized, expected)
+
+
+def test_motion_evaluator_normalization_round_trip_preserves_valid_frames() -> None:
+    raw = torch.tensor(
+        [
+            [[3.0, 4.0], [0.0, 0.0], [0.0, 0.0]],
+            [[5.0, 5.0], [7.0, 6.0], [0.0, 0.0]],
+        ]
+    )
+    lengths = torch.tensor([1, 2])
+    mean = torch.tensor([1.0, 2.0])
+    std = torch.tensor([2.0, 1.0])
+
+    normalized = _normalize_motion_batch(raw, lengths, mean, std)
+    recovered = _denormalize_motion_batch(normalized, lengths, mean, std)
+
+    assert torch.equal(recovered, raw)

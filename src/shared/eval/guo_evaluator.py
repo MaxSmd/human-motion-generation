@@ -158,6 +158,30 @@ def _normalize_motion_batch(
     return x.masked_fill(~valid.unsqueeze(-1), 0.0)
 
 
+def _denormalize_motion_batch(
+    motion: Tensor,
+    lengths: Tensor | None,
+    mean: Tensor,
+    std: Tensor,
+) -> Tensor:
+    """Invert evaluator normalization and keep temporal padding at zero."""
+    x = motion * std.to(device=motion.device, dtype=motion.dtype) + mean.to(
+        device=motion.device,
+        dtype=motion.dtype,
+    )
+    if lengths is None:
+        return x
+    if motion.ndim != 3 or lengths.ndim != 1 or lengths.shape[0] != motion.shape[0]:
+        raise ValueError(
+            "length-aware denormalization expects motion (B,T,D) and lengths (B,)"
+        )
+    lengths = lengths.to(device=motion.device, dtype=torch.long)
+    if bool((lengths < 0).any()) or bool((lengths > motion.shape[1]).any()):
+        raise ValueError(f"motion lengths must be within [0, {motion.shape[1]}]")
+    valid = torch.arange(motion.shape[1], device=motion.device).unsqueeze(0) < lengths.unsqueeze(1)
+    return x.masked_fill(~valid.unsqueeze(-1), 0.0)
+
+
 class RealGuoEvaluator:
     motion_dim = 512
     text_dim = 512
@@ -211,6 +235,10 @@ class RealGuoEvaluator:
 
     def normalize(self, motion_263: Tensor, lengths: Tensor | None = None) -> Tensor:
         return _normalize_motion_batch(motion_263, lengths, self._mean, self._std)
+
+    def denormalize(self, motion_263: Tensor, lengths: Tensor | None = None) -> Tensor:
+        """Invert evaluator normalization while keeping temporal padding at zero."""
+        return _denormalize_motion_batch(motion_263, lengths, self._mean, self._std)
 
     def _tokenize_for_text_enc(self, texts: list[str]) -> tuple[Tensor, Tensor, Tensor]:
         """Convert plain strings → (word_embs, pos_ohot, cap_lens) the

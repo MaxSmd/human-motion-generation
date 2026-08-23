@@ -39,6 +39,7 @@ node_modules/
 
 # data (anchored: only the downloaded blob dirs under external/, NOT src/rmg/data/)
 /external/data/
+/external/momask-codes-official/
 /data/
 *.zip
 *.tar
