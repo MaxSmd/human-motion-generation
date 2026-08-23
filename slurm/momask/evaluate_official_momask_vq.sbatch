@@ -137,6 +137,11 @@ enroot start \
     bash -lc "
         set -euo pipefail
         cd '${OFFICIAL_REPO}'
+        if ! python -c 'import clip' >/dev/null 2>&1; then
+            echo '[momask-vq-official] installing official OpenAI CLIP dependency'
+            pip install --quiet --no-cache-dir \
+                'git+https://github.com/openai/CLIP.git'
+        fi
         python -u eval_t2m_vq.py \\
             --gpu_id 0 \\
             --name '${VQ_NAME}' \\
