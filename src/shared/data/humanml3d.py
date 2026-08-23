@@ -350,7 +350,20 @@ class CollatedBatch:
 
 
 def collate(samples: list[HumanML3DSample]) -> CollatedBatch:
-    x1, mask, lengths = pad_batch([s.x1 for s in samples])
+    if not samples:
+        raise ValueError("cannot collate an empty sample list")
+    x1, _, _ = pad_batch([s.x1 for s in samples])
+    # Canonical text-to-motion samples are already padded to 196 frames, so
+    # the explicit sample length, not x1.shape[0], defines valid content.
+    lengths = torch.tensor([s.length for s in samples], dtype=torch.long)
+    frame_counts = torch.tensor([s.x1.shape[0] for s in samples], dtype=torch.long)
+    if bool((lengths <= 0).any()) or bool((lengths > frame_counts).any()):
+        raise ValueError(
+            f"sample lengths must be within [1, stored frames], got "
+            f"lengths={lengths.tolist()} frames={frame_counts.tolist()}"
+        )
+    mask = torch.arange(x1.shape[1]).unsqueeze(0) < lengths.unsqueeze(1)
+    x1 = x1.masked_fill(~mask.unsqueeze(-1), 0.0)
     return CollatedBatch(
         x1=x1, mask=mask,
         texts=[s.text for s in samples],

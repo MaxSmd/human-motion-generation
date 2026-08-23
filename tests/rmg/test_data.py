@@ -16,7 +16,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from rmg.data import HumanML3DDataset, collate
-from shared.data import LR_PAIRS, mirror_motion
+from shared.data import HumanML3DSample, LR_PAIRS, mirror_motion
 from rmg.representation import NUM_JOINTS, decode
 
 
@@ -155,6 +155,27 @@ def test_collate_pads_and_masks(tmp_path: Path) -> None:
             assert not batch.mask[i, L:].any()
             assert (batch.x1[i, L:] == 0).all()
     assert isinstance(batch.texts[0], str)
+
+
+def test_collate_respects_true_length_of_pre_padded_samples() -> None:
+    first = torch.ones(8, 3)
+    first[5:] = 9.0
+    second = torch.full((6, 3), 2.0)
+    batch = collate(
+        [
+            HumanML3DSample(first, "first", length=5, clip_id="first"),
+            HumanML3DSample(second, "second", length=6, clip_id="second"),
+        ]
+    )
+
+    assert batch.x1.shape == (2, 8, 3)
+    assert batch.lengths.tolist() == [5, 6]
+    assert batch.mask.sum(dim=1).tolist() == [5, 6]
+    assert torch.equal(batch.x1[0, :5], torch.ones(5, 3))
+    assert not batch.mask[0, 5:].any()
+    assert not batch.mask[1, 6:].any()
+    assert torch.count_nonzero(batch.x1[0, 5:]) == 0
+    assert torch.count_nonzero(batch.x1[1, 6:]) == 0
 
 
 # ---------------------------------------------------------------------------
