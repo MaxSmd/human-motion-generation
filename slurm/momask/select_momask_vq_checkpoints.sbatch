@@ -60,19 +60,19 @@ enroot start \
             echo '[momask-vqsel] ERROR: no epoch checkpoints found under ${CHECKPOINT_DIR}' >&2
             exit 2
         fi
-        for checkpoint in "\${checkpoints[@]}"; do
-            label=\$(basename "\${checkpoint}" .pt)
-            result='${OUTPUT_DIR}/evals/'"\${label}"'.json'
-            if [ '${OVERWRITE}' != 1 ] && [ -s "\${result}" ] && [ "\${result}" -nt "\${checkpoint}" ]; then
-                echo "[momask-vqsel] reuse \${result}"
+        for checkpoint in \"\${checkpoints[@]}\"; do
+            label=\$(basename \"\${checkpoint}\" .pt)
+            result='${OUTPUT_DIR}/evals/'\"\${label}\"'.json'
+            if [ '${OVERWRITE}' != 1 ] && [ -s \"\${result}\" ] && [ \"\${result}\" -nt \"\${checkpoint}\" ]; then
+                echo \"[momask-vqsel] reuse \${result}\"
                 continue
             fi
-            if [ -s "\${result}" ]; then
-                echo "[momask-vqsel] refresh stale result \${result}"
+            if [ -s \"\${result}\" ]; then
+                echo \"[momask-vqsel] refresh stale result \${result}\"
             fi
-            echo "[momask-vqsel] evaluate \${checkpoint}"
+            echo \"[momask-vqsel] evaluate \${checkpoint}\"
             python -u -m momask.scripts.evaluate_momask \
-                --checkpoint "\${checkpoint}" \
+                --checkpoint \"\${checkpoint}\" \
                 --data-root '${DATA_ROOT}' \
                 --humanml3d-repo '${HUMANML3D_REPO}' \
                 --humanml3d-texts-zip '${HUMANML3D_TEXTS_ZIP}' \
@@ -89,7 +89,7 @@ enroot start \
                 --evaluator real \
                 --evaluator-checkpoints-dir '${EVALUATOR_CHECKPOINTS_DIR}' \
                 --evaluator-normalization-name '${EVALUATOR_NORMALIZATION_NAME}' \
-                --output "\${result}"
+                --output \"\${result}\"
         done
         python -u -m momask.scripts.select_vq_checkpoints \
             --eval-dir '${OUTPUT_DIR}/evals' \
