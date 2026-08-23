@@ -14,6 +14,6 @@
 set -euo pipefail
 
 export TOKEN_STAGE=masked
-export RUN_NAME="${RUN_NAME:-momask-canonical-mtrans-releaseparity196-clip500e}"
+export RUN_NAME="${RUN_NAME:-momask-canonical-mtrans-vq150k-maskfix196-clip500e}"
 
 bash slurm/momask/train_momask_tokens_paperstyle.sbatch

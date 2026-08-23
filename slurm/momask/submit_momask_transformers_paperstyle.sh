@@ -4,9 +4,9 @@
 
 set -euo pipefail
 
-MASKED_RUN_NAME="${MASKED_RUN_NAME:-momask-canonical-mtrans-releaseparity196-clip500e}"
-RESIDUAL_RUN_NAME="${RESIDUAL_RUN_NAME:-momask-canonical-rtrans-releaseparity196-clip500e}"
-ASSEMBLED_RUN_NAME="${ASSEMBLED_RUN_NAME:-momask-canonical-tokens-releaseparity196-clip500e}"
+MASKED_RUN_NAME="${MASKED_RUN_NAME:-momask-canonical-mtrans-vq150k-maskfix196-clip500e}"
+RESIDUAL_RUN_NAME="${RESIDUAL_RUN_NAME:-momask-canonical-rtrans-vq150k-maskfix196-clip500e}"
+ASSEMBLED_RUN_NAME="${ASSEMBLED_RUN_NAME:-momask-canonical-tokens-vq150k-maskfix196-clip500e}"
 VALIDATE_EVERY="${VALIDATE_EVERY:-5000}"
 
 if [ "${VALIDATE_EVERY}" -le 0 ]; then

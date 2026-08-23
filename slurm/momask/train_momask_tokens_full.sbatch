@@ -36,6 +36,7 @@ HUMANML3D_SPLIT_DIR="${HUMANML3D_SPLIT_DIR:-}"
 VQ_CKPT="${VQ_CKPT:-runs/momask-full-vq-raw-12668/momask_vq_latest.pt}"
 TOKEN_CKPT="${TOKEN_CKPT:-}"
 MASKED_CKPT="${MASKED_CKPT:-}"
+TOKEN_FAIL_IF_OUTPUT_EXISTS="${TOKEN_FAIL_IF_OUTPUT_EXISTS:-0}"
 ASSEMBLE_AFTER_TRAIN="${ASSEMBLE_AFTER_TRAIN:-0}"
 ASSEMBLE_MASKED_CKPT="${ASSEMBLE_MASKED_CKPT:-}"
 ASSEMBLE_OUTPUT="${ASSEMBLE_OUTPUT:-}"
@@ -87,6 +88,13 @@ LR_MILESTONES="${LR_MILESTONES:-}"
 LR_GAMMA="${LR_GAMMA:-0.1}"
 SEED="${SEED:-0}"
 
+if [ "${TOKEN_FAIL_IF_OUTPUT_EXISTS}" = "1" ] && [ -z "${TOKEN_CKPT}" ] \
+    && [ -d "${OUTPUT_DIR}" ]; then
+    echo "[momask-tokens] ERROR: fresh-training output directory already exists: ${OUTPUT_DIR}" >&2
+    echo "[momask-tokens] choose a new RUN_NAME, or set TOKEN_CKPT to resume explicitly" >&2
+    exit 2
+fi
+
 TOKEN_CKPT_ARG=""
 if [ -n "${TOKEN_CKPT}" ]; then
     TOKEN_CKPT_ARG="--load-token-checkpoint '${TOKEN_CKPT}'"
@@ -113,6 +121,7 @@ echo "[momask-tokens] humanml3d_split_dir=${HUMANML3D_SPLIT_DIR:-<packed-splits.
 echo "[momask-tokens] vq_ckpt=${VQ_CKPT}"
 echo "[momask-tokens] token_ckpt=${TOKEN_CKPT:-<none>}"
 echo "[momask-tokens] masked_ckpt=${MASKED_CKPT:-<none>}"
+echo "[momask-tokens] fail_if_output_exists=${TOKEN_FAIL_IF_OUTPUT_EXISTS}"
 echo "[momask-tokens] assemble_after_train=${ASSEMBLE_AFTER_TRAIN}"
 echo "[momask-tokens] assemble_masked_ckpt=${ASSEMBLE_MASKED_CKPT:-<none>}"
 echo "[momask-tokens] assemble_output=${ASSEMBLE_OUTPUT:-<none>}"

@@ -14,6 +14,6 @@
 set -euo pipefail
 
 export TOKEN_STAGE=residual
-export RUN_NAME="${RUN_NAME:-momask-canonical-rtrans-releaseparity196-clip500e}"
+export RUN_NAME="${RUN_NAME:-momask-canonical-rtrans-vq150k-maskfix196-clip500e}"
 
 bash slurm/momask/train_momask_tokens_paperstyle.sbatch

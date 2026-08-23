@@ -18,12 +18,13 @@
 
 set -euo pipefail
 
-export VQ_CKPT="${VQ_CKPT:-runs/momask-canonical-vq-paper-gumbelfix64-50e/momask_vq_latest.pt}"
+export VQ_CKPT="${VQ_CKPT:-runs/momask-canonical-vq-150k/momask_vq_latest.pt}"
 export CANONICAL_H3D_DIR="${CANONICAL_H3D_DIR:-${HOME}/rmg-runs/h3d-canonical/new_joint_vecs}"
 export HUMANML3D_DIR="${HUMANML3D_DIR:-/mnt/projects/drl4cvb/human-motion-representation/data/HumanML3D/HumanML3D}"
 export HUMANML3D_TEXTS_ZIP="${HUMANML3D_TEXTS_ZIP:-${HUMANML3D_DIR}/texts.zip}"
 export HUMANML3D_SPLIT_DIR="${HUMANML3D_SPLIT_DIR:-${HUMANML3D_DIR}}"
-export RUN_NAME="${RUN_NAME:-momask-canonical-tokens-releaseparity196-clip500e}"
+export RUN_NAME="${RUN_NAME:-momask-canonical-tokens-vq150k-maskfix196-clip500e}"
+export TOKEN_FAIL_IF_OUTPUT_EXISTS="${TOKEN_FAIL_IF_OUTPUT_EXISTS:-1}"
 export TOKEN_STAGE="${TOKEN_STAGE:-joint}"
 export TOKEN_STEPS="${TOKEN_STEPS:-0}"
 export TOKEN_EPOCHS="${TOKEN_EPOCHS:-500}"
