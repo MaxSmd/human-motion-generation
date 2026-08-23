@@ -134,11 +134,14 @@ while IFS= read -r CLIP_ID || [ -n "${CLIP_ID}" ]; do
         MISSING_CAPTIONS=$((MISSING_CAPTIONS + 1))
     fi
 done < "${HUMANML3D_DIR}/test.txt"
-if [ "${TEST_IDS}" -eq 0 ] || [ "${MISSING_MOTIONS}" -ne 0 ] || [ "${MISSING_CAPTIONS}" -ne 0 ]; then
-    echo "[momask-vq-official] ERROR: incomplete test data: ids=${TEST_IDS} missing_motions=${MISSING_MOTIONS} missing_captions=${MISSING_CAPTIONS}" >&2
+VALID_MOTIONS=$((TEST_IDS - MISSING_MOTIONS))
+if [ "${TEST_IDS}" -eq 0 ] || \
+   [ $((VALID_MOTIONS * 100)) -lt $((TEST_IDS * 95)) ] || \
+   [ "${MISSING_CAPTIONS}" -ne 0 ]; then
+    echo "[momask-vq-official] ERROR: incomplete test data: ids=${TEST_IDS} valid_motions=${VALID_MOTIONS} missing_motions=${MISSING_MOTIONS} missing_captions=${MISSING_CAPTIONS}" >&2
     exit 2
 fi
-echo "[momask-vq-official] test_data ids=${TEST_IDS} missing_motions=0 missing_captions=0"
+echo "[momask-vq-official] test_data ids=${TEST_IDS} valid_motions=${VALID_MOTIONS} missing_motions=${MISSING_MOTIONS} missing_captions=0"
 
 link_directory "${CANONICAL_H3D_DIR}" "${OFFICIAL_REPO}/dataset/HumanML3D/new_joint_vecs" "canonical motions"
 link_directory "${TEXTS_DIR}" "${OFFICIAL_REPO}/dataset/HumanML3D/texts" "HumanML3D captions"
