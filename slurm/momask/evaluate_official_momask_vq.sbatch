@@ -43,12 +43,18 @@ require_file() {
 }
 
 require_file "${OFFICIAL_REPO}/eval_t2m_vq.py" "official evaluator entrypoint"
+require_file "${OFFICIAL_REPO}/utils/eval_t2m.py" "official evaluator implementation"
 require_file "${OFFICIAL_REPO}/checkpoints/t2m/${VQ_NAME}/model/${WHICH_EPOCH}" "official RVQ checkpoint"
 require_file "${OFFICIAL_REPO}/checkpoints/t2m/${VQ_NAME}/opt.txt" "official RVQ options"
 require_file "${EVALUATOR_ROOT}/t2m/Comp_v6_KLD005/opt.txt" "downloaded Guo evaluator options"
+require_file "${EVALUATOR_ROOT}/t2m/Comp_v6_KLD005/meta/mean.npy" "Guo evaluator mean"
+require_file "${EVALUATOR_ROOT}/t2m/Comp_v6_KLD005/meta/std.npy" "Guo evaluator std"
 require_file "${EVALUATOR_ROOT}/t2m/text_mot_match/model/finest.tar" "downloaded Guo evaluator"
 require_file "${HUMANML3D_DIR}/test.txt" "HumanML3D test split"
 require_file "${GLOVE_DIR}/our_vab_data.npy" "GloVe vectors"
+require_file "${GLOVE_DIR}/our_vab_idx.pkl" "GloVe vocabulary index"
+require_file "${GLOVE_DIR}/our_vab_words.pkl" "GloVe vocabulary words"
+require_file "${IMAGE}" "enroot image"
 if [ ! -d "${CANONICAL_H3D_DIR}" ]; then
     echo "[momask-vq-official] ERROR: canonical motions not found: ${CANONICAL_H3D_DIR}" >&2
     exit 2
@@ -112,6 +118,28 @@ else
     fi
 fi
 
+TEST_IDS=0
+MISSING_MOTIONS=0
+MISSING_CAPTIONS=0
+while IFS= read -r CLIP_ID || [ -n "${CLIP_ID}" ]; do
+    CLIP_ID="${CLIP_ID%$'\r'}"
+    if [ -z "${CLIP_ID}" ]; then
+        continue
+    fi
+    TEST_IDS=$((TEST_IDS + 1))
+    if [ ! -s "${CANONICAL_H3D_DIR}/${CLIP_ID}.npy" ]; then
+        MISSING_MOTIONS=$((MISSING_MOTIONS + 1))
+    fi
+    if [ ! -s "${TEXTS_DIR}/${CLIP_ID}.txt" ]; then
+        MISSING_CAPTIONS=$((MISSING_CAPTIONS + 1))
+    fi
+done < "${HUMANML3D_DIR}/test.txt"
+if [ "${TEST_IDS}" -eq 0 ] || [ "${MISSING_MOTIONS}" -ne 0 ] || [ "${MISSING_CAPTIONS}" -ne 0 ]; then
+    echo "[momask-vq-official] ERROR: incomplete test data: ids=${TEST_IDS} missing_motions=${MISSING_MOTIONS} missing_captions=${MISSING_CAPTIONS}" >&2
+    exit 2
+fi
+echo "[momask-vq-official] test_data ids=${TEST_IDS} missing_motions=0 missing_captions=0"
+
 link_directory "${CANONICAL_H3D_DIR}" "${OFFICIAL_REPO}/dataset/HumanML3D/new_joint_vecs" "canonical motions"
 link_directory "${TEXTS_DIR}" "${OFFICIAL_REPO}/dataset/HumanML3D/texts" "HumanML3D captions"
 link_directory "${GLOVE_DIR}" "${OFFICIAL_REPO}/glove" "GloVe"
@@ -137,18 +165,24 @@ enroot start \
     bash -lc "
         set -euo pipefail
         cd '${OFFICIAL_REPO}'
-        if ! python -c 'import clip' >/dev/null 2>&1; then
-            echo '[momask-vq-official] installing official OpenAI CLIP dependency'
-            pip install --quiet --no-cache-dir \
-                'https://github.com/openai/CLIP/archive/a1d071733d7111c9c014f024669f959182114e33.zip'
-        fi
-        python -u eval_t2m_vq.py \\
+        PYTHONPATH='${OFFICIAL_REPO}' \
+        python -u '${REPO}/src/momask/scripts/run_official_eval_compat.py' \\
+            --entrypoint '${OFFICIAL_REPO}/eval_t2m_vq.py' \\
+            -- \\
             --gpu_id 0 \\
             --name '${VQ_NAME}' \\
             --dataset_name t2m \\
             --which_epoch '${WHICH_EPOCH}' \\
             --ext '${EXT}'
-        cp -- 'checkpoints/t2m/${VQ_NAME}/eval/${EXT}.log' '${OUTPUT_PATH}'
     "
 
+OFFICIAL_LOG="${OFFICIAL_REPO}/checkpoints/t2m/${VQ_NAME}/eval/${EXT}.log"
+require_file "${OFFICIAL_LOG}" "official evaluation result"
+if ! grep -q 'final result' "${OFFICIAL_LOG}" || \
+   ! grep -q 'FID:' "${OFFICIAL_LOG}" || \
+   ! grep -q 'TOP1:' "${OFFICIAL_LOG}"; then
+    echo "[momask-vq-official] ERROR: official result is incomplete: ${OFFICIAL_LOG}" >&2
+    exit 2
+fi
+cp -- "${OFFICIAL_LOG}" "${OUTPUT_PATH}"
 echo "[momask-vq-official] DONE output=${OUTPUT}"
