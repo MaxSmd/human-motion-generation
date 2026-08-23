@@ -24,6 +24,7 @@ CANONICAL_H3D_DIR="${CANONICAL_H3D_DIR:-${HOME}/rmg-runs/h3d-canonical/new_joint
 TEXTS_ZIP="${TEXTS_ZIP:-${HUMANML3D_DIR}/texts.zip}"
 TEXTS_CACHE_ROOT="${TEXTS_CACHE_ROOT:-${HOME}/rmg-runs/h3d-official-eval}"
 GLOVE_DIR="${GLOVE_DIR:-${REPO}/external/text-to-motion/glove}"
+EVALUATOR_ROOT="${EVALUATOR_ROOT:-${REPO}/external/text-to-motion/checkpoints/momask_official}"
 VQ_NAME="${OFFICIAL_VQ_NAME:-rvq_nq6_dc512_nc512_noshare_qdp0.2}"
 WHICH_EPOCH="${WHICH_EPOCH:-net_best_fid.tar}"
 EXT="${EXT:-local_humanml3d_official_protocol}"
@@ -44,8 +45,8 @@ require_file() {
 require_file "${OFFICIAL_REPO}/eval_t2m_vq.py" "official evaluator entrypoint"
 require_file "${OFFICIAL_REPO}/checkpoints/t2m/${VQ_NAME}/model/${WHICH_EPOCH}" "official RVQ checkpoint"
 require_file "${OFFICIAL_REPO}/checkpoints/t2m/${VQ_NAME}/opt.txt" "official RVQ options"
-require_file "${OFFICIAL_REPO}/checkpoints/t2m/Comp_v6_KLD005/opt.txt" "official Guo evaluator options"
-require_file "${OFFICIAL_REPO}/checkpoints/t2m/text_mot_match/model/finest.tar" "official Guo evaluator"
+require_file "${EVALUATOR_ROOT}/t2m/Comp_v6_KLD005/opt.txt" "downloaded Guo evaluator options"
+require_file "${EVALUATOR_ROOT}/t2m/text_mot_match/model/finest.tar" "downloaded Guo evaluator"
 require_file "${HUMANML3D_DIR}/test.txt" "HumanML3D test split"
 require_file "${GLOVE_DIR}/our_vab_data.npy" "GloVe vectors"
 if [ ! -d "${CANONICAL_H3D_DIR}" ]; then
@@ -72,6 +73,21 @@ link_directory() {
         ln -s "${target}" "${link}"
     fi
 }
+
+if [ ! -e "${OFFICIAL_REPO}/checkpoints/t2m/Comp_v6_KLD005" ]; then
+    link_directory \
+        "${EVALUATOR_ROOT}/t2m/Comp_v6_KLD005" \
+        "${OFFICIAL_REPO}/checkpoints/t2m/Comp_v6_KLD005" \
+        "Guo evaluator options"
+fi
+if [ ! -e "${OFFICIAL_REPO}/checkpoints/t2m/text_mot_match" ]; then
+    link_directory \
+        "${EVALUATOR_ROOT}/t2m/text_mot_match" \
+        "${OFFICIAL_REPO}/checkpoints/t2m/text_mot_match" \
+        "Guo evaluator checkpoint"
+fi
+require_file "${OFFICIAL_REPO}/checkpoints/t2m/Comp_v6_KLD005/opt.txt" "linked Guo evaluator options"
+require_file "${OFFICIAL_REPO}/checkpoints/t2m/text_mot_match/model/finest.tar" "linked Guo evaluator"
 
 if [ -d "${HUMANML3D_DIR}/texts" ]; then
     TEXTS_DIR="${HUMANML3D_DIR}/texts"
