@@ -65,4 +65,5 @@ export TRANSFORMER_HEADS="${TRANSFORMER_HEADS:-6}"
 export TRANSFORMER_FFN_DIM="${TRANSFORMER_FFN_DIM:-1024}"
 export TRANSFORMER_DROPOUT="${TRANSFORMER_DROPOUT:-0.2}"
 
-bash slurm/momask/train_momask_tokens_full.sbatch
+TOKEN_FULL_SCRIPT="${TOKEN_FULL_SCRIPT:-slurm/momask/train_momask_tokens_full.sbatch}"
+bash "${TOKEN_FULL_SCRIPT}"

@@ -87,6 +87,7 @@ WARMUP_STEPS="${WARMUP_STEPS:-0}"
 LR_MILESTONES="${LR_MILESTONES:-}"
 LR_GAMMA="${LR_GAMMA:-0.1}"
 SEED="${SEED:-0}"
+SKIP_EDITABLE_INSTALL="${SKIP_EDITABLE_INSTALL:-0}"
 
 if [ "${TOKEN_FAIL_IF_OUTPUT_EXISTS}" = "1" ] && [ -z "${TOKEN_CKPT}" ] \
     && [ -d "${OUTPUT_DIR}" ]; then
@@ -133,6 +134,7 @@ echo "[momask-tokens] transformer arch=${TRANSFORMER_ARCH} hidden=${TRANSFORMER_
 echo "[momask-tokens] token_stage=${TOKEN_STAGE} lr=${TOKEN_LR} adam_beta2=${ADAM_BETA2} weight_decay=${WEIGHT_DECAY} grad_clip=${TOKEN_GRAD_CLIP} residual_arch=${RESIDUAL_ARCH} residual_share_weight=${RESIDUAL_SHARE_WEIGHT} residual_predict_pad=${RESIDUAL_PREDICT_PAD} official_mask_schedule=${OFFICIAL_MASK_SCHEDULE} freeze_masked=${FREEZE_MASKED} live_token_crops=${LIVE_TOKEN_CROPS} paper_data=${PAPER_TRANSFORMER_DATA} base_full_mask_prob=${BASE_FULL_MASK_PROB} generation_steps=${GENERATION_STEPS}"
 echo "[momask-tokens] warmup_steps=${WARMUP_STEPS} lr_milestones=${LR_MILESTONES:-<none>} lr_gamma=${LR_GAMMA}"
 echo "[momask-tokens] seed=${SEED}"
+echo "[momask-tokens] skip_editable_install=${SKIP_EDITABLE_INSTALL}"
 
 RESIDUAL_SHARE_ARG=""
 if [ "${RESIDUAL_SHARE_WEIGHT}" = "1" ]; then
@@ -187,7 +189,9 @@ enroot start \
     bash -lc "
         set -euo pipefail
         cd ${REPO}
-        pip install -e . --no-deps --quiet
+        if [ '${SKIP_EDITABLE_INSTALL}' != '1' ]; then
+            pip install -e . --no-deps --quiet
+        fi
         python -u -m momask.scripts.train_momask \\
             --data-root '${DATA_ROOT}' \\
             ${CANONICAL_ARG} \\
