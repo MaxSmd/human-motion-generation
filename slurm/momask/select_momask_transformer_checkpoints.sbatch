@@ -53,6 +53,7 @@ TOPK_FILTER_THRES="${TOPK_FILTER_THRES:-0.9}"
 SAMPLE="${SAMPLE:-1}"
 REMASK_KEPT_TOKENS="${REMASK_KEPT_TOKENS:-0}"
 SEED="${SEED:-3407}"
+SKIP_EDITABLE_INSTALL="${SKIP_EDITABLE_INSTALL:-0}"
 
 echo "[momask-fidsel] host=$(hostname)"
 echo "[momask-fidsel] repo=${REPO}"
@@ -65,6 +66,7 @@ echo "[momask-fidsel] evaluator_checkpoints=${EVALUATOR_CHECKPOINTS_DIR} normali
 echo "[momask-fidsel] masked_steps=${MASKED_GENERATION_STEPS} masked_guidance=${MASKED_GUIDANCE_SCALE}"
 echo "[momask-fidsel] residual_guidance=${RESIDUAL_GUIDANCE_SCALE} final_steps=${FINAL_GENERATION_STEPS} final_residual_guidance=${FINAL_RESIDUAL_GUIDANCE_SCALE}"
 echo "[momask-fidsel] temp=${TEMPERATURE} topk=${TOPK_FILTER_THRES} sample=${SAMPLE} remask=${REMASK_KEPT_TOKENS} seed=${SEED}"
+echo "[momask-fidsel] skip_editable_install=${SKIP_EDITABLE_INSTALL}"
 
 enroot start \
     --root \
@@ -80,7 +82,9 @@ enroot start \
         set -euo pipefail
         cd '${REPO}'
         mkdir -p '${OUTPUT_DIR}/masked_evals' '${OUTPUT_DIR}/residual_evals'
-        pip install -e . --no-deps --quiet
+        if [ '${SKIP_EDITABLE_INSTALL}' != '1' ]; then
+            pip install -e . --no-deps --quiet
+        fi
         python -m spacy download en_core_web_sm --quiet
 
         evaluate_manifest() {
