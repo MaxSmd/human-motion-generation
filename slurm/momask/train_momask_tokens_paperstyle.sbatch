@@ -31,7 +31,9 @@ export TOKEN_EPOCHS="${TOKEN_EPOCHS:-500}"
 export MAX_SEQ_LEN="${MAX_SEQ_LEN:-196}"
 export MIN_SEQ_LEN="${MIN_SEQ_LEN:-40}"
 export BATCH_SIZE="${BATCH_SIZE:-64}"
-export NUM_WORKERS="${NUM_WORKERS:-4}"
+# Motions are already preloaded in memory. Long persistent-worker runs reached
+# the 24 GB host-memory limit, so keep this loader in one process.
+export NUM_WORKERS="${NUM_WORKERS:-0}"
 export TOKEN_BATCH_SIZE="${TOKEN_BATCH_SIZE:-64}"
 export SAVE_EVERY="${SAVE_EVERY:-2000}"
 export LOG_EVERY="${LOG_EVERY:-1000}"
