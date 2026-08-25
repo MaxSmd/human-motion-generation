@@ -21,17 +21,19 @@ IMAGE="${IMAGE:-${HOME}/rmg-momask.sqsh}"
 HF_CACHE="${HF_CACHE:-${HOME}/hf-cache}"
 DATA_ROOT="${DATA_ROOT:-/mnt/projects/drl4cvb/human-motion-representation/data/data/humanml3d_packed}"
 REAL_H3D_DIR="${REAL_H3D_DIR:-${HOME}/rmg-runs/h3d-canonical/new_joint_vecs}"
-CKPT="${CKPT:-runs/momask-canonical-tokens-clip200k/checkpoints/tokens_step_0145000.pt}"
+MOMASK_RUNS_ROOT="${MOMASK_RUNS_ROOT:-/mnt/projects/drl4cvb/human-motion-representation/runs}"
+CKPT="${CKPT:-${MOMASK_RUNS_ROOT}/momask-canonical-tokens-vq150k-maskfix196-valfidselection-full/momask_best_val_fid.pt}"
 SAMPLES="${SAMPLES:-0 500 1000 1500 2000}"
 SEEDS="${SEEDS:-0}"
-MAX_SEQ_LEN="${MAX_SEQ_LEN:-80}"
+MAX_SEQ_LEN="${MAX_SEQ_LEN:-196}"
 MIN_SEQ_LEN="${MIN_SEQ_LEN:-40}"
 GENERATION_STEPS="${GENERATION_STEPS:-10}"
-GUIDANCE_SCALE="${GUIDANCE_SCALE:-1.0}"
-TEMPERATURE="${TEMPERATURE:-0.6}"
-TOPK_FILTER_THRES="${TOPK_FILTER_THRES:-1.0}"
-SAMPLE_TOKENS="${SAMPLE_TOKENS:-0}"
-REMASK_KEPT_TOKENS="${REMASK_KEPT_TOKENS:-1}"
+GUIDANCE_SCALE="${GUIDANCE_SCALE:-4.0}"
+RESIDUAL_GUIDANCE_SCALE="${RESIDUAL_GUIDANCE_SCALE:-5.0}"
+TEMPERATURE="${TEMPERATURE:-1.0}"
+TOPK_FILTER_THRES="${TOPK_FILTER_THRES:-0.9}"
+SAMPLE_TOKENS="${SAMPLE_TOKENS:-1}"
+REMASK_KEPT_TOKENS="${REMASK_KEPT_TOKENS:-0}"
 ANCHOR_STRIDE="${ANCHOR_STRIDE:-20}"
 JOINT_IDS="${JOINT_IDS:-20,21}"
 JOINT_TARGET_SPACE="${JOINT_TARGET_SPACE:-root-relative}"
@@ -47,18 +49,19 @@ ROOT_WEIGHT="${ROOT_WEIGHT:-0.1}"
 BONE_WEIGHT="${BONE_WEIGHT:-0.1}"
 MAX_DELTA_NORM="${MAX_DELTA_NORM:-1.0}"
 GRAD_CLIP_NORM="${GRAD_CLIP_NORM:-1.0}"
-MAX_FRAMES="${MAX_FRAMES:-80}"
+MAX_FRAMES="${MAX_FRAMES:-196}"
 FPS="${FPS:-20}"
 TEXT_ENCODER="${TEXT_ENCODER:-checkpoint}"
 CLIP_MODEL="${CLIP_MODEL:-}"
 CLIP_CACHE_DIR="${CLIP_CACHE_DIR:-${HF_CACHE}}"
 CLIP_BACKEND="${CLIP_BACKEND:-checkpoint}"
+SKIP_EDITABLE_INSTALL="${SKIP_EDITABLE_INSTALL:-1}"
 
 RUN_DIR="$(dirname "${CKPT}")"
 if [ "$(basename "${RUN_DIR}")" = "checkpoints" ]; then
     RUN_DIR="$(dirname "${RUN_DIR}")"
 fi
-OUT_DIR="${OUT_DIR:-${RUN_DIR}/constraints/viz_joint_angle_step145k}"
+OUT_DIR="${OUT_DIR:-${RUN_DIR}/constraints/viz_joint_angle}"
 
 echo "[momask-joint-angle-viz] host=$(hostname)"
 echo "[momask-joint-angle-viz] repo=${REPO}"
@@ -93,7 +96,9 @@ enroot start \
         set -euo pipefail
         cd '${REPO}'
         mkdir -p '${OUT_DIR}'
-        pip install -e . --no-deps --quiet
+        if [ '${SKIP_EDITABLE_INSTALL}' != '1' ]; then
+            pip install -e . --no-deps --quiet
+        fi
         for sample in ${SAMPLES}; do
             for seed in ${SEEDS}; do
                 echo \"[momask-joint-angle-viz] rendering sample=\${sample} seed=\${seed}\"
@@ -108,6 +113,7 @@ enroot start \
                     --min-seq-len ${MIN_SEQ_LEN} \
                     --generation-steps ${GENERATION_STEPS} \
                     --guidance-scale ${GUIDANCE_SCALE} \
+                    --residual-guidance-scale ${RESIDUAL_GUIDANCE_SCALE} \
                     --temperature ${TEMPERATURE} \
                     --topk-filter-thres ${TOPK_FILTER_THRES} \
                     ${SAMPLING_ARGS} \

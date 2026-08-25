@@ -208,7 +208,7 @@ optimization; neither MoMask transformer is retrained.
 
 This stage enforces geometry only. It can push a motion out of an obstacle, but
 it does not by itself teach the model to climb stairs or choose a jumping action.
-Run a short compute-node probe against the validated legacy checkpoint with:
+Run a short compute-node probe against the validation-FID-selected checkpoint with:
 
 ```bash
 MAX_CLIPS=8 \
@@ -243,12 +243,24 @@ from above, and plots penetration by source over time.
 The constraint evaluator compares the unconstrained sample, the existing root
 trajectory baselines, wrist-position latent refinement, and knee/elbow-angle
 latent refinement from the same generated tokens. Its SLURM wrapper defaults to
-the validated legacy checkpoint at step 145k:
+the validation-FID-selected 196-frame checkpoint under the shared project runs
+directory. Generation uses the selected paper-protocol sampler by default:
+10 M-Transformer iterations, M/R guidance 4/5, temperature 1.0, top-k 0.9,
+sampling enabled, and no remasking of already-kept tokens.
 
 ```bash
 MAX_CLIPS=256 \
 LATENT_VARIANTS=joint,angle \
 sbatch slurm/momask/evaluate_momask_constraints.sbatch
+```
+
+Override `MOMASK_RUNS_ROOT` or `CKPT` when the selected checkpoint is stored
+elsewhere. The single- and multi-sample trajectory GIF wrappers use the same
+checkpoint and sampler defaults:
+
+```bash
+sbatch slurm/momask/visualize_momask_constraints.sbatch
+sbatch slurm/momask/visualize_momask_constraints_many.sbatch
 ```
 
 The JSON reports FID, R@1/R@2/R@3, MM-Dist, and diversity for every variant. It

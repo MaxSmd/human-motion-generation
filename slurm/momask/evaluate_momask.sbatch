@@ -54,6 +54,7 @@ EVALUATOR_NORMALIZATION_NAME="${EVALUATOR_NORMALIZATION_NAME:-}"
 PAPER_TRANSFORMER_DATA="${PAPER_TRANSFORMER_DATA:-0}"
 SEED="${SEED:-0}"
 OUTPUT="${OUTPUT:-}"
+SKIP_EDITABLE_INSTALL="${SKIP_EDITABLE_INSTALL:-0}"
 
 if [ "${PAPER_TRANSFORMER_DATA}" = "1" ]; then
     EVALUATOR_CHECKPOINTS_DIR="${EVALUATOR_CHECKPOINTS_DIR:-external/text-to-motion/checkpoints/momask_official}"
@@ -84,6 +85,7 @@ echo "[momask-eval] guidance=${GUIDANCE_SCALE} residual_guidance=${RESIDUAL_GUID
 echo "[momask-eval] sample=${SAMPLE} topk_filter_thres=${TOPK_FILTER_THRES} remask_kept_tokens=${REMASK_KEPT_TOKENS}"
 echo "[momask-eval] text_encoder=${TEXT_ENCODER} clip_model=${CLIP_MODEL:-checkpoint-default} clip_backend=${CLIP_BACKEND}"
 echo "[momask-eval] evaluator=${EVALUATOR} evaluator_checkpoints=${EVALUATOR_CHECKPOINTS_DIR:-legacy-default} evaluator_normalization=${EVALUATOR_NORMALIZATION_NAME}"
+echo "[momask-eval] skip_editable_install=${SKIP_EDITABLE_INSTALL}"
 echo "[momask-eval] output=${OUTPUT}"
 
 GENERATION_ARGS=""
@@ -146,7 +148,9 @@ enroot start \
     bash -lc "
         set -euo pipefail
         cd ${REPO}
-        pip install -e . --no-deps --quiet
+        if [ '${SKIP_EDITABLE_INSTALL}' != '1' ]; then
+            pip install -e . --no-deps --quiet
+        fi
         python -m spacy download en_core_web_sm --quiet
         python -u -m momask.scripts.evaluate_momask \
             --checkpoint '${CKPT}' \

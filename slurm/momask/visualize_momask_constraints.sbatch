@@ -21,27 +21,30 @@ IMAGE="${IMAGE:-${HOME}/rmg-momask.sqsh}"
 HF_CACHE="${HF_CACHE:-${HOME}/hf-cache}"
 DATA_ROOT="${DATA_ROOT:-/mnt/projects/drl4cvb/human-motion-representation/data/data/humanml3d_packed}"
 REAL_H3D_DIR="${REAL_H3D_DIR:-${HOME}/rmg-runs/h3d-canonical/new_joint_vecs}"
-CKPT="${CKPT:-runs/momask-full-tokens-clip150k/momask_smoke_latest.pt}"
+MOMASK_RUNS_ROOT="${MOMASK_RUNS_ROOT:-/mnt/projects/drl4cvb/human-motion-representation/runs}"
+CKPT="${CKPT:-${MOMASK_RUNS_ROOT}/momask-canonical-tokens-vq150k-maskfix196-valfidselection-full/momask_best_val_fid.pt}"
 SAMPLE="${SAMPLE:-0}"
-MAX_SEQ_LEN="${MAX_SEQ_LEN:-}"
+MAX_SEQ_LEN="${MAX_SEQ_LEN:-196}"
 MIN_SEQ_LEN="${MIN_SEQ_LEN:-40}"
 GENERATION_STEPS="${GENERATION_STEPS:-10}"
-GUIDANCE_SCALE="${GUIDANCE_SCALE:-1.0}"
+GUIDANCE_SCALE="${GUIDANCE_SCALE:-4.0}"
+RESIDUAL_GUIDANCE_SCALE="${RESIDUAL_GUIDANCE_SCALE:-5.0}"
 TEMPERATURE="${TEMPERATURE:-1.0}"
-TOPK_FILTER_THRES="${TOPK_FILTER_THRES:-1.0}"
-SAMPLE_TOKENS="${SAMPLE_TOKENS:-0}"
-REMASK_KEPT_TOKENS="${REMASK_KEPT_TOKENS:-1}"
+TOPK_FILTER_THRES="${TOPK_FILTER_THRES:-0.9}"
+SAMPLE_TOKENS="${SAMPLE_TOKENS:-1}"
+REMASK_KEPT_TOKENS="${REMASK_KEPT_TOKENS:-0}"
 ANCHOR_STRIDE="${ANCHOR_STRIDE:-20}"
 CONSTRAINT_VARIANT="${CONSTRAINT_VARIANT:-both}"
 AUTO_SAMPLE_MOVING="${AUTO_SAMPLE_MOVING:-1}"
 MIN_ROOT_SPAN="${MIN_ROOT_SPAN:-0.75}"
-MAX_FRAMES="${MAX_FRAMES:-80}"
+MAX_FRAMES="${MAX_FRAMES:-196}"
 FPS="${FPS:-20}"
 SEED="${SEED:-0}"
 TEXT_ENCODER="${TEXT_ENCODER:-checkpoint}"
 CLIP_MODEL="${CLIP_MODEL:-}"
 CLIP_CACHE_DIR="${CLIP_CACHE_DIR:-${HF_CACHE}}"
 CLIP_BACKEND="${CLIP_BACKEND:-checkpoint}"
+SKIP_EDITABLE_INSTALL="${SKIP_EDITABLE_INSTALL:-1}"
 RUN_DIR="$(dirname "${CKPT}")"
 if [ "$(basename "${RUN_DIR}")" = "checkpoints" ]; then
     RUN_DIR="$(dirname "${RUN_DIR}")"
@@ -53,7 +56,7 @@ echo "[momask-constraint-viz] repo=${REPO}"
 echo "[momask-constraint-viz] ckpt=${CKPT}"
 echo "[momask-constraint-viz] real_h3d_dir=${REAL_H3D_DIR:-<packed>}"
 echo "[momask-constraint-viz] sample=${SAMPLE} max_seq_len=${MAX_SEQ_LEN:-checkpoint-default} anchor_stride=${ANCHOR_STRIDE} constraint_variant=${CONSTRAINT_VARIANT} auto_sample_moving=${AUTO_SAMPLE_MOVING} min_root_span=${MIN_ROOT_SPAN} out_dir=${OUT_DIR}"
-echo "[momask-constraint-viz] guidance=${GUIDANCE_SCALE} temp=${TEMPERATURE} sample_tokens=${SAMPLE_TOKENS} topk=${TOPK_FILTER_THRES} seed=${SEED}"
+echo "[momask-constraint-viz] guidance=${GUIDANCE_SCALE} residual_guidance=${RESIDUAL_GUIDANCE_SCALE} temp=${TEMPERATURE} sample_tokens=${SAMPLE_TOKENS} topk=${TOPK_FILTER_THRES} seed=${SEED}"
 
 REAL_H3D_ARG=""
 if [ -n "${REAL_H3D_DIR}" ]; then
@@ -89,7 +92,9 @@ enroot start \
     bash -lc "
         set -euo pipefail
         cd ${REPO}
-        pip install -e . --no-deps --quiet
+        if [ '${SKIP_EDITABLE_INSTALL}' != '1' ]; then
+            pip install -e . --no-deps --quiet
+        fi
         python -u -m momask.scripts.visualize_momask_constraints \
             --checkpoint '${CKPT}' \
             --data-root '${DATA_ROOT}' \
@@ -100,6 +105,7 @@ enroot start \
             --min-seq-len ${MIN_SEQ_LEN} \
             --generation-steps ${GENERATION_STEPS} \
             --guidance-scale ${GUIDANCE_SCALE} \
+            --residual-guidance-scale ${RESIDUAL_GUIDANCE_SCALE} \
             --temperature ${TEMPERATURE} \
             --topk-filter-thres ${TOPK_FILTER_THRES} \
             ${SAMPLING_ARGS} \

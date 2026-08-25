@@ -33,8 +33,10 @@ from momask.constraints import (
 )
 from momask.models import MotionRVQVAE
 from momask.scripts.evaluate_momask_constraints import (
+    H3DNormalizer,
     angle_triplets_from_centers,
     build_joint_constraint,
+    generate_full,
     parse_latent_variants,
 )
 from momask.tasks import generate_h3d263_constrained
@@ -67,6 +69,65 @@ def test_evaluator_accepts_body_fixed_latent_variant() -> None:
 
 def test_evaluator_accepts_scene_latent_variant() -> None:
     assert parse_latent_variants("scene") == ("scene",)
+
+
+def test_constraint_generation_uses_independent_residual_guidance() -> None:
+    class DummyVQ:
+        downsample = 1
+
+        def encode_to_tokens(self, x: torch.Tensor) -> torch.Tensor:
+            return torch.zeros(x.shape[0], 2, x.shape[1], dtype=torch.long)
+
+        def decode_from_tokens(
+            self,
+            tokens: torch.Tensor,
+            target_len: int,
+            token_mask: torch.Tensor,
+        ) -> torch.Tensor:
+            del token_mask
+            return torch.zeros(tokens.shape[0], target_len, H3D_FEATURE_DIM)
+
+    class DummyMasked:
+        guidance: float | None = None
+
+        def generate(self, *, cond, seq_len, guidance_scale, **_kwargs):
+            self.guidance = guidance_scale
+            return torch.zeros(cond.shape[0], seq_len, dtype=torch.long)
+
+    class DummyResidual:
+        guidance: float | None = None
+
+        def generate_residuals(self, base, *, guidance_scale, **_kwargs):
+            self.guidance = guidance_scale
+            return torch.stack([base, base], dim=1)
+
+    masked = DummyMasked()
+    residual = DummyResidual()
+    real = torch.zeros(2, 8, H3D_FEATURE_DIM)
+    frame_mask = torch.ones(2, 8, dtype=torch.bool)
+
+    generate_full(
+        vqvae=DummyVQ(),
+        masked=masked,
+        residual=residual,
+        normalizer=H3DNormalizer(
+            torch.zeros(H3D_FEATURE_DIM),
+            torch.ones(H3D_FEATURE_DIM),
+        ),
+        cond=torch.zeros(2, 12),
+        real_x=real,
+        frame_mask=frame_mask,
+        steps=10,
+        guidance_scale=4.0,
+        residual_guidance_scale=5.0,
+        temperature=1.0,
+        topk_filter_thres=0.9,
+        sample=True,
+        remask_kept_tokens=False,
+    )
+
+    assert masked.guidance == 4.0
+    assert residual.guidance == 5.0
 
 
 def test_root_relative_joint_targets_follow_generated_heading() -> None:

@@ -99,6 +99,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--min-seq-len", type=int, default=40)
     p.add_argument("--generation-steps", type=int, default=None)
     p.add_argument("--guidance-scale", type=float, default=4.0)
+    p.add_argument(
+        "--residual-guidance-scale",
+        type=float,
+        default=None,
+        help="Classifier-free guidance for residual tokens (defaults to --guidance-scale).",
+    )
     p.add_argument("--temperature", type=float, default=1.0)
     p.add_argument("--topk-filter-thres", type=float, default=1.0)
     p.add_argument("--sample-tokens", action=argparse.BooleanOptionalAction, default=False)
@@ -366,6 +372,7 @@ def generate_full(
     frame_mask: Tensor,
     steps: int,
     guidance_scale: float,
+    residual_guidance_scale: float,
     temperature: float,
     topk_filter_thres: float,
     sample_tokens: bool,
@@ -388,7 +395,7 @@ def generate_full(
     tokens = residual.generate_residuals(
         base,
         cond=cond,
-        guidance_scale=guidance_scale,
+        guidance_scale=residual_guidance_scale,
         temperature=temperature,
         topk_filter_thres=topk_filter_thres,
         sample=sample_tokens,
@@ -1417,6 +1424,11 @@ def main() -> None:
     normalizer = H3DNormalizer.from_state_dict(ckpt["normalizer"])
     steps = int(args.generation_steps or saved_args.get("generation_steps", 10))
     max_seq_len = int(args.max_seq_len or saved_args.get("max_seq_len", 80))
+    residual_guidance_scale = (
+        args.guidance_scale
+        if args.residual_guidance_scale is None
+        else args.residual_guidance_scale
+    )
     real_h3d_dir = Path(args.real_h3d_dir) if args.real_h3d_dir else None
     if real_h3d_dir is not None and not real_h3d_dir.exists():
         raise FileNotFoundError(f"canonical HumanML3D new_joint_vecs dir not found: {real_h3d_dir}")
@@ -1473,6 +1485,7 @@ def main() -> None:
         frame_mask,
         steps,
         args.guidance_scale,
+        residual_guidance_scale,
         args.temperature,
         args.topk_filter_thres,
         args.sample_tokens,

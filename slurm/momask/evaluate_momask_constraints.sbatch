@@ -30,17 +30,19 @@ HUMANML3D_REPO="${HUMANML3D_REPO:-external/HumanML3D}"
 HUMANML3D_TEXTS_ZIP="${HUMANML3D_TEXTS_ZIP:-/mnt/projects/drl4cvb/human-motion-representation/data/HumanML3D/HumanML3D/texts.zip}"
 REAL_H3D_DIR="${REAL_H3D_DIR:-${HOME}/rmg-runs/h3d-canonical/new_joint_vecs}"
 MODEL_INPUT_SOURCE="${MODEL_INPUT_SOURCE:-canonical}"
-CKPT="${CKPT:-runs/momask-canonical-tokens-clip200k/checkpoints/tokens_step_0145000.pt}"
+MOMASK_RUNS_ROOT="${MOMASK_RUNS_ROOT:-/mnt/projects/drl4cvb/human-motion-representation/runs}"
+CKPT="${CKPT:-${MOMASK_RUNS_ROOT}/momask-canonical-tokens-vq150k-maskfix196-valfidselection-full/momask_best_val_fid.pt}"
 MAX_CLIPS="${MAX_CLIPS:-256}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
-MAX_SEQ_LEN="${MAX_SEQ_LEN:-}"
+MAX_SEQ_LEN="${MAX_SEQ_LEN:-196}"
 MIN_SEQ_LEN="${MIN_SEQ_LEN:-40}"
 GENERATION_STEPS="${GENERATION_STEPS:-10}"
-GUIDANCE_SCALE="${GUIDANCE_SCALE:-1.0}"
-TEMPERATURE="${TEMPERATURE:-0.6}"
-TOPK_FILTER_THRES="${TOPK_FILTER_THRES:-1.0}"
-SAMPLE="${SAMPLE:-0}"
-REMASK_KEPT_TOKENS="${REMASK_KEPT_TOKENS:-1}"
+GUIDANCE_SCALE="${GUIDANCE_SCALE:-4.0}"
+RESIDUAL_GUIDANCE_SCALE="${RESIDUAL_GUIDANCE_SCALE:-5.0}"
+TEMPERATURE="${TEMPERATURE:-1.0}"
+TOPK_FILTER_THRES="${TOPK_FILTER_THRES:-0.9}"
+SAMPLE="${SAMPLE:-1}"
+REMASK_KEPT_TOKENS="${REMASK_KEPT_TOKENS:-0}"
 ANCHOR_STRIDE="${ANCHOR_STRIDE:-20}"
 LATENT_VARIANTS="${LATENT_VARIANTS:-joint,angle}"
 JOINT_IDS="${JOINT_IDS:-20,21}"
@@ -95,6 +97,7 @@ CLIP_CACHE_DIR="${CLIP_CACHE_DIR:-${HF_CACHE}}"
 CLIP_BACKEND="${CLIP_BACKEND:-checkpoint}"
 EVALUATOR="${EVALUATOR:-real}"
 OUTPUT="${OUTPUT:-}"
+SKIP_EDITABLE_INSTALL="${SKIP_EDITABLE_INSTALL:-1}"
 
 if [ -z "${OUTPUT}" ]; then
     CKPT_DIR="$(dirname "${CKPT}")"
@@ -118,7 +121,7 @@ echo "[momask-constraints] real_h3d_dir=${REAL_H3D_DIR:-<packed>}"
 echo "[momask-constraints] model_input_source=${MODEL_INPUT_SOURCE}"
 echo "[momask-constraints] ckpt=${CKPT}"
 echo "[momask-constraints] max_clips=${MAX_CLIPS} batch_size=${BATCH_SIZE} max_seq_len=${MAX_SEQ_LEN:-checkpoint-default}"
-echo "[momask-constraints] steps=${GENERATION_STEPS} guidance=${GUIDANCE_SCALE} anchor_stride=${ANCHOR_STRIDE}"
+echo "[momask-constraints] steps=${GENERATION_STEPS} guidance=${GUIDANCE_SCALE} residual_guidance=${RESIDUAL_GUIDANCE_SCALE} anchor_stride=${ANCHOR_STRIDE}"
 echo "[momask-constraints] sample=${SAMPLE} topk_filter_thres=${TOPK_FILTER_THRES} remask_kept_tokens=${REMASK_KEPT_TOKENS}"
 echo "[momask-constraints] latent_variants=${LATENT_VARIANTS} joint_ids=${JOINT_IDS} joint_space=${JOINT_TARGET_SPACE}"
 echo "[momask-constraints] angle_joints=${ANGLE_JOINTS} angle_tolerance_deg=${ANGLE_TOLERANCE_DEG}"
@@ -128,6 +131,7 @@ echo "[momask-constraints] scene room=${SCENE_ROOM_WIDTH}x${SCENE_ROOM_DEPTH}x${
 echo "[momask-constraints] scene weights collision=${SCENE_WEIGHT} peak=${SCENE_PEAK_WEIGHT} swept_samples=${SCENE_SWEPT_SAMPLES}"
 echo "[momask-constraints] scene adaptive temp=${SCENE_PEAK_TEMPERATURE} growth=${SCENE_PENALTY_GROWTH} interval=${SCENE_PENALTY_INTERVAL} max_scale=${SCENE_MAX_PENALTY_SCALE} tolerance=${SCENE_VIOLATION_TOLERANCE} reg_floor=${SCENE_REGULARIZATION_FLOOR}"
 echo "[momask-constraints] output=${OUTPUT}"
+echo "[momask-constraints] skip_editable_install=${SKIP_EDITABLE_INSTALL}"
 
 TEXTS_ZIP_ARG=""
 if [ -n "${HUMANML3D_TEXTS_ZIP}" ]; then
@@ -168,7 +172,9 @@ enroot start \
     bash -lc "
         set -euo pipefail
         cd ${REPO}
-        pip install -e . --no-deps --quiet
+        if [ '${SKIP_EDITABLE_INSTALL}' != '1' ]; then
+            pip install -e . --no-deps --quiet
+        fi
         python -m spacy download en_core_web_sm --quiet
         python -u -m momask.scripts.evaluate_momask_constraints \
             --checkpoint '${CKPT}' \
@@ -184,6 +190,7 @@ enroot start \
             --min-seq-len ${MIN_SEQ_LEN} \
             --generation-steps ${GENERATION_STEPS} \
             --guidance-scale ${GUIDANCE_SCALE} \
+            --residual-guidance-scale ${RESIDUAL_GUIDANCE_SCALE} \
             --temperature ${TEMPERATURE} \
             --topk-filter-thres ${TOPK_FILTER_THRES} \
             ${SAMPLING_ARGS} \

@@ -98,6 +98,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--min-seq-len", type=int, default=40)
     p.add_argument("--generation-steps", type=int, default=None)
     p.add_argument("--guidance-scale", type=float, default=4.0)
+    p.add_argument(
+        "--residual-guidance-scale",
+        type=float,
+        default=None,
+        help="Classifier-free guidance for residual tokens (defaults to --guidance-scale).",
+    )
     p.add_argument("--temperature", type=float, default=1.0)
     p.add_argument("--topk-filter-thres", type=float, default=1.0)
     p.add_argument("--sample", action=argparse.BooleanOptionalAction, default=False)
@@ -871,6 +877,7 @@ def generate_full(
     frame_mask: Tensor,
     steps: int,
     guidance_scale: float,
+    residual_guidance_scale: float,
     temperature: float,
     topk_filter_thres: float,
     sample: bool,
@@ -893,7 +900,7 @@ def generate_full(
     tokens = residual.generate_residuals(
         base,
         cond=cond,
-        guidance_scale=guidance_scale,
+        guidance_scale=residual_guidance_scale,
         temperature=temperature,
         topk_filter_thres=topk_filter_thres,
         sample=sample,
@@ -965,6 +972,11 @@ def main() -> None:
         raise ValueError("--model-input-source canonical requires --real-h3d-dir")
     steps = int(args.generation_steps or saved_args.get("generation_steps", 10))
     max_seq_len = int(args.max_seq_len or saved_args.get("max_seq_len", 80))
+    residual_guidance_scale = (
+        args.guidance_scale
+        if args.residual_guidance_scale is None
+        else args.residual_guidance_scale
+    )
     text_encoder = build_text_encoder(args, saved_args)
     vqvae, masked, residual = build_models(ckpt, device)
     angle_triplets = (
@@ -1009,7 +1021,8 @@ def main() -> None:
 
     print(
         f"[constraints] ckpt={args.checkpoint} clips={len(ds)} max_clips={args.max_clips} "
-        f"steps={steps} guidance={args.guidance_scale} anchor_stride={args.anchor_stride} "
+        f"steps={steps} guidance={args.guidance_scale} "
+        f"residual_guidance={residual_guidance_scale} anchor_stride={args.anchor_stride} "
         f"text_tokens={'vip' if caption_tokens is not None else 'spacy'} "
         f"real_features={'canonical' if real_h3d_dir is not None else 'packed'} "
         f"model_input={model_input_source} sample={args.sample} topk={args.topk_filter_thres}",
@@ -1068,6 +1081,7 @@ def main() -> None:
             frame_mask=model_frame_mask,
             steps=steps,
             guidance_scale=args.guidance_scale,
+            residual_guidance_scale=residual_guidance_scale,
             temperature=args.temperature,
             topk_filter_thres=args.topk_filter_thres,
             sample=args.sample,
@@ -1290,6 +1304,7 @@ def main() -> None:
             "max_seq_len": max_seq_len,
             "generation_steps": steps,
             "guidance_scale": args.guidance_scale,
+            "residual_guidance_scale": residual_guidance_scale,
             "temperature": args.temperature,
             "topk_filter_thres": args.topk_filter_thres,
             "sample": args.sample,
