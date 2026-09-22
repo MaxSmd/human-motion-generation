@@ -1,0 +1,43 @@
+{
+  "joint": 11,
+  "joint_name": "Right foot",
+  "density": 5,
+  "n": 4525,
+  "seed": 14412,
+  "wall_seconds": 1033.4,
+  "sampling_seconds": 928.2,
+  "peak_gpu_gb": 16.94,
+  "fid": 0.18045734719990492,
+  "fid_processed": 0.1034477618394476,
+  "fid_floor": 0.0639209638306113,
+  "r_precision": [
+    0.48648049645390073,
+    0.675531914893617,
+    0.7712765957446809
+  ],
+  "mm_dist": 3.231106758117676,
+  "diversity": 9.589519500732422,
+  "r_precision_real": [
+    0.49867021276595747,
+    0.6830673758865248,
+    0.78302304964539
+  ],
+  "mm_dist_real": 3.073699474334717,
+  "diversity_real": 9.596953392028809,
+  "r_precision_real_processed": [
+    0.5059840425531915,
+    0.6908244680851063,
+    0.7841312056737588
+  ],
+  "diversity_real_processed": 9.827978134155273,
+  "traj_err": 0.0,
+  "loc_err": 0.0,
+  "avg_err": 1.6797763473372254e-08,
+  "max_keyframe_err": 2.5326346531073796e-07,
+  "loc_err_upstream": 0.0,
+  "avg_err_upstream": 5.599254491124084e-09,
+  "skate_upstream": 0.06719705340699815,
+  "skate_ours": 0.4213494688964022,
+  "motion_mag": 0.012043683481356387,
+  "jerk": 0.006847625218270069
+}
