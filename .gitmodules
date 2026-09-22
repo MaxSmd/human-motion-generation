@@ -4,3 +4,6 @@
 [submodule "external/text-to-motion"]
 	path = external/text-to-motion
 	url = https://github.com/EricGuo5513/text-to-motion.git
+[submodule "external/ProjFlow"]
+	path = external/ProjFlow
+	url = https://github.com/Akihisa-Watanabe/ProjFlow.git
