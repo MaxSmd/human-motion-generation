@@ -29,7 +29,7 @@ dev = ["pytest", "pytest-xdist", "ruff", "mypy"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["shared*", "rmg*", "momask*", "mardm*"]
+include = ["shared*", "rmg*", "momask*", "mardm*", "projflow*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

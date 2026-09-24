@@ -1,0 +1,38 @@
+{
+  "canonical_dir": "/mnt/home/maximilianschmid/rmg-runs/h3d-canonical/new_joint_vecs",
+  "checkpoint": "/mnt/home/maximilianschmid/projflow-work/checkpoints/t2m/ACMDM_Raw_Flow_S_PatchSize22/model/latest.tar",
+  "offsets": "/mnt/home/maximilianschmid/projflow-stageB/external/data/humanml3d_packed/target_offsets.pt",
+  "out_dir": "/mnt/home/maximilianschmid/rmg-runs/projflow-stageB-table8",
+  "humanml3d_repo": "external/HumanML3D",
+  "text_to_motion_repo": "external/text-to-motion",
+  "stats_dir": "external/ProjFlow/utils/22x3_mean_std/t2m",
+  "cells": "all",
+  "batch_size": 1024,
+  "cfg": 3.0,
+  "seed": 3407,
+  "max_entries": 0,
+  "feature_workers": 4,
+  "clip_dtype": "float16",
+  "no_kinematic_metric": false,
+  "no_pseudo_obs": false,
+  "no_noise_mixing": false,
+  "overwrite": false,
+  "projflow": {
+    "num_steps": 100,
+    "w_kin": 10.0,
+    "ridge": 1.0,
+    "ell_min": 3.0,
+    "ell_max": 10.0,
+    "trust": {
+      "tau_min": 0.1,
+      "c0": 3.0,
+      "lambda_s": 1.0,
+      "p": 2.0,
+      "pi_min": 0.02,
+      "pi_max": 1.0
+    },
+    "use_kinematic_metric": true,
+    "use_pseudo_obs": true,
+    "use_noise_mixing": true
+  }
+}

@@ -1,0 +1,302 @@
+{
+  "Pelvis/1": {
+    "FID": 0.109,
+    "R@3": 0.761,
+    "Diversity": 10.963,
+    "Foot skate": 0.061,
+    "Traj err": 0.0,
+    "Loc err": 0.0,
+    "Avg err": 0.0,
+    "wall_seconds": 8845
+  },
+  "Pelvis/2": {
+    "FID": 0.105,
+    "R@3": 0.765,
+    "Diversity": 10.894,
+    "Foot skate": 0.0638,
+    "Traj err": 0.0,
+    "Loc err": 0.0,
+    "Avg err": 0.0,
+    "wall_seconds": 8825
+  },
+  "Pelvis/5": {
+    "FID": 0.086,
+    "R@3": 0.772,
+    "Diversity": 10.828,
+    "Foot skate": 0.0679,
+    "Traj err": 0.0,
+    "Loc err": 0.0,
+    "Avg err": 0.0,
+    "wall_seconds": 8838
+  },
+  "Pelvis/25": {
+    "FID": 0.107,
+    "R@3": 0.789,
+    "Diversity": 10.788,
+    "Foot skate": 0.0693,
+    "Traj err": 0.0,
+    "Loc err": 0.0,
+    "Avg err": 0.0,
+    "wall_seconds": 8815
+  },
+  "Pelvis/100": {
+    "FID": 0.076,
+    "R@3": 0.792,
+    "Diversity": 10.898,
+    "Foot skate": 0.071,
+    "Traj err": 0.0,
+    "Loc err": 0.0,
+    "Avg err": 0.0,
+    "wall_seconds": 8961
+  },
+  "Left foot/1": {
+    "FID": 0.129,
+    "R@3": 0.757,
+    "Diversity": 11.018,
+    "Foot skate": 0.06,
+    "Traj err": 0.0,
+    "Loc err": 0.0,
+    "Avg err": 0.0,
+    "wall_seconds": 8881
+  },
+  "Left foot/2": {
+    "FID": 0.106,
+    "R@3": 0.756,
+    "Diversity": 11.093,
+    "Foot skate": 0.064,
+    "Traj err": 0.0,
+    "Loc err": 0.0,
+    "Avg err": 0.0,
+    "wall_seconds": 8833
+  },
+  "Left foot/5": {
+    "FID": 0.095,
+    "R@3": 0.753,
+    "Diversity": 10.911,
+    "Foot skate": 0.0687,
+    "Traj err": 0.0,
+    "Loc err": 0.0,
+    "Avg err": 0.0,
+    "wall_seconds": 8838
+  },
+  "Left foot/25": {
+    "FID": 0.144,
+    "R@3": 0.763,
+    "Diversity": 10.959,
+    "Foot skate": 0.0672,
+    "Traj err": 0.0,
+    "Loc err": 0.0,
+    "Avg err": 0.0,
+    "wall_seconds": 8975
+  },
+  "Left foot/100": {
+    "FID": 0.148,
+    "R@3": 0.763,
+    "Diversity": 10.98,
+    "Foot skate": 0.0589,
+    "Traj err": 0.0,
+    "Loc err": 0.0,
+    "Avg err": 0.0,
+    "wall_seconds": 9069
+  },
+  "Right foot/1": {
+    "FID": 0.111,
+    "R@3": 0.756,
+    "Diversity": 11.048,
+    "Foot skate": 0.0598,
+    "Traj err": 0.0,
+    "Loc err": 0.0,
+    "Avg err": 0.0,
+    "wall_seconds": 9037
+  },
+  "Right foot/2": {
+    "FID": 0.102,
+    "R@3": 0.756,
+    "Diversity": 11.004,
+    "Foot skate": 0.0637,
+    "Traj err": 0.0,
+    "Loc err": 0.0,
+    "Avg err": 0.0,
+    "wall_seconds": 9025
+  },
+  "Right foot/5": {
+    "FID": 0.084,
+    "R@3": 0.755,
+    "Diversity": 10.964,
+    "Foot skate": 0.0674,
+    "Traj err": 0.0,
+    "Loc err": 0.0,
+    "Avg err": 0.0,
+    "wall_seconds": 8975
+  },
+  "Right foot/25": {
+    "FID": 0.101,
+    "R@3": 0.761,
+    "Diversity": 11.003,
+    "Foot skate": 0.067,
+    "Traj err": 0.0,
+    "Loc err": 0.0,
+    "Avg err": 0.0,
+    "wall_seconds": 9009
+  },
+  "Right foot/100": {
+    "FID": 0.103,
+    "R@3": 0.765,
+    "Diversity": 10.986,
+    "Foot skate": 0.0588,
+    "Traj err": 0.0,
+    "Loc err": 0.0,
+    "Avg err": 0.0,
+    "wall_seconds": 8970
+  },
+  "Head/1": {
+    "FID": 0.128,
+    "R@3": 0.761,
+    "Diversity": 10.9,
+    "Foot skate": 0.0589,
+    "Traj err": 0.0,
+    "Loc err": 0.0,
+    "Avg err": 0.0,
+    "wall_seconds": 8888
+  },
+  "Head/2": {
+    "FID": 0.136,
+    "R@3": 0.76,
+    "Diversity": 10.956,
+    "Foot skate": 0.0616,
+    "Traj err": 0.0,
+    "Loc err": 0.0,
+    "Avg err": 0.0,
+    "wall_seconds": 8896
+  },
+  "Head/5": {
+    "FID": 0.107,
+    "R@3": 0.771,
+    "Diversity": 10.848,
+    "Foot skate": 0.0652,
+    "Traj err": 0.0,
+    "Loc err": 0.0,
+    "Avg err": 0.0,
+    "wall_seconds": 8990
+  },
+  "Head/25": {
+    "FID": 0.151,
+    "R@3": 0.777,
+    "Diversity": 10.947,
+    "Foot skate": 0.0652,
+    "Traj err": 0.0,
+    "Loc err": 0.0,
+    "Avg err": 0.0,
+    "wall_seconds": 8969
+  },
+  "Head/100": {
+    "FID": 0.1,
+    "R@3": 0.776,
+    "Diversity": 10.944,
+    "Foot skate": 0.0657,
+    "Traj err": 0.0,
+    "Loc err": 0.0,
+    "Avg err": 0.0,
+    "wall_seconds": 9040
+  },
+  "Left wrist/1": {
+    "FID": 0.095,
+    "R@3": 0.764,
+    "Diversity": 10.79,
+    "Foot skate": 0.0582,
+    "Traj err": 0.0,
+    "Loc err": 0.0,
+    "Avg err": 0.0,
+    "wall_seconds": 8948
+  },
+  "Left wrist/2": {
+    "FID": 0.078,
+    "R@3": 0.766,
+    "Diversity": 10.856,
+    "Foot skate": 0.0603,
+    "Traj err": 0.0,
+    "Loc err": 0.0,
+    "Avg err": 0.0,
+    "wall_seconds": 8891
+  },
+  "Left wrist/5": {
+    "FID": 0.09,
+    "R@3": 0.762,
+    "Diversity": 10.692,
+    "Foot skate": 0.0634,
+    "Traj err": 0.0,
+    "Loc err": 0.0,
+    "Avg err": 0.0,
+    "wall_seconds": 8941
+  },
+  "Left wrist/25": {
+    "FID": 0.136,
+    "R@3": 0.77,
+    "Diversity": 10.751,
+    "Foot skate": 0.0639,
+    "Traj err": 0.0,
+    "Loc err": 0.0,
+    "Avg err": 0.0,
+    "wall_seconds": 8991
+  },
+  "Left wrist/100": {
+    "FID": 0.087,
+    "R@3": 0.773,
+    "Diversity": 10.776,
+    "Foot skate": 0.0644,
+    "Traj err": 0.0,
+    "Loc err": 0.0,
+    "Avg err": 0.0,
+    "wall_seconds": 8874
+  },
+  "Right wrist/1": {
+    "FID": 0.094,
+    "R@3": 0.768,
+    "Diversity": 10.857,
+    "Foot skate": 0.0592,
+    "Traj err": 0.0,
+    "Loc err": 0.0,
+    "Avg err": 0.0,
+    "wall_seconds": 8874
+  },
+  "Right wrist/2": {
+    "FID": 0.084,
+    "R@3": 0.764,
+    "Diversity": 10.864,
+    "Foot skate": 0.0612,
+    "Traj err": 0.0,
+    "Loc err": 0.0,
+    "Avg err": 0.0,
+    "wall_seconds": 8864
+  },
+  "Right wrist/5": {
+    "FID": 0.09,
+    "R@3": 0.764,
+    "Diversity": 10.682,
+    "Foot skate": 0.0627,
+    "Traj err": 0.0,
+    "Loc err": 0.0,
+    "Avg err": 0.0,
+    "wall_seconds": 8903
+  },
+  "Right wrist/25": {
+    "FID": 0.145,
+    "R@3": 0.772,
+    "Diversity": 10.701,
+    "Foot skate": 0.063,
+    "Traj err": 0.0,
+    "Loc err": 0.0,
+    "Avg err": 0.0,
+    "wall_seconds": 3007
+  },
+  "Right wrist/100": {
+    "FID": 0.102,
+    "R@3": 0.773,
+    "Diversity": 10.702,
+    "Foot skate": 0.0643,
+    "Traj err": 0.0,
+    "Loc err": 0.0,
+    "Avg err": 0.0,
+    "wall_seconds": 2892
+  }
+}

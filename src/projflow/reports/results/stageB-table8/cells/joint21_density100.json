@@ -1,0 +1,43 @@
+{
+  "joint": 21,
+  "joint_name": "Right wrist",
+  "density": 100,
+  "n": 4525,
+  "seed": 24507,
+  "wall_seconds": 1037.3,
+  "sampling_seconds": 932.0,
+  "peak_gpu_gb": 16.94,
+  "fid": 0.10193355338935817,
+  "fid_processed": 0.06005614445170693,
+  "fid_floor": 0.06481625922126,
+  "r_precision": [
+    0.499113475177305,
+    0.6855053191489362,
+    0.7854609929078015
+  ],
+  "mm_dist": 3.106354236602783,
+  "diversity": 9.169967651367188,
+  "r_precision_real": [
+    0.5037677304964538,
+    0.6957003546099291,
+    0.7836879432624113
+  ],
+  "mm_dist_real": 3.0889275074005127,
+  "diversity_real": 8.980040550231934,
+  "r_precision_real_processed": [
+    0.50177304964539,
+    0.6863918439716312,
+    0.7810283687943262
+  ],
+  "diversity_real_processed": 9.370939254760742,
+  "traj_err": 0.0,
+  "loc_err": 0.0,
+  "avg_err": 1.2033734427170792e-08,
+  "max_keyframe_err": 6.723348633386195e-08,
+  "loc_err_upstream": 0.0,
+  "avg_err_upstream": 4.011244809056931e-09,
+  "skate_upstream": 0.06408953109505595,
+  "skate_ours": 0.39474546348192413,
+  "motion_mag": 0.011965238833131053,
+  "jerk": 0.00602759742131714
+}
